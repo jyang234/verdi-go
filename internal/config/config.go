@@ -26,6 +26,28 @@ type Config struct {
 	CatchAll    int    `yaml:"catchAll"`    // 0 => default 3
 	Rules       []Rule `yaml:"rules"`
 	Pins        []Pin  `yaml:"pins"`
+
+	// Canonicalization layer (canon spec §4).
+	Canon CanonConfig `yaml:"canon"`
+}
+
+// CanonConfig holds the policies the behavioral canonicalizer applies (canon
+// spec §4). Every field defaults, so an empty document yields the spec's
+// recommended defaults: retain tiers 1–2, the OTel-semconv attribute allowlist,
+// and the built-in redaction matchers.
+type CanonConfig struct {
+	// SalienceTier is the minimum tier retained in the snapshot: "warn" keeps
+	// tiers 1–2 (default), "info" keeps 1–3, "debug"/"all" keep everything. Spans
+	// above the threshold are dropped and their survivors promoted.
+	SalienceTier string `yaml:"salienceTier"`
+	// AttributeAllowlist adds keys to the built-in OTel-semconv allowlist rather
+	// than replacing it, so a service can keep one extra salient attribute without
+	// having to restate the defaults.
+	AttributeAllowlist []string `yaml:"attributeAllowlist"`
+	// RedactKeys names attribute keys whose values are always replaced with a type
+	// placeholder, on top of the built-in UUID / numeric-id / timestamp value
+	// matchers.
+	RedactKeys []string `yaml:"redactKeys"`
 }
 
 // ClassifyHints name the libraries flowmap cannot infer: loggers, the bus client,
@@ -98,7 +120,23 @@ func (c *Config) validate() error {
 			return fmt.Errorf("flowmap config: pins[%d].tier %d out of range 1..4", i, p.Tier)
 		}
 	}
+	if _, ok := salienceTiers[c.Canon.SalienceTier]; c.Canon.SalienceTier != "" && !ok {
+		return fmt.Errorf("flowmap config: canon.salienceTier %q not one of warn|info|debug|all", c.Canon.SalienceTier)
+	}
 	return nil
+}
+
+// salienceTiers maps a salience name to the maximum tier retained in a snapshot.
+var salienceTiers = map[string]int{"warn": 2, "info": 3, "debug": 4, "all": 4}
+
+// SalienceThreshold is the maximum (least consequential) tier kept in the
+// canonical snapshot; spans with a higher tier number are dropped and promoted.
+// Absent in config => "warn" => 2 (canon spec §4).
+func (c *Config) SalienceThreshold() int {
+	if t, ok := salienceTiers[c.Canon.SalienceTier]; ok {
+		return t
+	}
+	return 2
 }
 
 // UsesDefaults reports whether the built-in tier rules layer beneath user rules.

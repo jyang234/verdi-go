@@ -98,3 +98,41 @@ func TestLoadRejectsBadTier(t *testing.T) {
 		t.Fatal("expected error on tier out of range")
 	}
 }
+
+func TestCanonDefaults(t *testing.T) {
+	c, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.SalienceThreshold(); got != 2 {
+		t.Errorf("default SalienceThreshold = %d, want 2 (warn)", got)
+	}
+}
+
+func TestCanonSalienceTier(t *testing.T) {
+	const y = `
+canon:
+  salienceTier: info
+  attributeAllowlist: ["loan.product"]
+  redactKeys: ["customer.email"]
+`
+	c, err := Load([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.SalienceThreshold(); got != 3 {
+		t.Errorf("info SalienceThreshold = %d, want 3", got)
+	}
+	if len(c.Canon.AttributeAllowlist) != 1 || c.Canon.AttributeAllowlist[0] != "loan.product" {
+		t.Errorf("attributeAllowlist = %v", c.Canon.AttributeAllowlist)
+	}
+	if len(c.Canon.RedactKeys) != 1 {
+		t.Errorf("redactKeys = %v", c.Canon.RedactKeys)
+	}
+}
+
+func TestCanonRejectsBadSalienceTier(t *testing.T) {
+	if _, err := Load([]byte("canon:\n  salienceTier: loud\n")); err == nil {
+		t.Fatal("expected error on bad salienceTier")
+	}
+}
