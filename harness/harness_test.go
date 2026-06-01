@@ -273,3 +273,44 @@ func countKind(spans []capture.Span, k ir.Kind) int {
 	}
 	return n
 }
+
+// TestParallelFlowsAreIsolated is the regression that justifies the shared,
+// install-once provider: two flows run in parallel against the same global OTel
+// pipeline and must each capture only their own spans, isolated by test.run.id —
+// no cross-contamination. Run this under -race to exercise the shared recorder.
+func TestParallelFlowsAreIsolated(t *testing.T) {
+	run := func(service, event string) func(*testing.T) {
+		return func(t *testing.T) {
+			t.Parallel()
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /x", func(w http.ResponseWriter, r *http.Request) {
+				_, p := otel.Tracer("svc").Start(r.Context(), "publish", oteltrace.WithSpanKind(oteltrace.SpanKindProducer))
+				p.SetAttributes(attribute.String("messaging.destination.name", event))
+				time.Sleep(5 * time.Millisecond) // overlap the sibling flow
+				p.End()
+				w.WriteHeader(http.StatusOK)
+			})
+			app := harness.NewInProcess(t, mux, harness.WithService(service))
+			cf, err := app.HTTP("POST", "/x", nil).Capture(harness.CaptureOptions{
+				Markers: []string{"PUBLISH " + event},
+				Quiet:   10 * time.Millisecond,
+				Timeout: 2 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			if cf.Service != service {
+				t.Errorf("service = %q, want %q", cf.Service, service)
+			}
+			// Every publish in this scoped flow must be THIS flow's event — the
+			// sibling's spans must not leak in.
+			for _, s := range cf.Spans {
+				if ev := s.Attrs["messaging.destination.name"]; ev != "" && ev != event {
+					t.Errorf("captured a foreign publish %q in the %q flow", ev, service)
+				}
+			}
+		}
+	}
+	t.Run("A", run("svc-a", "evt.a"))
+	t.Run("B", run("svc-b", "evt.b"))
+}

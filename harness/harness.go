@@ -13,13 +13,12 @@
 package harness
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -27,7 +26,6 @@ import (
 	otelbaggage "go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -42,7 +40,6 @@ import (
 // a testing import on non-test consumers and stays mockable.
 type TB interface {
 	Helper()
-	Cleanup(func())
 	Fatalf(format string, args ...any)
 }
 
@@ -69,40 +66,50 @@ type Option func(*options)
 // service.name and stamped onto the canonical trace.
 func WithService(name string) Option { return func(o *options) { o.service = name } }
 
-// NewInProcess installs an in-process OTel pipeline for the duration of the test
-// and returns a harness over handler (the service's real router). It sets the
-// global tracer provider and propagator so the instrumented service-under-test —
-// which obtains its tracer from otel.Tracer — emits into the in-memory recorder,
-// and restores the previous globals on cleanup.
+// The OTel pipeline is installed once per process and shared by every harness.
+// The OTel global tracer provider is a process-wide singleton that binds
+// instrumentation tracers on first install; swapping it per test (the previous
+// design) is unsafe under parallel tests and fragile across test ordering.
+// Installing once and scoping every flow by its unique test.run.id (see Capture)
+// isolates flows without touching global state per test, which makes
+// NewInProcess parallel-safe. The trade-off is that the shared recorder
+// accumulates ended spans for the process lifetime — bounded and fine for a test
+// binary, since each flow reads only its own runID-scoped subset.
+var (
+	installOnce    sync.Once
+	sharedRecorder *tracetest.SpanRecorder
+	sharedProvider *sdktrace.TracerProvider
+	sharedProp     propagation.TextMapPropagator
+)
+
+func install() {
+	installOnce.Do(func() {
+		sharedRecorder = tracetest.NewSpanRecorder()
+		sharedProvider = sdktrace.NewTracerProvider(
+			sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			sdktrace.WithSpanProcessor(startProcessor{}),
+			sdktrace.WithSpanProcessor(sharedRecorder),
+		)
+		sharedProp = propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+		otel.SetTracerProvider(sharedProvider)
+		otel.SetTextMapPropagator(sharedProp)
+	})
+}
+
+// NewInProcess returns a harness over handler (the service's real router) backed
+// by the process-shared in-memory OTel pipeline (installed once). The
+// service-under-test, obtaining its tracer from otel.Tracer, emits into the
+// shared recorder; each flow is isolated by its test.run.id, so concurrent
+// harnesses and parallel tests are safe. WithService is per-harness (it is
+// stamped onto the canonical trace), independent of the shared provider.
 func NewInProcess(t TB, handler http.Handler, opts ...Option) *App {
 	t.Helper()
 	o := options{service: "service"}
 	for _, fn := range opts {
 		fn(&o)
 	}
-
-	rec := tracetest.NewSpanRecorder()
-	res, _ := resource.New(context.Background(),
-		resource.WithAttributes(attribute.String("service.name", o.service)))
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(startProcessor{}),
-		sdktrace.WithSpanProcessor(rec),
-	)
-	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
-
-	prevTP := otel.GetTracerProvider()
-	prevProp := otel.GetTextMapPropagator()
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(prop)
-	t.Cleanup(func() {
-		_ = tp.Shutdown(context.Background())
-		otel.SetTracerProvider(prevTP)
-		otel.SetTextMapPropagator(prevProp)
-	})
-
-	return &App{t: t, handler: handler, rec: rec, tp: tp, prop: prop, service: o.service}
+	install()
+	return &App{t: t, handler: handler, rec: sharedRecorder, tp: sharedProvider, prop: sharedProp, service: o.service}
 }
 
 // goroutineAttr is the span attribute the start processor stamps with the
@@ -128,22 +135,7 @@ func (startProcessor) OnEnd(sdktrace.ReadOnlySpan)      {}
 func (startProcessor) Shutdown(context.Context) error   { return nil }
 func (startProcessor) ForceFlush(context.Context) error { return nil }
 
-// goid returns the current goroutine's id by parsing the runtime stack header
-// ("goroutine N [state]:"). There is no public API for this; it is confined to
-// this test-harness boundary and used only as the structural concurrency signal.
-func goid() uint64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	fields := bytes.Fields(buf[:n])
-	if len(fields) < 2 {
-		return 0
-	}
-	id, err := strconv.ParseUint(string(fields[1]), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
-}
+// goid is defined in goid.go (the structural concurrency signal).
 
 // Pending is a triggered-but-not-yet-collected flow. Call Capture to await
 // quiescence and produce the scoped CapturedFlow.
