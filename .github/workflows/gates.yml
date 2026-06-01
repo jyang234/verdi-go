@@ -16,8 +16,8 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l . | grep -v '^testdata/fixtures/loansvc/')"
       - run: go test ./...
-      - name: build fixture module
-        run: cd testdata/fixtures/loansvc && go build ./...
+      - name: build and gate fixture module
+        run: cd testdata/fixtures/loansvc && go build ./... && go test ./...
 
 # Phase 8 adds the two gate jobs:
 #   currency-gate:  flowmap boundary --check   (regenerate boundary contract + git diff --exit-code)
