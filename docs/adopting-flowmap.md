@@ -75,6 +75,14 @@ Generate the goldens the first time (and after an intended behavior change):
 go test ./flows/ -update    # writes *.golden.json + *.flow.md, then commit them
 ```
 
+**Flows must be idempotent.** `Run` re-drives the flow 3× by default for the
+determinism self-test (this is what varies goroutine scheduling), so its side
+effects (DB writes, publishes) happen 3×. Use a fresh fixture/transaction per run,
+or `flow.New(...).SelfTest(1)` to opt down to a single execution (trading
+scheduling-variation coverage). Flow tests are parallel-safe — the harness
+installs one process-wide OTel pipeline and isolates each flow by a unique
+`test.run.id`, so `t.Parallel()` is fine.
+
 A real datastore (testcontainers Postgres) makes the DB portion trustworthy; a
 SQLite or fake-driver stand-in is fine for fast, hermetic runs — the snapshot is
 a faithful function of the *test*, so a thin double yields a thin (but honest)
@@ -113,6 +121,14 @@ Route the gated artifacts and the per-flow tests to a human in `CODEOWNERS`:
 logger, DB layer, and outbound HTTP/RPC seam — plus any tier overrides. Standard
 stdlib/OTel usage needs none of this; the common addition is naming your internal
 bus client. See `testdata/fixtures/loansvc/.flowmap.yaml`.
+
+Interface-dense services can raise the over-approximation flag threshold under
+`static:`:
+
+```yaml
+static:
+  highFanOutThreshold: 20   # default 8; flags dynamic-dispatch sites with more callees
+```
 
 ---
 

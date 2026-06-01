@@ -135,3 +135,18 @@ func analyzeModule(t *testing.T, files map[string]string) *analyze.Result {
 	}
 	return res
 }
+
+// TestHighFanOutThresholdConfigurable raises the threshold above the synthetic
+// module's fan-out and confirms the disclosure is suppressed — proving the knob.
+func TestHighFanOutThresholdConfigurable(t *testing.T) {
+	res := analyzeModule(t, map[string]string{
+		"go.mod":        "module example.com/m\n\ngo 1.24\n",
+		".flowmap.yaml": "static:\n  highFanOutThreshold: 20\n",
+		"main.go":       highFanOutMain(10), // 10 callees < 20 threshold
+	})
+	for _, b := range blindspots.Detect(res, features.NewHintSet(res.Config)) {
+		if b.Kind == blindspots.HighFanOut {
+			t.Errorf("fan-out of 10 should be under the configured threshold of 20, got %+v", b)
+		}
+	}
+}

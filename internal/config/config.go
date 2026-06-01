@@ -29,6 +29,28 @@ type Config struct {
 
 	// Canonicalization layer (canon spec §4).
 	Canon CanonConfig `yaml:"canon"`
+
+	// Static-analysis layer (static-extractor spec).
+	Static StaticConfig `yaml:"static"`
+}
+
+// StaticConfig holds knobs for the static pipeline.
+type StaticConfig struct {
+	// HighFanOutThreshold is the callee count above which a single dynamic-dispatch
+	// site is flagged as likely over-approximation in the (non-gated) graph
+	// blind-spots. 0 => the built-in default. Interface-dense services may raise it.
+	HighFanOutThreshold int `yaml:"highFanOutThreshold"`
+}
+
+// defaultHighFanOutThreshold is the built-in fan-out flag threshold.
+const defaultHighFanOutThreshold = 8
+
+// FanOutThreshold returns the configured high-fan-out threshold, or the default.
+func (c *Config) FanOutThreshold() int {
+	if c.Static.HighFanOutThreshold > 0 {
+		return c.Static.HighFanOutThreshold
+	}
+	return defaultHighFanOutThreshold
 }
 
 // CanonConfig holds the policies the behavioral canonicalizer applies (canon
@@ -109,6 +131,9 @@ func Load(b []byte) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if c.Static.HighFanOutThreshold < 0 {
+		return fmt.Errorf("flowmap config: static.highFanOutThreshold %d must be >= 0", c.Static.HighFanOutThreshold)
+	}
 	if c.CatchAll < 0 || c.CatchAll > 4 {
 		return fmt.Errorf("flowmap config: catchAll %d out of range 0..4", c.CatchAll)
 	}

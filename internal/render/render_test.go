@@ -4,16 +4,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/irtest"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
 func span(op string, kind ir.Kind, peer string, kids ...ir.ChildGroup) *ir.CanonicalSpan {
-	return &ir.CanonicalSpan{Op: op, Kind: kind, Peer: peer, Tier: 1, Children: kids}
+	return irtest.Span(op, kind, peer, kids...)
 }
-func seq(members ...*ir.CanonicalSpan) ir.ChildGroup { return ir.ChildGroup{Members: members} }
-func conc(members ...*ir.CanonicalSpan) ir.ChildGroup {
-	return ir.ChildGroup{Concurrent: true, Members: members}
-}
+func seq(members ...*ir.CanonicalSpan) ir.ChildGroup  { return irtest.Seq(members...) }
+func conc(members ...*ir.CanonicalSpan) ir.ChildGroup { return irtest.Conc(members...) }
 
 // fixtureIR is the post-canon loan-application shape: a concurrent DB-read ∥
 // credit-bureau pair, then sequential charge, publish, and a self-internal audit.

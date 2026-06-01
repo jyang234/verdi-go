@@ -12,6 +12,7 @@ package render
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/ir"
@@ -186,20 +187,8 @@ func isASCIILetter(c byte) bool {
 func uniqueID(base string, used map[string]bool) string {
 	id := base
 	for i := 1; used[id]; i++ {
-		id = base + itoa(i)
+		id = base + strconv.Itoa(i)
 	}
 	used[id] = true
 	return id
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var d []byte
-	for i > 0 {
-		d = append([]byte{byte('0' + i%10)}, d...)
-		i /= 10
-	}
-	return string(d)
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,4 +250,36 @@ func anyContains(ss []string, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestSelfTestRunCount proves SelfTest(n) controls how many times Run re-drives
+// the flow — the knob that lets a non-idempotent flow opt down to a single
+// execution.
+func TestSelfTestRunCount(t *testing.T) {
+	var calls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /x", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, p := otel.Tracer("svc").Start(r.Context(), "publish", oteltrace.WithSpanKind(oteltrace.SpanKindProducer))
+		p.SetAttributes(attribute.String("messaging.destination.name", "e"))
+		p.End()
+		w.WriteHeader(http.StatusOK)
+	})
+	app := harness.NewInProcess(t, mux, harness.WithService("svc"))
+	restore := setUpdate(t, true) // write the golden so Compare passes; we only count drives
+	defer restore()
+
+	count := func(f *flow.Flow) int32 {
+		atomic.StoreInt32(&calls, 0)
+		f.Trigger("POST", "/x").Expect("PUBLISH e").
+			GoldensDir(t.TempDir()).Quiescence(10*time.Millisecond, time.Second).Run(t, app)
+		return atomic.LoadInt32(&calls)
+	}
+
+	if n := count(flow.New("once").SelfTest(1)); n != 1 {
+		t.Errorf("SelfTest(1) drove the flow %d times, want 1", n)
+	}
+	if n := count(flow.New("default")); n != 3 {
+		t.Errorf("default self-test drove the flow %d times, want 3", n)
+	}
 }

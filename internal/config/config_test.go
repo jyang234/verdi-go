@@ -136,3 +136,23 @@ func TestCanonRejectsBadSalienceTier(t *testing.T) {
 		t.Fatal("expected error on bad salienceTier")
 	}
 }
+
+func TestFanOutThreshold(t *testing.T) {
+	def, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := def.FanOutThreshold(); got != 8 {
+		t.Errorf("default FanOutThreshold = %d, want 8", got)
+	}
+	custom, err := Load([]byte("static:\n  highFanOutThreshold: 20\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := custom.FanOutThreshold(); got != 20 {
+		t.Errorf("custom FanOutThreshold = %d, want 20", got)
+	}
+	if _, err := Load([]byte("static:\n  highFanOutThreshold: -1\n")); err == nil {
+		t.Fatal("expected error on negative highFanOutThreshold")
+	}
+}

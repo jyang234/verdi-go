@@ -4,17 +4,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/irtest"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
 func sp(op string, kind ir.Kind, peer string, kids ...ir.ChildGroup) *ir.CanonicalSpan {
-	return &ir.CanonicalSpan{Op: op, Kind: kind, Peer: peer, Tier: 1, Children: kids}
+	return irtest.Span(op, kind, peer, kids...)
 }
-func seq(m ...*ir.CanonicalSpan) ir.ChildGroup  { return ir.ChildGroup{Members: m} }
-func conc(m ...*ir.CanonicalSpan) ir.ChildGroup { return ir.ChildGroup{Concurrent: true, Members: m} }
-func tr(root *ir.CanonicalSpan) *ir.CanonicalTrace {
-	return &ir.CanonicalTrace{Flow: "f", Service: "loansvc", Root: root}
-}
+func seq(m ...*ir.CanonicalSpan) ir.ChildGroup     { return irtest.Seq(m...) }
+func conc(m ...*ir.CanonicalSpan) ir.ChildGroup    { return irtest.Conc(m...) }
+func tr(root *ir.CanonicalSpan) *ir.CanonicalTrace { return irtest.Trace("loansvc", root) }
 
 func root(kids ...ir.ChildGroup) *ir.CanonicalSpan {
 	return sp("HTTP POST /loan-application", ir.KindServer, "", kids...)

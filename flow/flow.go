@@ -15,6 +15,7 @@ package flow
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/jyang234/golang-code-graph/harness"
@@ -24,9 +25,16 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
-// selfTestRuns is how many times Run re-drives the flow to prove the capture →
-// canon transform is deterministic before it trusts the snapshot (canon §5).
-const selfTestRuns = 3
+// defaultSelfTestRuns is how many times Run re-drives the flow to prove the
+// capture → canon transform is deterministic before it trusts the snapshot
+// (canon §5). Re-driving — rather than re-canonicalizing one capture — is what
+// varies goroutine scheduling, which is the determinism risk worth catching.
+//
+// Because Run executes the whole flow this many times, the flow's side effects
+// (DB writes, publishes) happen this many times: a flow must be idempotent or
+// re-seed its fixtures per run, or set SelfTest(1) to opt out (trading
+// scheduling-variation coverage for a single execution).
+const defaultSelfTestRuns = 3
 
 // TB is the subset of *testing.T the DSL needs.
 type TB interface {
@@ -38,11 +46,12 @@ type TB interface {
 
 // Flow is a declared flow under test, built fluently and run with Run.
 type Flow struct {
-	name    string
-	dir     string
-	tier    string
-	quiet   time.Duration
-	timeout time.Duration
+	name     string
+	dir      string
+	tier     string
+	quiet    time.Duration
+	timeout  time.Duration
+	selfTest int
 
 	trigger func(*harness.App) *harness.Pending
 	expect  []expectation
@@ -56,7 +65,19 @@ type expectation struct {
 // New starts a flow declaration. name is the stable flow id; it is also the
 // golden file stem.
 func New(name string) *Flow {
-	return &Flow{name: name, dir: "testdata/flows", tier: "warn"}
+	return &Flow{name: name, dir: "testdata/flows", tier: "warn", selfTest: defaultSelfTestRuns}
+}
+
+// SelfTest sets how many times Run re-drives the flow for the determinism
+// self-test (default 3). Use SelfTest(1) for a flow whose side effects are not
+// idempotent and not re-seeded per run; this trades scheduling-variation
+// coverage for a single execution. Values below 1 are treated as 1.
+func (f *Flow) SelfTest(n int) *Flow {
+	if n < 1 {
+		n = 1
+	}
+	f.selfTest = n
+	return f
 }
 
 // Trigger drives the flow as an inbound HTTP request through the real router.
@@ -124,8 +145,12 @@ func (f *Flow) Run(t TB, app *harness.App) {
 		markers = append(markers, e.op)
 	}
 
-	traces := make([]*ir.CanonicalTrace, 0, selfTestRuns)
-	for i := 0; i < selfTestRuns; i++ {
+	runs := f.selfTest
+	if runs < 1 {
+		runs = defaultSelfTestRuns
+	}
+	traces := make([]*ir.CanonicalTrace, 0, runs)
+	for i := 0; i < runs; i++ {
 		cf, err := f.trigger(app).Capture(harness.CaptureOptions{
 			Markers: markers,
 			Quiet:   f.quiet,
@@ -207,24 +232,5 @@ func pluralCount(n int) string {
 	if n == 1 {
 		return "1 occurrence"
 	}
-	return itoa(n) + " occurrences"
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var d []byte
-	for i > 0 {
-		d = append([]byte{byte('0' + i%10)}, d...)
-		i /= 10
-	}
-	if neg {
-		d = append([]byte{'-'}, d...)
-	}
-	return string(d)
+	return strconv.Itoa(n) + " occurrences"
 }

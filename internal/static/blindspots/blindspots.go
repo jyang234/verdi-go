@@ -18,6 +18,7 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 )
@@ -44,12 +45,6 @@ const (
 	// visible call graph.
 	Linkname Kind = "go:linkname"
 )
-
-// highFanOutThreshold is the callee count above which a single dynamic-dispatch
-// site is flagged as likely over-approximation. The fixture's two-implementation
-// interface (2 callees) stays well under it; a genuinely polymorphic site (a
-// widely-implemented interface) trips it.
-const highFanOutThreshold = 8
 
 // Boundary reports whether a blind spot belongs to the GATED boundary subset.
 // Only the categories that describe an inter-service boundary surface gate: a
@@ -93,6 +88,11 @@ func filter(bs []BlindSpot, keep func(Kind) bool) []BlindSpot {
 // Boundary / Graph.
 func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 	var out []BlindSpot
+	cfg := res.Config
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	fanOut := cfg.FanOutThreshold()
 
 	// Unresolved handler registrations, surfaced by root discovery.
 	for _, bs := range res.Roots.BlindSpots {
@@ -148,7 +148,7 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 			}
 		}
 		for _, callees := range perSite {
-			if len(callees) > highFanOutThreshold {
+			if len(callees) > fanOut {
 				out = append(out, BlindSpot{
 					Kind:   HighFanOut,
 					Site:   site,

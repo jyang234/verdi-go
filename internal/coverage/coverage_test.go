@@ -9,17 +9,16 @@ import (
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/coverage"
+	"github.com/jyang234/golang-code-graph/internal/irtest"
 	"github.com/jyang234/golang-code-graph/internal/static/boundary"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
 func sp(op string, kind ir.Kind, peer string, kids ...ir.ChildGroup) *ir.CanonicalSpan {
-	return &ir.CanonicalSpan{Op: op, Kind: kind, Peer: peer, Tier: 1, Children: kids}
+	return irtest.Span(op, kind, peer, kids...)
 }
-func seq(m ...*ir.CanonicalSpan) ir.ChildGroup { return ir.ChildGroup{Members: m} }
-func trace(root *ir.CanonicalSpan) *ir.CanonicalTrace {
-	return &ir.CanonicalTrace{Service: "loansvc", Root: root}
-}
+func seq(m ...*ir.CanonicalSpan) ir.ChildGroup        { return irtest.Seq(m...) }
+func trace(root *ir.CanonicalSpan) *ir.CanonicalTrace { return irtest.Trace("loansvc", root) }
 
 // loansvcContract mirrors the fixture's gated boundary: three published events,
 // one consumed event, two external HTTP dependencies.
