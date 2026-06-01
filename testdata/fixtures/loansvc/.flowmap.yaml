@@ -1,0 +1,13 @@
+version: 1
+service: loansvc
+
+# classify names the libraries flowmap cannot infer. The bus and the outbound
+# HTTP seam are this fixture's own packages; database/sql is a built-in DB hint
+# shown here only for clarity.
+classify:
+  busPublish: ["example.com/loansvc/internal/eventbus#Publish"]
+  busConsume: ["example.com/loansvc/internal/eventbus#Subscribe"]
+  db: ["database/sql"]
+  http: ["example.com/loansvc/internal/client#Call"]
+
+# salience, static algorithm, and gate behavior are all defaulted.

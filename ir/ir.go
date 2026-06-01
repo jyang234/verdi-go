@@ -1,0 +1,82 @@
+// Package ir defines flowmap's authoritative canonical intermediate
+// representation: the deterministic, run-independent shape of one exercised flow.
+// It is the gated golden file's on-disk form and the single type shared by the
+// canonicalizer (which produces it) and the renderer, diff, and golden lifecycle
+// (which read it).
+//
+// This package is part of flowmap's PUBLIC API. Target service repositories
+// depend on it (transitively, through the flow and harness packages) when they
+// author flow tests, so its exported shape is a stable contract.
+package ir
+
+import (
+	"encoding/json"
+
+	"github.com/jyang234/golang-code-graph/internal/canonjson"
+)
+
+// Kind mirrors the OTel span kind of an operation.
+type Kind string
+
+const (
+	KindServer   Kind = "server"
+	KindClient   Kind = "client"
+	KindInternal Kind = "internal"
+	KindProducer Kind = "producer"
+	KindConsumer Kind = "consumer"
+)
+
+// CanonicalTrace is the deterministic representation of one exercised flow.
+// Equality of two traces (ignoring Discards) is the snapshot assertion.
+type CanonicalTrace struct {
+	Flow     string          `json:"flow"`
+	Service  string          `json:"service"`
+	Root     *CanonicalSpan  `json:"root"`
+	Discards DiscardManifest `json:"discards"`
+}
+
+// CanonicalSpan is one normalized operation in the flow tree.
+type CanonicalSpan struct {
+	Op        string            `json:"op"`
+	Kind      Kind              `json:"kind"`
+	Peer      string            `json:"peer"`
+	Tier      int               `json:"tier"`
+	Status    string            `json:"status,omitempty"`
+	ErrorType string            `json:"errorType,omitempty"`
+	Attrs     map[string]string `json:"attrs,omitempty"`
+	Children  []ChildGroup      `json:"children,omitempty"`
+}
+
+// ChildGroup makes ordering semantics explicit. Groups are emitted in
+// happens-before order; within a Concurrent group, members are stored in
+// canonical-key order so a race does not perturb the snapshot.
+type ChildGroup struct {
+	Concurrent   bool             `json:"concurrent,omitempty"`
+	Multiplicity string           `json:"multiplicity,omitempty"`
+	Members      []*CanonicalSpan `json:"members"`
+}
+
+// DiscardManifest records, for review transparency, which dimensions were dropped
+// during canonicalization. It carries only deterministic markers — never volatile
+// counts — and is excluded from snapshot equality.
+type DiscardManifest struct {
+	IDs        string   `json:"ids,omitempty"`        // e.g. "dropped"
+	Timing     string   `json:"timing,omitempty"`     // e.g. "dropped"
+	Redactions []string `json:"redactions,omitempty"` // sorted attribute keys redacted
+	Loops      []string `json:"loops,omitempty"`      // sorted ops collapsed by multiplicity
+}
+
+// Marshal renders the trace as canonical, deterministic JSON — the golden file's
+// bytes.
+func (t *CanonicalTrace) Marshal() ([]byte, error) {
+	return canonjson.Marshal(t)
+}
+
+// Load parses canonical JSON produced by Marshal back into a trace.
+func Load(b []byte) (*CanonicalTrace, error) {
+	var t CanonicalTrace
+	if err := json.Unmarshal(b, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}

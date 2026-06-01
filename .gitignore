@@ -1,0 +1,9 @@
+# built binaries
+/flowmap
+/testdata/fixtures/loansvc/loansvc
+# test & build detritus
+*.test
+*.out
+coverage.*
+# macOS
+.DS_Store

@@ -1,0 +1,69 @@
+{
+  "service": "loansvc",
+  "schema_version": "flowmap.boundary/v1",
+  "entrypoints": {
+    "http": [
+      {
+        "method": "POST",
+        "route": "/loan-application",
+        "tier": 1
+      },
+      {
+        "method": "GET",
+        "route": "/loan-application/{id}/status",
+        "tier": 1
+      }
+    ],
+    "consumers": [
+      {
+        "event": "payment.settled",
+        "tier": 1
+      }
+    ]
+  },
+  "published": [
+    {
+      "event": "disbursement.initiated",
+      "tier": 1
+    },
+    {
+      "event": "loan.approved",
+      "tier": 1
+    },
+    {
+      "event": "loan.declined",
+      "tier": 1
+    }
+  ],
+  "consumed": [
+    {
+      "event": "payment.settled",
+      "tier": 1
+    }
+  ],
+  "external_dependencies": [
+    {
+      "peer": "credit-bureau",
+      "kind": "http",
+      "ops": [
+        "GET /score/{id}"
+      ],
+      "tier": 1
+    },
+    {
+      "peer": "payment-gw",
+      "kind": "http",
+      "ops": [
+        "POST /charge/{id}"
+      ],
+      "tier": 1
+    }
+  ],
+  "blind_spots": [
+    {
+      "kind": "NonConstantBoundaryArg",
+      "site": "(*example.com/loansvc/internal/origination.Evaluator).notify",
+      "detail": "publish event name is not a string constant; the published event cannot be named statically"
+    }
+  ]
+}
