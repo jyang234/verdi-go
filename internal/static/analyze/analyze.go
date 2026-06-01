@@ -6,11 +6,6 @@
 package analyze
 
 import (
-	"errors"
-	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/config"
@@ -19,9 +14,6 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/roots"
 	"github.com/jyang234/golang-code-graph/internal/static/ssabuild"
 )
-
-// ConfigFile is the per-service config document's name.
-const ConfigFile = ".flowmap.yaml"
 
 // Result is the analyzed service unit.
 type Result struct {
@@ -36,7 +28,7 @@ type Result struct {
 // Analyze runs load → SSA → roots → call graph for the service at dir. A missing
 // .flowmap.yaml is fine (defaults apply); a malformed one is an error.
 func Analyze(dir string) (*Result, error) {
-	cfg, err := loadConfig(dir)
+	cfg, err := config.LoadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -86,17 +78,6 @@ func Registrars(cfg *config.Config) []roots.Registrar {
 		})
 	}
 	return regs
-}
-
-func loadConfig(dir string) (*config.Config, error) {
-	b, err := os.ReadFile(filepath.Join(dir, ConfigFile))
-	if errors.Is(err, fs.ErrNotExist) {
-		return &config.Config{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("analyze: read %s: %w", ConfigFile, err)
-	}
-	return config.Load(b)
 }
 
 func splitHint(s string) (pkgPath, name string) {

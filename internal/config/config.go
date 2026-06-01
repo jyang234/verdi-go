@@ -10,9 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
+
+// FileName is the per-service config document's name. It is the single source of
+// truth for the filename across both pipelines: the static analyzer and the
+// behavioral flow runner both discover and load it through this package.
+const FileName = ".flowmap.yaml"
 
 // Config mirrors .flowmap.yaml. Tier rules and pins are ordered slices, never
 // maps, because map iteration order is non-deterministic and first-match wins.
@@ -113,6 +121,53 @@ type MatchSpec struct {
 type Pin struct {
 	Identity string `yaml:"identity"`
 	Tier     int    `yaml:"tier"`
+}
+
+// LoadDir reads and validates the FileName document in dir. It is the single
+// config-loading path both the static and behavioral pipelines use, so they
+// always agree on a service's tier rules, pins, and canon knobs. A missing file
+// is not an error — it yields the zero Config (defaults apply); an unreadable or
+// malformed file is a hard error.
+func LoadDir(dir string) (*Config, error) {
+	path := filepath.Join(dir, FileName)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Config{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("flowmap config: read %s: %w", path, err)
+	}
+	return Load(b)
+}
+
+// Discover walks up from startDir for a FileName document and returns the
+// directory holding it. The search is bounded to the enclosing module: it stops
+// at the first directory containing a go.mod (the module root), so a stray
+// .flowmap.yaml in a parent module, the repository root, or a developer's home
+// directory is never picked up. This mirrors how a per-service config lives at
+// its service module root. Returns ok=false when no in-module config exists.
+func Discover(startDir string) (dir string, ok bool) {
+	d := startDir
+	for {
+		if fileExists(filepath.Join(d, FileName)) {
+			return d, true
+		}
+		// The module root bounds the search: the config is a per-service document
+		// at or below its module root, never above it.
+		if fileExists(filepath.Join(d, "go.mod")) {
+			return "", false
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return "", false
+		}
+		d = parent
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // Load parses and validates a .flowmap.yaml document. Unknown keys are rejected.

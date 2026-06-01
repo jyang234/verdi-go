@@ -16,7 +16,6 @@ package flow
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -213,28 +212,21 @@ func (f *Flow) Run(t TB, app *harness.App) {
 	}
 }
 
-// configFileName is the per-service config document; it must match the static
-// pipeline's analyze.ConfigFile. It is duplicated here as a constant rather than
-// imported so the public flow package does not depend on the static analyzer.
-const configFileName = ".flowmap.yaml"
-
-// resolveConfig loads the service's .flowmap.yaml so canonicalization applies the
-// same tier rules, pins, and canon knobs the static boundary pipeline does — the
+// resolveConfig loads the service's .flowmap.yaml through the same package the
+// static boundary pipeline uses (config.LoadDir / config.Discover), so
+// canonicalization applies the identical tier rules, pins, and canon knobs — the
 // tier-map is one classifier across both pipelines. The per-flow Tier overrides
-// the config's salience threshold. A missing file yields defaults; a malformed
-// one is a hard error (matching the static loader).
+// the config's salience threshold. A missing file yields defaults; an unreadable
+// or malformed one is a hard error.
 func (f *Flow) resolveConfig(t TB) *config.Config {
 	cfg := &config.Config{}
-	if path := f.findConfigFile(); path != "" {
-		b, err := os.ReadFile(path)
-		if err == nil {
-			loaded, lerr := config.Load(b)
-			if lerr != nil {
-				t.Fatalf("flow %q: load %s: %v", f.name, path, lerr)
-				return cfg
-			}
-			cfg = loaded
+	if dir, ok := f.configSearchDir(); ok {
+		loaded, err := config.LoadDir(dir)
+		if err != nil {
+			t.Fatalf("flow %q: %v", f.name, err)
+			return cfg
 		}
+		cfg = loaded
 	}
 	if f.tier != "" {
 		cfg.Canon.SalienceTier = f.tier // per-flow override
@@ -242,32 +234,20 @@ func (f *Flow) resolveConfig(t TB) *config.Config {
 	return cfg
 }
 
-// findConfigFile returns the path to the service's .flowmap.yaml: ConfigDir if
-// set, else discovered by walking up from the working directory (like go.mod
-// discovery). Returns "" when none is found.
-func (f *Flow) findConfigFile() string {
+// configSearchDir reports the directory to load .flowmap.yaml from: the explicit
+// ConfigDir if set, else module-bounded discovery walking up from the working
+// directory. config.Discover stops at the enclosing module root (go.mod), so a
+// stray .flowmap.yaml in a parent module, the repo root, or the developer's home
+// directory is never silently applied to a flow that did not opt into it.
+func (f *Flow) configSearchDir() (string, bool) {
 	if f.configDir != "" {
-		p := filepath.Join(f.configDir, configFileName)
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-		return ""
+		return f.configDir, true
 	}
-	dir, err := os.Getwd()
+	wd, err := os.Getwd()
 	if err != nil {
-		return ""
+		return "", false
 	}
-	for {
-		p := filepath.Join(dir, configFileName)
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
+	return config.Discover(wd)
 }
 
 func marshal(t *ir.CanonicalTrace) string {
