@@ -1,15 +1,17 @@
-// Command flowmap is the CLI for the flowmap verification system. Phase 3 adds
-// the static subcommands: `boundary` (generate or --check the gated boundary
-// contract) and `graph` (print the non-gated call-graph view). Phase 7 adds
-// `diff` (the structural change set between two canonical traces); `coverage`
-// arrives in a later phase.
+// Command flowmap is the CLI for the flowmap verification system: the static
+// subcommands `boundary` (generate or --check the gated boundary contract) and
+// `graph` (the non-gated call-graph view); `diff` (the structural change set
+// between two canonical traces); and `coverage` (boundary effects no flow
+// exercises).
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/jyang234/golang-code-graph/internal/coverage"
 	"github.com/jyang234/golang-code-graph/internal/diff"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/boundary"
@@ -42,6 +44,8 @@ func run(args []string) error {
 		return cmdGraph(args[1:])
 	case "diff":
 		return cmdDiff(args[1:])
+	case "coverage":
+		return cmdCoverage(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -143,6 +147,60 @@ func cmdDiff(args []string) error {
 	return fmt.Errorf("%d behavioral change(s) detected", len(changes))
 }
 
+// cmdCoverage reports the boundary effects that no committed flow exercises — the
+// delta between the static boundary (all reachable effects) and the union of
+// behavioral snapshots (tested effects). It is informational (exit 0): coverage
+// gaps are feedback, not a gate failure.
+func cmdCoverage(args []string) error {
+	fs := flag.NewFlagSet("coverage", flag.ContinueOnError)
+	flowsDir := fs.String("flows", "", "directory of committed *.golden.json snapshots (default: <dir>/testdata/flows)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir := dirArg(fs)
+	gdir := *flowsDir
+	if gdir == "" {
+		gdir = filepath.Join(dir, "testdata", "flows")
+	}
+
+	c, err := boundary.Generate(dir)
+	if err != nil {
+		return err
+	}
+	traces, err := loadGoldens(gdir)
+	if err != nil {
+		return err
+	}
+
+	r := coverage.Delta(c, traces)
+	if r.Empty() {
+		fmt.Printf("coverage: every boundary effect is exercised by %d flow(s)\n", len(traces))
+		return nil
+	}
+	fmt.Printf("coverage: %d boundary effect(s) unexercised by %d flow(s):\n", len(r.Unexercised), len(traces))
+	for _, e := range r.Unexercised {
+		fmt.Printf("  [%s] %s\n", e.Category, e.Key)
+	}
+	return nil
+}
+
+// loadGoldens loads every *.golden.json in dir as a canonical trace.
+func loadGoldens(dir string) ([]*ir.CanonicalTrace, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.golden.json"))
+	if err != nil {
+		return nil, err
+	}
+	traces := make([]*ir.CanonicalTrace, 0, len(matches))
+	for _, m := range matches {
+		t, err := loadTrace(m)
+		if err != nil {
+			return nil, err
+		}
+		traces = append(traces, t)
+	}
+	return traces, nil
+}
+
 // loadTrace reads a canonical golden IR from path.
 func loadTrace(path string) (*ir.CanonicalTrace, error) {
 	b, err := os.ReadFile(path)
@@ -174,8 +232,7 @@ commands:
   boundary [--check] [dir]   generate the gated boundary contract (--check: verify currency)
   graph [--entry R] [dir]    print the non-gated call-graph view
   diff <a.json> <b.json>     print the structural change set between two golden traces
+  coverage [--flows D] [dir] boundary effects no committed flow exercises
   version                    print the flowmap version
-  help                       show this message
-
-(coverage arrives in a later phase)`)
+  help                       show this message`)
 }

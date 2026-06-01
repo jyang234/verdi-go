@@ -113,3 +113,12 @@ func TestRunDiffBadArgs(t *testing.T) {
 		t.Fatal("expected an error when not given exactly two files")
 	}
 }
+
+func TestRunCoverage(t *testing.T) {
+	silenceStdout(t)
+	flowsDir := filepath.Join(fixtureDir(), "flows", "testdata", "flows")
+	// coverage is informational (exit 0) even when it finds unexercised effects.
+	if err := run([]string{"coverage", "--flows", flowsDir, fixtureDir()}); err != nil {
+		t.Fatalf("coverage on the fixture should succeed: %v", err)
+	}
+}
