@@ -43,7 +43,8 @@ func (h hint) matches(fn *ssa.Function) bool {
 }
 
 // HintSet is the parsed classification hints plus flowmap's built-in defaults
-// (stdlib loggers and database/sql).
+// (the stdlib loggers, the near-ubiquitous zap structured logger, and
+// database/sql).
 type HintSet struct {
 	telemetry  []hint
 	busPublish []hint
@@ -55,7 +56,10 @@ type HintSet struct {
 // NewHintSet builds the hint set from cfg (nil => only built-ins).
 func NewHintSet(cfg *config.Config) *HintSet {
 	hs := &HintSet{
-		telemetry: parseHints([]string{"log", "log/slog"}),
+		// zap is the de-facto standard structured logger; recognizing it built-in
+		// means a service does not need a per-service telemetry hint just to keep
+		// its logging calls out of the tier-1..3 bands.
+		telemetry: parseHints([]string{"log", "log/slog", "go.uber.org/zap", "go.uber.org/zap/zapcore"}),
 		db:        parseHints([]string{"database/sql"}),
 	}
 	if cfg != nil {
@@ -86,8 +90,27 @@ func (hs *HintSet) IsPublish(fn *ssa.Function) bool { return anyMatch(hs.busPubl
 // IsConsume reports whether fn subscribes a consumer to the bus.
 func (hs *HintSet) IsConsume(fn *ssa.Function) bool { return anyMatch(hs.busConsume, fn) }
 
-// IsDB reports whether fn is a database call.
-func (hs *HintSet) IsDB(fn *ssa.Function) bool { return anyMatch(hs.db, fn) }
+// dbResultMethods are the database/sql result-handling methods that operate on
+// an already-fetched row or result — they perform no database round-trip, so they
+// are not boundary calls even though they live in a DB-hinted package. Excluding
+// them keeps result decoding (Scan, iteration, teardown, result inspection) out
+// of the DB edges, leaving the actual Query*/Exec* round-trips (and Ping/Begin/
+// Prepare) as the only DB boundaries. The names are the conventional SQL cursor
+// surface, shared by database/sql, pgx, sqlx, and the like.
+var dbResultMethods = map[string]bool{
+	"Scan": true, "Next": true, "NextResultSet": true, "Close": true,
+	"Err": true, "Columns": true, "ColumnTypes": true,
+	"RowsAffected": true, "LastInsertId": true,
+}
+
+// IsDB reports whether fn is a database call that crosses the boundary (a
+// query/exec round-trip), not a local result-cursor method like Scan or Next.
+func (hs *HintSet) IsDB(fn *ssa.Function) bool {
+	if fn != nil && dbResultMethods[fn.Name()] {
+		return false
+	}
+	return anyMatch(hs.db, fn)
+}
 
 // IsHTTP reports whether fn is an outbound HTTP/RPC seam call.
 func (hs *HintSet) IsHTTP(fn *ssa.Function) bool { return anyMatch(hs.http, fn) }

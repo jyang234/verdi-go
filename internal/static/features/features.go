@@ -60,6 +60,11 @@ func (e *Extractor) Edge(caller, callee *ssa.Function, site ssa.CallInstruction)
 		f.Boundary, f.Effect = model.BoundaryInternal, model.EffectTelemetry
 	case e.hints.IsPublish(callee):
 		f.Boundary, f.Effect = model.BoundaryOutboundAsync, model.EffectMutate
+	case e.hints.IsConsume(callee):
+		// The receive side of the bus. Symmetric to publish (inbound vs
+		// outbound-async): consuming an event is a boundary, so it tiers as inbound
+		// (tier 1) instead of falling through to compute and going invisible.
+		f.Boundary, f.Effect = model.BoundaryInbound, model.EffectIO
 	case e.hints.IsHTTP(callee):
 		f.Boundary, f.Effect = model.BoundaryOutboundSync, model.EffectIO
 	case e.hints.IsDB(callee):

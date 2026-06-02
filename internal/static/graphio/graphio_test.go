@@ -68,6 +68,79 @@ func TestGraphHasFirstPartyNodesWithSignatures(t *testing.T) {
 	}
 }
 
+// TestNodeTierFromOutgoingEdges proves a non-root function is tiered by what it
+// does, not by what it is: a function that publishes surfaces as tier 1 and a
+// pure-compute constructor stays tier 3. Before node-tier-from-edges, every
+// non-root node was stuck at the compute tier because it was classified by a
+// self-edge ("is this function itself a publish?") rather than by the boundaries
+// it reaches.
+func TestNodeTierFromOutgoingEdges(t *testing.T) {
+	g, err := graphio.Build(analyzeFixture(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byFQN := map[string]graphio.Node{}
+	for _, n := range g.Nodes {
+		byFQN[n.FQN] = n
+	}
+	// Evaluate is a non-root function that publishes loan.approved/declined; its
+	// most consequential outgoing edge is the tier-1 publish.
+	if pub := byFQN["(*example.com/loansvc/internal/origination.Evaluator).Evaluate"]; pub.Tier != 1 {
+		t.Errorf("publisher node Evaluate tier = %d, want 1 (derived from its publish edges)", pub.Tier)
+	}
+	// A pure constructor reaches no boundary → it falls back to the compute tier.
+	if ctor := byFQN["example.com/loansvc/internal/store.New"]; ctor.Tier != 3 {
+		t.Errorf("pure-compute constructor store.New tier = %d, want 3", ctor.Tier)
+	}
+}
+
+// TestDBReaderTieredByQueryNotScan proves a DB read is tier 2 (ext-read), not
+// inflated to tier 1 by the result-cursor Scan call, and that Scan does not leak
+// as a DB boundary edge. This is the read-vs-write distinction: a SELECT is
+// tier 2, a mutation tier 1.
+func TestDBReaderTieredByQueryNotScan(t *testing.T) {
+	g, err := graphio.Build(analyzeFixture(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range g.Edges {
+		if strings.Contains(e.To, "boundary:db Scan") {
+			t.Errorf("result-cursor Scan leaked as a DB boundary edge: %q", e.To)
+		}
+	}
+	byFQN := map[string]graphio.Node{}
+	for _, n := range g.Nodes {
+		byFQN[n.FQN] = n
+	}
+	if rd := byFQN["(*example.com/loansvc/internal/store.Loans).SelectApplicant"]; rd.Tier != 2 {
+		t.Errorf("DB reader SelectApplicant tier = %d, want 2 (a read, not inflated by Scan)", rd.Tier)
+	}
+	if wr := byFQN["(*example.com/loansvc/internal/store.Loans).InsertLedger"]; wr.Tier != 1 {
+		t.Errorf("DB writer InsertLedger tier = %d, want 1 (mutate)", wr.Tier)
+	}
+}
+
+// TestGraphShowsConsumeSeam proves the bus consume registration is a visible,
+// tier-1 boundary edge (symmetric to the publish seam), not invisible compute.
+func TestGraphShowsConsumeSeam(t *testing.T) {
+	g, err := graphio.Build(analyzeFixture(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range g.Edges {
+		if e.To == "boundary:bus CONSUME payment.settled" {
+			found = true
+			if e.Tier != 1 {
+				t.Errorf("consume edge tier = %d, want 1", e.Tier)
+			}
+		}
+	}
+	if !found {
+		t.Error("consume seam (boundary:bus CONSUME payment.settled) is missing from the graph view")
+	}
+}
+
 // TestEntryScoping checks --entry narrows the graph: the POST flow must exclude a
 // function reachable only from the consumer.
 func TestEntryScoping(t *testing.T) {

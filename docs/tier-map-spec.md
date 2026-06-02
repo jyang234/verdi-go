@@ -75,7 +75,7 @@ pins:
 
 ## 4. Reasonable defaults (the starting point)
 
-Built-in classification hints cover stdlib loggers (`log`, `log/slog`), `database/sql`, the `net/http` client, plus OTel semconv on the runtime side.
+Built-in classification hints cover the stdlib loggers (`log`, `log/slog`) and the near-ubiquitous `go.uber.org/zap` structured logger, `database/sql`, plus OTel semconv on the runtime side.
 
 Built-in tier rules, in order (first-match):
 

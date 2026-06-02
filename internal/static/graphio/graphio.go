@@ -74,15 +74,20 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		if !scope[fn] {
 			continue
 		}
+		// The node's outgoing edges are computed first because they decide the
+		// node's tier: a function is as salient as the most consequential boundary
+		// it directly reaches.
+		var nodeEdges []Edge
+		for _, e := range n.Out {
+			nodeEdges = append(nodeEdges, edgeOf(ext, hints, e, scope)...)
+		}
 		g.Nodes = append(g.Nodes, Node{
 			FQN:      fn.RelString(nil),
 			Sig:      signatures.Of(fn),
-			Tier:     nodeTier(ext, fn, rootFns[fn]),
+			Tier:     nodeTier(ext, fn, rootFns[fn], nodeEdges),
 			Fallible: fallible(fn),
 		})
-		for _, e := range n.Out {
-			g.Edges = append(g.Edges, edgeOf(ext, hints, e, scope)...)
-		}
+		g.Edges = append(g.Edges, nodeEdges...)
 	}
 
 	sortGraph(g)
@@ -110,6 +115,8 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	switch {
 	case hints.IsPublish(callee):
 		return []Edge{{From: from, To: "boundary:bus PUBLISH " + eventLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
+	case hints.IsConsume(callee):
+		return []Edge{{From: from, To: "boundary:bus CONSUME " + eventLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsHTTP(callee):
 		return []Edge{{From: from, To: "boundary:" + httpLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsDB(callee):
@@ -121,13 +128,29 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	}
 }
 
-func nodeTier(ext *features.Extractor, fn *ssa.Function, isRoot bool) int {
+// nodeTier ranks a function by what it does, not by what it is. A root is its
+// inbound entry tier. Every other function takes the min over its direct
+// outgoing edge tiers, falling back to the function's own compute floor (its
+// internal same-package self-edge, tier 3 by default) when it reaches no
+// consequential boundary. This is direct, not transitive — a helper that
+// performs a DB read surfaces as tier 2 and one that publishes as tier 1, while a
+// function that merely calls such helpers does not inherit their tier (so
+// salience does not propagate up from main). Without this, classifying a function
+// by its self-edge alone left every non-root function stuck at the compute floor.
+func nodeTier(ext *features.Extractor, fn *ssa.Function, isRoot bool, outEdges []Edge) int {
 	if isRoot {
 		t, _ := ext.Classify(ext.Inbound(fn.RelString(nil), fallible(fn)))
 		return t
 	}
-	t, _ := ext.Classify(ext.Edge(fn, fn, nil)) // self-edge: same-package, compute → first-party rule
-	return t
+	// The self-edge (fn→fn) is the function's compute floor: internal,
+	// same-package, no effect — tier 3 under the default rules.
+	tier, _ := ext.Classify(ext.Edge(fn, fn, nil))
+	for _, e := range outEdges {
+		if e.Tier < tier {
+			tier = e.Tier
+		}
+	}
+	return tier
 }
 
 func sortGraph(g *Graph) {
