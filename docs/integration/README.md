@@ -6,6 +6,10 @@ traces to `flowmap behavior ingest` (the post-hoc path — see
 flowmap; it is the **convention spec** plus copy-ready scaffolding for a service
 team.
 
+> **Integrating an existing e2e suite? Start with the step-by-step:**
+> [`otlp-integration-guide.md`](./otlp-integration-guide.md). This README is the
+> conventions + snippets it draws on.
+
 These files are additive: your services emit exactly as they do today, and your
 Jaeger/debug pipelines are untouched.
 
