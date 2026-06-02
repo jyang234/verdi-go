@@ -43,7 +43,8 @@ func (h hint) matches(fn *ssa.Function) bool {
 }
 
 // HintSet is the parsed classification hints plus flowmap's built-in defaults
-// (stdlib loggers and database/sql).
+// (the stdlib loggers, the near-ubiquitous zap structured logger, and
+// database/sql).
 type HintSet struct {
 	telemetry  []hint
 	busPublish []hint
@@ -55,7 +56,10 @@ type HintSet struct {
 // NewHintSet builds the hint set from cfg (nil => only built-ins).
 func NewHintSet(cfg *config.Config) *HintSet {
 	hs := &HintSet{
-		telemetry: parseHints([]string{"log", "log/slog"}),
+		// zap is the de-facto standard structured logger; recognizing it built-in
+		// means a service does not need a per-service telemetry hint just to keep
+		// its logging calls out of the tier-1..3 bands.
+		telemetry: parseHints([]string{"log", "log/slog", "go.uber.org/zap", "go.uber.org/zap/zapcore"}),
 		db:        parseHints([]string{"database/sql"}),
 	}
 	if cfg != nil {

@@ -106,6 +106,28 @@ func TestDBEffects(t *testing.T) {
 	}
 }
 
+// TestConsumeSeamTiers proves the receive side of the bus is classified as an
+// inbound boundary (tier 1), symmetric to publish — not left as compute, where
+// the consume seam would be invisible.
+func TestConsumeSeamTiers(t *testing.T) {
+	ext, prog := setup(t)
+	run := statictest.FindFunc(prog, "loansvc.run")
+	if run == nil {
+		t.Fatal("run not found")
+	}
+	callee, site := callTo(run, "Bus).Subscribe")
+	if callee == nil {
+		t.Fatal("no Subscribe call in run")
+	}
+	f := ext.Edge(run, callee, site)
+	if f.Boundary != model.BoundaryInbound {
+		t.Errorf("consume boundary = %q, want inbound", f.Boundary)
+	}
+	if tier, _ := ext.Classify(f); tier != 1 {
+		t.Errorf("consume tier = %d, want 1 (symmetric to publish)", tier)
+	}
+}
+
 func TestExternalCallIsIONotRead(t *testing.T) {
 	ext, prog := setup(t)
 	// A GET to a peer service must be effect=io (tier 1 ext-sync), NOT effect=read
