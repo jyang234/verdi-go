@@ -58,12 +58,23 @@ Jaeger/debug pipelines are untouched.
 
 ```sh
 make -C infra test/e2e/<svc>          # your existing e2e run, writes traces/*.json
-flowmap behavior ingest src/test/e2e/<svc>/.flowmap/traces \
-    --service-dir services/<svc>      # stage 1: exercised effects + coverage, exit 0
-# stage 2 (opt-in, per proven flow — not yet built):
-# flowmap behavior ingest … --update   # rebase goldens; CODEOWNERS reviews the diff
+
+# stage 1 — non-gated, always exit 0: exercised effects (+ coverage delta).
+flowmap behavior ingest --service-dir services/<svc> \
+    src/test/e2e/<svc>/.flowmap/traces
+
+# graduate a proven flow: snapshot its boundary-effect set + rendered view,
+# then review and commit only the flows you intend to gate.
+flowmap behavior ingest --flows-dir flows/ --update \
+    src/test/e2e/<svc>/.flowmap/traces
+
+# stage 2 — opt-in gate (CI): fails only on a NEW boundary effect in a
+# committed flows/*.effects.json (no-new-effects). CODEOWNERS reviews the diff.
+flowmap behavior ingest --flows-dir flows/ \
+    src/test/e2e/<svc>/.flowmap/traces
 ```
 
-`--service-dir` points at the service **source** (so flowmap can generate its
-boundary contract and show the coverage delta); omit it to just list the
-exercised boundary effects. The ingest step never fails the build.
+Flags precede the trace path. `--service-dir` points at the service **source**
+(flowmap generates its boundary contract for the coverage delta). A committed
+`flows/<slug>.<svc>.effects.json` is what opts a flow into the gate; a golden
+with no capture this run is skipped, never silently passed.

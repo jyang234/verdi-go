@@ -1,8 +1,8 @@
 # Post-hoc behavioral ingestion (`ModePostHoc`) — design brief
 
-**Status:** stage 1 landed (the non-gated coverage view); stage 2 (set-based
-gating) proposed. Implements the deferred Phase 10 (`implementation_plan.md`) and
-extends the determinism contract (`trace-canonicalization-spec.md §1`) to
+**Status:** stages 1 and 2 landed (non-gated coverage view + opt-in,
+no-new-effects gate). Implements the deferred Phase 10 (`implementation_plan.md`)
+and extends the determinism contract (`trace-canonicalization-spec.md §1`) to
 out-of-process capture.
 
 **Built so far** (`flowmap behavior ingest <traces> [--service-dir D]`):
@@ -10,11 +10,16 @@ out-of-process capture.
 `internal/ingest` (slug × service grouping + per-service root assembly, design
 D-PH1/D-PH4), the `behavior ingest` CLI verb that prints the exercised
 boundary-effect set + the `coverage.Delta` against a service's boundary
-contract (always exits 0), and the **[P10.3] post-hoc canon profile** (mode-driven
+contract (always exits 0), the **[P10.3] post-hoc canon profile** (mode-driven
 op-key sibling ordering; resource-noise stripping is subsumed by the existing
-attribute allowlist). Dogfooded end-to-end against the `loansut` fixture
-(`internal/ingest/dogfood_test.go`). Deferred: stage-2 `--update`/golden
-set-comparison, and pinning the decoder against a real collector sample.
+attribute allowlist), and the **stage-2 opt-in gate**: `--update` rebases the
+per-(slug,service) `*.effects.json` golden + `*.flow.md` view; without it,
+`--flows-dir` enforces each committed golden with **no-new-effects** semantics
+(D-PH3) and skip-on-no-capture (D-PH2), failing non-zero on a new boundary
+effect (`[CONTRACT] ADDED …`). CODEOWNERS routes `**/*.effects.json`. Dogfooded
+end-to-end against the `loansut` fixture (`internal/ingest/dogfood_test.go`).
+Deferred: pinning the decoder against a real collector sample, and the optional
+per-flow `expectations.yaml` for opt-in cardinality (D-PH5).
 
 **Audience:** the flowmap team (the build asks below) and adopting service teams
 (the conventions in §4 and `docs/integration/`).

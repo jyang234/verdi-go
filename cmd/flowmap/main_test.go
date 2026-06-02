@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/jyang234/golang-code-graph/internal/ingest"
 )
 
 func fixtureDir() string {
@@ -120,5 +122,77 @@ func TestRunCoverage(t *testing.T) {
 	// coverage is informational (exit 0) even when it finds unexercised effects.
 	if err := run([]string{"coverage", "--flows", flowsDir, fixtureDir()}); err != nil {
 		t.Fatalf("coverage on the fixture should succeed: %v", err)
+	}
+}
+
+// otlpFixture is the committed OTLP/JSON trace export used by the post-hoc tests.
+func otlpFixture() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "otlp", "loan-application.otlp.json")
+}
+
+// TestBehaviorIngestGate exercises the stage-2 opt-in gate end to end: --update
+// writes the effect golden; a re-gate of the same trace passes; dropping an
+// effect from the golden makes that effect read as a new addition and fails
+// (no-new-effects, D-PH3); and a golden with no capture this run is skipped, not
+// silently passed (D-PH2).
+func TestBehaviorIngestGate(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+	fx := otlpFixture()
+
+	// --update writes <slug>.<service>.effects.json (+ .flow.md).
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, "--update", fx}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	gp := filepath.Join(dir, "loan_application.loansvc.effects.json")
+	if _, err := os.Stat(gp); err != nil {
+		t.Fatalf("expected golden at %s: %v", gp, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "loan_application.loansvc.flow.md")); err != nil {
+		t.Fatalf("expected rendered view: %v", err)
+	}
+
+	// Re-gating the same trace passes: no new effects.
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, fx}); err != nil {
+		t.Fatalf("clean gate should pass: %v", err)
+	}
+
+	// Drop an effect from the golden; the trace now exercises one the golden lacks
+	// → a new effect → the gate fails.
+	g, err := ingest.LoadEffectGolden(gp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := g.Effects[:0:0]
+	for _, e := range g.Effects {
+		if e != "PUBLISH loan.approved" {
+			kept = append(kept, e)
+		}
+	}
+	g.Effects = kept
+	b, _ := g.Marshal()
+	if err := os.WriteFile(gp, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, fx}); err == nil {
+		t.Fatal("expected the gate to fail on a new boundary effect")
+	}
+
+	// D-PH2: a golden for a flow with no capture this run is skipped, not failed.
+	// Restore the loan golden so it passes, add an orphan golden with no trace.
+	full := ingest.NewEffectGolden("loan-application", "loansvc",
+		[]string{"HTTP GET credit-bureau /score/{id}", "HTTP POST /loan-application", "PUBLISH loan.approved"})
+	fb, _ := full.Marshal()
+	if err := os.WriteFile(gp, fb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orphan := ingest.NewEffectGolden("nightly-sweep", "other-svc", []string{"PUBLISH sweep.done"})
+	ob, _ := orphan.Marshal()
+	if err := os.WriteFile(filepath.Join(dir, "nightly_sweep.other_svc.effects.json"), ob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, fx}); err != nil {
+		t.Fatalf("a golden with no capture should be skipped, not fail the gate: %v", err)
 	}
 }
