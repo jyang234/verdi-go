@@ -17,6 +17,7 @@ package otlpjson
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,18 @@ import (
 	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// serviceNameAttr is the OTel resource attribute naming the emitting service. It
+// is the one resource attribute flowmap folds onto spans (the per-service split
+// key); the rest of the resource is volatile noise the canon allowlist drops.
+const serviceNameAttr = "service.name"
+
+// errNotOTLP marks a file that parsed as JSON but carries no OTLP trace envelope
+// (no resourceSpans) — e.g. an effect golden or unrelated JSON. DecodePath skips
+// such files in directory mode and surfaces them as an error in single-file mode,
+// so pointing ingest at a goldens directory fails loudly instead of silently
+// treating non-OTLP files as empty traces.
+var errNotOTLP = errors.New("otlpjson: not an OTLP trace export (no resourceSpans)")
 
 // DecodePath decodes a single OTLP/JSON file or, if path is a directory, every
 // *.json file within it (sorted), concatenating the spans. Files the collector
@@ -47,8 +60,11 @@ func DecodePath(path string) ([]capture.Span, error) {
 	var out []capture.Span
 	for _, m := range matches {
 		spans, err := DecodeFile(m)
+		if errors.Is(err, errNotOTLP) {
+			continue // a *.json that isn't a trace export (e.g. an effect golden)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", m, err)
+			return nil, err
 		}
 		out = append(out, spans...)
 	}
@@ -106,31 +122,40 @@ func Decode(r io.Reader) ([]capture.Span, error) {
 	var out []capture.Span
 	for _, req := range reqs {
 		for _, rs := range req.ResourceSpans {
-			base := attrMap(rs.Resource.Attributes)
+			service := resourceService(rs.Resource.Attributes)
 			scopes := rs.ScopeSpans
 			if len(scopes) == 0 {
 				scopes = rs.InstrumentationLibrarySpans // pre-1.0 spelling
 			}
 			for _, ss := range scopes {
 				for _, sp := range ss.Spans {
-					out = append(out, toCapture(sp, base))
+					out = append(out, toCapture(sp, service))
 				}
 			}
 		}
 	}
+	// Distinguish a legitimately-empty OTLP export ({"resourceSpans":[]}, which
+	// carries the field) from a non-OTLP JSON file that happens to match a *.json
+	// glob (an effect golden, config, …), which does not.
+	if len(out) == 0 && !bytes.Contains(data, []byte("resourceSpans")) && !bytes.Contains(data, []byte("resource_spans")) {
+		return nil, errNotOTLP
+	}
 	return out, nil
 }
 
-// toCapture maps one OTLP/JSON span into the internal model, folding the
-// resource attributes (service.name, host/pod, etc.) under the span's own
-// attributes so downstream can read both; span attributes win on conflict.
-func toCapture(sp spanJSON, resource map[string]string) capture.Span {
-	attrs := make(map[string]string, len(resource)+len(sp.Attributes))
-	for k, v := range resource {
-		attrs[k] = v
-	}
+// toCapture maps one OTLP/JSON span into the internal model. Only service.name
+// is folded from the resource (the per-service split key); the rest of the OTel
+// resource (host/pod/sdk/k8s …) is deliberately not folded — the canon allowlist
+// would drop it anyway, and folding it onto every span both wastes a per-span
+// map copy and risks an opkey-relevant resource attribute (e.g. peer.service,
+// db.system) contaminating every span's op key. Span attributes win on conflict.
+func toCapture(sp spanJSON, service string) capture.Span {
+	attrs := make(map[string]string, len(sp.Attributes)+1)
 	for _, kv := range sp.Attributes {
 		attrs[kv.Key] = kv.Value.str()
+	}
+	if _, ok := attrs[serviceNameAttr]; !ok && service != "" {
+		attrs[serviceNameAttr] = service
 	}
 	cs := capture.Span{
 		ID:       sp.SpanID,
@@ -190,12 +215,15 @@ func unixNano(raw json.RawMessage) time.Time {
 	return time.Unix(0, n).UTC()
 }
 
-func attrMap(kvs []keyValue) map[string]string {
-	m := make(map[string]string, len(kvs))
+// resourceService extracts service.name from the resource attributes, or "" if
+// absent. flowmap needs no other resource attribute.
+func resourceService(kvs []keyValue) string {
 	for _, kv := range kvs {
-		m[kv.Key] = kv.Value.str()
+		if kv.Key == serviceNameAttr {
+			return kv.Value.str()
+		}
 	}
-	return m
+	return ""
 }
 
 // --- the OTLP/JSON wire shapes (only the fields flowmap reads) ---

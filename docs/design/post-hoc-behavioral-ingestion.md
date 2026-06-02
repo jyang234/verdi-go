@@ -233,10 +233,17 @@ helper.
 - **D-PH1 — grouping unit.** Slug for the assertion/coverage set; one
   representative trace for the diagram (§[P10.2]).
 - **D-PH2 — completeness.** Stage 1 trusts the file but reports span/trace counts
-  and "no root span" warnings, never fails. Stage 2 gates a flow only when its
-  service-entry root + declared markers are present in the file (reuse `await`'s
-  marker logic statically); otherwise skip-with-warning rather than gate on a
-  possibly-truncated trace.
+  and synthetic-root notes, never fails. Stage 2 gates a flow only when the
+  fragment has a clean inbound entry span (a non-synthesized root); a synthesized
+  fragment — no single entry, i.e. completeness unverifiable — is
+  skip-with-warning, never gated, so a partial capture can't pass as complete.
+  *Implemented:* `ingest.assemble` flags `Synthesized`; `gateEffectGoldens` skips
+  those fragments. *Residual:* a fragment that keeps its entry root but loses a
+  *tail* span (e.g. a dropped PUBLISH) still gates, and the missing effect reads
+  as coverage, not a failure — detecting that needs the expected-exit markers
+  deferred to D-PH5. canon's `ErrIncomplete` is unreachable on this path by
+  construction (a tree is always assembled), so completeness is enforced here, at
+  the gate, not in canon.
 - **D-PH3 — comparison.** No-new-effects (§[P10.3]); missing effects go to
   coverage, not the gate.
 - **D-PH4 — multi-service.** Per-service split: partition a cross-service trace

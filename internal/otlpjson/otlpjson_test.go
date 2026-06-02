@@ -1,6 +1,9 @@
 package otlpjson
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -158,6 +161,11 @@ func TestDecodeCollectorSample(t *testing.T) {
 	if got := root.Attr("service.name"); got != "loansvc" {
 		t.Errorf("service.name = %q, want loansvc (resource attr folded)", got)
 	}
+	// Only service.name is folded; other resource noise (host.name) is not, so it
+	// can't contaminate op keys or churn the snapshot.
+	if got := root.Attr("host.name"); got != "" {
+		t.Errorf("host.name = %q, want \"\" (resource noise must not be folded onto spans)", got)
+	}
 	if got := root.Attr("http.response.status_code"); got != "200" {
 		t.Errorf("intValue attr = %q, want \"200\" (quoted-int proto-JSON)", got)
 	}
@@ -177,4 +185,37 @@ func keysOf(m map[string]capture.Span) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestDecodeRejectsNonOTLP: a JSON file with no resourceSpans (e.g. an effect
+// golden) is errNotOTLP in single-file mode and silently skipped in directory
+// mode, so pointing ingest at a goldens dir doesn't treat goldens as empty traces.
+func TestDecodeRejectsNonOTLP(t *testing.T) {
+	notOTLP := `{"schema_version":"flowmap.effects/v1","flow":"x","service":"s","effects":["PUBLISH a"]}`
+	if _, err := Decode(strings.NewReader(notOTLP)); !errors.Is(err, errNotOTLP) {
+		t.Fatalf("non-OTLP JSON should be errNotOTLP, got %v", err)
+	}
+	// empty OTLP envelope is valid (has the field), not errNotOTLP.
+	if spans, err := Decode(strings.NewReader(`{"resourceSpans":[]}`)); err != nil || len(spans) != 0 {
+		t.Fatalf("empty OTLP envelope: got spans=%d err=%v, want 0,nil", len(spans), err)
+	}
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a.effects.json"), notOTLP)
+	mustWrite(t, filepath.Join(dir, "trace.json"), `{"resourceSpans":[{"scopeSpans":[{"spans":[
+		{"spanId":"01","name":"x","kind":2,"attributes":[{"key":"flowmap.flow","value":{"stringValue":"f"}}],"status":{"code":1}}]}]}]}`)
+	spans, err := DecodePath(dir)
+	if err != nil {
+		t.Fatalf("dir decode should skip non-OTLP, got %v", err)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1 (the effect golden must be skipped)", len(spans))
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

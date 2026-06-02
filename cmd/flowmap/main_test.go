@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/ingest"
@@ -194,5 +195,59 @@ func TestBehaviorIngestGate(t *testing.T) {
 	}
 	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, fx}); err != nil {
 		t.Fatalf("a golden with no capture should be skipped, not fail the gate: %v", err)
+	}
+}
+
+// otlpDoc writes a one-resource OTLP/JSON file with the given spans and returns
+// its path. Each span: id, parent, kind, flow slug, and extra attrs.
+func writeOTLP(t *testing.T, dir, name, service string, spans string) string {
+	t.Helper()
+	doc := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"` +
+		service + `"}}]},"scopeSpans":[{"spans":[` + spans + `]}]}]}`
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func producerSpan(id, parent, slug, topic string) string {
+	return `{"spanId":"` + id + `","parentSpanId":"` + parent + `","name":"p","kind":4,"attributes":[` +
+		`{"key":"flowmap.flow","value":{"stringValue":"` + slug + `"}},` +
+		`{"key":"messaging.destination.name","value":{"stringValue":"` + topic + `"}}],"status":{"code":1}}`
+}
+
+// TestBehaviorIngestSkipsSynthesized: a fragment with no clean inbound entry span
+// (synthesized root — completeness unverifiable) is skipped by the gate, not
+// passed, even when it carries an effect absent from the golden (finding #1).
+func TestBehaviorIngestSkipsSynthesized(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+
+	// Publisher-only flow (parent outside the capture → synthesized root).
+	t1 := writeOTLP(t, dir, "t1.json", "emitter", producerSpan("01", "ffffffffffffffff", "sweep", "a.done"))
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, "--update", t1}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	// A later run where the same synthesized flow adds a brand-new effect.
+	t2 := writeOTLP(t, dir, "t2.json", "emitter",
+		producerSpan("01", "ffffffffffffffff", "sweep", "a.done")+","+producerSpan("02", "ffffffffffffffff", "sweep", "b.new"))
+	// Without the completeness guard this would fail with [CONTRACT] ADDED b.new;
+	// because the capture has no inbound entry, it is skipped instead.
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, t2}); err != nil {
+		t.Fatalf("synthesized fragment must be skipped, not gated: %v", err)
+	}
+}
+
+// TestUpdateGoldenCollision: two distinct flows whose slugs collide to one
+// filename are refused on --update rather than silently overwriting (finding #2).
+func TestUpdateGoldenCollision(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+	tf := writeOTLP(t, dir, "t.json", "svc",
+		producerSpan("01", "ffffffffffffffff", "sweep-a", "x")+","+producerSpan("02", "ffffffffffffffff", "sweep.a", "y"))
+	err := run([]string{"behavior", "ingest", "--flows-dir", dir, "--update", tf})
+	if err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("expected a slug-collision error for sweep-a vs sweep.a, got %v", err)
 	}
 }

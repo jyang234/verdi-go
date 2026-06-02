@@ -285,8 +285,27 @@ func updateEffectGoldens(dir string, frags []ingestFragment) error {
 		return err
 	}
 	fmt.Println()
+	claimed := map[string]string{} // file stem -> "flow / service" that wrote it
 	for _, fr := range frags {
-		stem := filepath.Join(dir, effectStem(fr.fc.Slug, fr.fc.Service))
+		stemName := effectStem(fr.fc.Slug, fr.fc.Service)
+		owner := fr.fc.Slug + " / " + fr.fc.Service
+
+		// Two distinct flows whose slugs collide to the same filename would
+		// silently overwrite each other (and the loser would be ungated on a later
+		// run). Refuse rather than lose a golden — within this run...
+		if prev, ok := claimed[stemName]; ok && prev != owner {
+			return fmt.Errorf("golden filename collision: %q and %q both map to %s.effects.json; rename a flow or service to disambiguate", prev, owner, stemName)
+		}
+		claimed[stemName] = owner
+
+		stem := filepath.Join(dir, stemName)
+		// ...and against a committed golden from a previous run.
+		if existing, err := ingest.LoadEffectGolden(stem + ".effects.json"); err == nil {
+			if prev := existing.Flow + " / " + existing.Service; prev != owner {
+				return fmt.Errorf("%s.effects.json already belongs to %q; refusing to overwrite it with %q (slug collision) — rename to disambiguate", stem, prev, owner)
+			}
+		}
+
 		g := ingest.NewEffectGolden(fr.fc.Slug, fr.fc.Service, fr.effects)
 		b, err := g.Marshal()
 		if err != nil {
@@ -310,10 +329,10 @@ func gateEffectGoldens(dir string, frags []ingestFragment) error {
 	if err != nil {
 		return err
 	}
-	observed := map[string][]string{}
+	observed := map[string]ingestFragment{}
 	gatedKey := map[string]bool{}
 	for _, fr := range frags {
-		observed[key(fr.fc.Slug, fr.fc.Service)] = fr.effects
+		observed[key(fr.fc.Slug, fr.fc.Service)] = fr
 	}
 
 	fmt.Println()
@@ -325,14 +344,23 @@ func gateEffectGoldens(dir string, frags []ingestFragment) error {
 		}
 		k := key(g.Flow, g.Service)
 		gatedKey[k] = true
-		obs, ok := observed[k]
-		if !ok || len(obs) == 0 {
-			// D-PH2: a golden with no (or empty) capture this run is not gated —
-			// never silently pass a possibly-truncated flow.
+		fr, ok := observed[k]
+		if !ok {
+			// D-PH2: no capture for this golden this run — never silently pass it.
 			fmt.Printf("  ! %s [%s]: no capture this run — skipped (not gated)\n", g.Flow, g.Service)
 			continue
 		}
-		newEffects, missing := ingest.CompareEffects(g.Effects, obs)
+		if fr.fc.Synthesized {
+			// No clean inbound entry span: the fragment's completeness cannot be
+			// established (it may be truncated, or span multiple traces), so the
+			// flow is not gated this run rather than risk passing a partial capture
+			// (D-PH2). canon's ErrIncomplete guard is unreachable here because the
+			// post-hoc path always assembles a tree, so this is where completeness
+			// is enforced for the gate.
+			fmt.Printf("  ! %s [%s]: no inbound entry span (completeness unverifiable) — skipped (not gated)\n", g.Flow, g.Service)
+			continue
+		}
+		newEffects, missing := ingest.CompareEffects(g.Effects, fr.effects)
 		for _, m := range missing {
 			fmt.Printf("  ~ %s [%s]: golden effect not exercised this run: %s (coverage, not a failure)\n", g.Flow, g.Service, m)
 		}

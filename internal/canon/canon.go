@@ -157,7 +157,16 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 		for _, k := range kids {
 			members = append(members, c.build(k, childrenOf))
 		}
-		sort.SliceStable(members, func(i, j int) bool { return members[i].Op < members[j].Op })
+		// Order by op key, then by canonical subtree signature as a tiebreak. The
+		// signature breaks ties run-independently: two siblings sharing an Op but
+		// with different subtrees would otherwise keep their decode/file order,
+		// which is not stable across exports — defeating the profile's whole point.
+		sort.SliceStable(members, func(i, j int) bool {
+			if members[i].Op != members[j].Op {
+				return members[i].Op < members[j].Op
+			}
+			return signature(members[i]) < signature(members[j])
+		})
 		return c.collapseLoops([]ir.ChildGroup{{Concurrent: len(members) > 1, Members: members}})
 	}
 

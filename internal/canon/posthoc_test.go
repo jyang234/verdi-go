@@ -78,3 +78,33 @@ func TestInProcessStillSequencesSiblings(t *testing.T) {
 		t.Errorf("first sequential group = %q, want PUBLISH c.third (earliest start)", got)
 	}
 }
+
+// TestPostHocTiebreakIsSignatureNotFileOrder: two siblings sharing an Op but with
+// different subtrees must order run-independently (by canonical subtree), not by
+// the order they happened to be decoded — otherwise the post-hoc IR/.flow.md
+// churns between exports of the same flow.
+func TestPostHocTiebreakIsSignatureNotFileOrder(t *testing.T) {
+	// Two "HTTP GET api" client siblings with distinct child subtrees (one
+	// publishes a.x, the other b.y). Build the flow in both input orders.
+	mk := func(firstChild, secondChild string) capture.CapturedFlow {
+		spans := []capture.Span{
+			{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
+				Attrs: map[string]string{"http.request.method": "POST", "http.route": "/x"}},
+			{ID: "c1", ParentID: "root", Kind: ir.KindClient, Start: ms(0, 1), End: ms(0, 5),
+				Attrs: map[string]string{"http.request.method": "GET", "peer.service": "api", "http.route": "/v"}},
+			{ID: "c1p", ParentID: "c1", Kind: ir.KindProducer, Start: ms(0, 2), End: ms(0, 3),
+				Attrs: map[string]string{"messaging.destination.name": firstChild}},
+			{ID: "c2", ParentID: "root", Kind: ir.KindClient, Start: ms(0, 10), End: ms(0, 15),
+				Attrs: map[string]string{"http.request.method": "GET", "peer.service": "api", "http.route": "/v"}},
+			{ID: "c2p", ParentID: "c2", Kind: ir.KindProducer, Start: ms(0, 11), End: ms(0, 12),
+				Attrs: map[string]string{"messaging.destination.name": secondChild}},
+		}
+		return capture.CapturedFlow{Flow: "x", Service: "s", Mode: capture.ModePostHoc, Spans: spans, Root: &spans[0], Complete: true}
+	}
+	// Same flow, the two same-Op clients in swapped decode order.
+	a := marshal(t, mustCanon(t, mk("a.x", "b.y")))
+	b := marshal(t, mustCanon(t, mk("b.y", "a.x")))
+	if string(a) != string(b) {
+		t.Errorf("post-hoc IR depends on decode order for same-Op siblings:\n a=%s\n b=%s", a, b)
+	}
+}

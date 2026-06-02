@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -38,17 +39,19 @@ func NewEffectGolden(flow, service string, effects []string) EffectGolden {
 	}
 }
 
-// Marshal renders the golden as deterministic, newline-terminated JSON.
+// Marshal renders the golden through the repo-wide canonical serializer, so an
+// effect golden is encoded identically to every other gated artifact (sorted
+// keys, no HTML escaping, trailing newline) rather than via a bespoke
+// json.MarshalIndent that would, e.g., escape '&'/'<'/'>' in a route op key.
 func (g EffectGolden) Marshal() ([]byte, error) {
 	g.Effects = sortedUnique(g.Effects)
-	b, err := json.MarshalIndent(g, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(b, '\n'), nil
+	return canonjson.Marshal(g)
 }
 
-// LoadEffectGolden reads a committed effect golden.
+// LoadEffectGolden reads and validates a committed effect golden. A schema
+// mismatch is a hard error rather than a silent acceptance: the effects/v1
+// artifact is not interchangeable with the in-process trace golden, and gating
+// against a foreign or stale-schema file would produce a meaningless verdict.
 func LoadEffectGolden(path string) (EffectGolden, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -57,6 +60,10 @@ func LoadEffectGolden(path string) (EffectGolden, error) {
 	var g EffectGolden
 	if err := json.Unmarshal(b, &g); err != nil {
 		return EffectGolden{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if g.SchemaVersion != EffectSchemaVersion {
+		return EffectGolden{}, fmt.Errorf("%s: effect-golden schema %q, want %q (regenerate with `flowmap behavior ingest --flows-dir … --update`)",
+			path, g.SchemaVersion, EffectSchemaVersion)
 	}
 	return g, nil
 }
@@ -74,7 +81,7 @@ func BoundaryEffects(root *ir.CanonicalSpan) []string {
 		if n == nil {
 			return
 		}
-		if isBoundaryOp(n.Op) {
+		if isBoundaryEffect(n) {
 			set[n.Op] = true
 		}
 		for _, g := range n.Children {
@@ -87,13 +94,23 @@ func BoundaryEffects(root *ir.CanonicalSpan) []string {
 	return sortedSet(set)
 }
 
-func isBoundaryOp(op string) bool {
-	for _, p := range []string{"PUBLISH ", "CONSUME ", "HTTP ", "RPC "} {
-		if strings.HasPrefix(op, p) {
-			return true
-		}
+// isBoundaryEffect reports whether a span is an inter-service boundary effect,
+// classified by its span Kind — the same vocabulary the coverage join uses —
+// rather than by parsing opkey's rendered string, so a change to op-key
+// formatting cannot silently empty the effect set (and quietly flip the gate
+// green). Inbound entries (server/consumer) and published events (producer) are
+// effects; an outbound client call is an effect unless it is a DB operation,
+// which is behavioral-only and excluded from the inter-service boundary exactly
+// as the static contract excludes it; internal compute is never an effect.
+func isBoundaryEffect(s *ir.CanonicalSpan) bool {
+	switch s.Kind {
+	case ir.KindProducer, ir.KindConsumer, ir.KindServer:
+		return true
+	case ir.KindClient:
+		return !strings.HasPrefix(s.Op, "DB ")
+	default:
+		return false
 	}
-	return false
 }
 
 // CompareEffects implements the no-new-effects gate (design D-PH3). added is the

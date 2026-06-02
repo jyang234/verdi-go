@@ -1,7 +1,9 @@
 package ingest
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/ir"
@@ -71,5 +73,32 @@ func TestEffectGoldenRoundTrip(t *testing.T) {
 	b2, _ := g.Marshal()
 	if string(b) != string(b2) {
 		t.Error("marshal is not deterministic")
+	}
+}
+
+// TestLoadEffectGoldenRejectsWrongSchema: a golden with a foreign/stale schema
+// version is a hard error, not a silent accept (D-PH finding #8).
+func TestLoadEffectGoldenRejectsWrongSchema(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/x.effects.json"
+	if err := os.WriteFile(p, []byte(`{"schema_version":"flowmap.trace/v1","flow":"x","service":"s","effects":["PUBLISH a"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadEffectGolden(p); err == nil || !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("expected a schema-mismatch error, got %v", err)
+	}
+}
+
+// TestEffectGoldenMarshalNoHTMLEscape: an op key with '&'/'<'/'>' survives
+// verbatim through the canonical serializer rather than being HTML-escaped
+// (finding #7 — gated artifacts go through canonjson).
+func TestEffectGoldenMarshalNoHTMLEscape(t *testing.T) {
+	g := NewEffectGolden("f", "s", []string{"HTTP GET peer /a?b=1&c=2"})
+	b, err := g.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "&c=2") {
+		t.Errorf("op key was HTML-escaped (want verbatim '&'):\n%s", b)
 	}
 }
