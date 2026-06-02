@@ -89,12 +89,20 @@ Goldens keyed by flow slug; `flowmap diff` / `coverage` / `*.flow.md` work as-is
 > the public surface entirely (file-based, no network server).
 
 ### [P10.2] Flow scoping over a trace file
-The out-of-process analog of `capture.Scope` (`capture/capture.go:107`): group
-spans into per-flow `CapturedFlow`s by **trace-id**, select the ones carrying a
-`flowmap.flow` attribute, and name the golden by its slug. Support
-`Correlation-Id` as an alternate grouping key (already propagated today). A trace
-with no `flowmap.flow` tag is ignored, not an error — the file may carry
-unrelated traffic.
+The out-of-process analog of `capture.Scope` (`capture/capture.go:107`). A
+`withFlow(slug)` block can issue several top-level requests, each rooting its own
+trace, so **one slug spans multiple traces**. Two reductions of the same spans,
+for two consumers (resolved decision D-PH1):
+
+- **Assertion / coverage unit = the slug.** Union the boundary effects across all
+  traces carrying `flowmap.flow=<slug>`; that union is the gated set.
+- **Diagram unit = one representative trace.** Pick one trace (the largest) per
+  slug for the `*.flow.md`, noted as illustrative — the diagram shows a single
+  execution, the assertion covers the flow class.
+
+Select only spans carrying a `flowmap.flow` attribute; support `Correlation-Id`
+as an alternate key (already propagated today). A trace with no `flowmap.flow`
+tag is ignored, not an error — the file may carry unrelated traffic.
 
 ### [P10.3] Post-hoc canonicalization profile — *the hard, essential part*
 Out-of-process traces carry nondeterminism the in-process path never sees. A
@@ -120,6 +128,13 @@ Out-of-process traces carry nondeterminism the in-process path never sees. A
   set-based, which is what keeps the gate from flaking. `ExpectExactlyOnce`-style
   cardinality is **opt-in per flow** (§5), for flows that are genuinely
   deterministic.
+- **Comparison = no-new-effects, not set equality** (resolved decision D-PH3).
+  The gate fails only on a **new** boundary effect in the observed set vs. the
+  golden (a new published event / dep / entrypoint — the contract change worth
+  catching). A **missing / under-exercised** effect does **not** fail the gate —
+  a distributed run legitimately under-exercises a flow — it surfaces in the
+  coverage view instead. This tolerates run-to-run flakiness in one direction
+  (volume) while still catching the additions that are real contract drift.
 
 > **Free consequence.** Because the post-hoc artifact lives in the coverage key
 > space, ingestion feeds `coverage.Delta` directly. The stage-1 non-gated view
@@ -140,8 +155,8 @@ config, the **"flowmap-tagged flows are 100% sampled"** rule, and the
 |---|---|---|
 | canon over a fixed file | deterministic | **deterministic** (same guarantee) |
 | sibling order signal | goroutine + caller-clock | op-key only (causal order kept) |
-| capture completeness | quiescence + re-drive | trace-id grouping over the file |
-| gate contract | full ordered tree, byte-exact | boundary-effect set (cardinality opt-in) |
+| capture completeness | quiescence + re-drive | root+markers present ⇒ gate; else skip-with-warning |
+| gate contract | full ordered tree, byte-exact | boundary-effect set, no-new-effects (cardinality opt-in) |
 | self-test (3× re-drive) | required | **N/A** — file is the fixed input |
 
 The post-hoc golden is therefore a **different artifact** from an in-process
@@ -176,18 +191,44 @@ helper.
 
 ---
 
-## 5. Open decisions (for the flowmap team to settle)
+## 5. Decisions
 
-- **Multi-service traces.** e2e flows cross services (bus → subscribers), but
-  flowmap's model is per-service boundary. *Recommendation: per-service split* —
-  ingestion partitions a cross-service trace by `service.name` and validates each
-  service against its own spans. Matches the boundary-contract model and lets
-  each team own its golden. (The whole-flow graph is a later, separate
-  cross-repo-composition concern — Phase 13.)
-- **Where expectations live.** In-process, the flow DSL declares them in Go.
-  Post-hoc has no Go flow object. *Recommendation: snapshot/set-only to start* —
-  the golden is the assertion. Add a small optional per-flow `expectations.yaml`
-  (opt-in cardinality) only once a flow has earned it.
+### Resolved
+- **D-PH1 — grouping unit.** Slug for the assertion/coverage set; one
+  representative trace for the diagram (§[P10.2]).
+- **D-PH2 — completeness.** Stage 1 trusts the file but reports span/trace counts
+  and "no root span" warnings, never fails. Stage 2 gates a flow only when its
+  service-entry root + declared markers are present in the file (reuse `await`'s
+  marker logic statically); otherwise skip-with-warning rather than gate on a
+  possibly-truncated trace.
+- **D-PH3 — comparison.** No-new-effects (§[P10.3]); missing effects go to
+  coverage, not the gate.
+- **D-PH4 — multi-service.** Per-service split: partition a cross-service trace
+  by `service.name`, scope each service to its own spans, validate against that
+  service's golden. Matches the boundary-contract model; each team owns its
+  golden. Naming: `<slug>.<service>.golden.json`. (Whole-flow choreography is the
+  separate Phase 13 cross-repo concern.)
+- **D-PH5 — expectations location.** Snapshot/set-only to start — the golden is
+  the assertion. A small optional per-flow `expectations.yaml` (opt-in
+  cardinality) is added only once a flow has earned it.
+
+### Still open before the build (mechanical / your-side)
+- **OTLP-JSON format.** Capture one real collector `file`-exporter sample and pin
+  the decoder against it **before** writing `internal/otlpjson` — OTel encodes
+  trace/span IDs as **hex**, not the proto-JSON base64 default, and the
+  `AnyValue` attribute union needs explicit handling. Decide hand-roll (lean) vs.
+  `pdata`'s `ptrace.JSONUnmarshaler` (robust, heavier — isolate it off the public
+  `harness`/`flow`/`ir` surface either way).
+- **CODEOWNERS.** Route the new post-hoc golden paths
+  (`**/.flowmap/**/*.golden.json` under the e2e dirs) before stage 2.
+- **Instrumentation breadth (your side).** `otelaws`-only today ⇒ stage 1 shows
+  published/consumed events (the bus fan-out) but not HTTP entrypoints / DB until
+  `otelhttp`/`otelsql` are added. Confirmed worth shipping bus-only first.
+- **Collector drain in CI (your side).** The file is complete only after
+  `tail_sampling`'s `decision_wait` elapses **and** the exporter flushes. CI must
+  drain the collector (SIGTERM-to-flush, or wait ≥ `decision_wait` + batch)
+  before `ingest` reads, or it races the late-decided traces — the same
+  truncation risk as D-PH2 from the producer end.
 
 ---
 
