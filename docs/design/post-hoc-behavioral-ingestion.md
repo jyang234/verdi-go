@@ -8,11 +8,13 @@ out-of-process capture.
 **Built so far** (`flowmap behavior ingest <traces> [--service-dir D]`):
 `internal/otlpjson` (OTLP/JSON → `capture.Span`, no gRPC/pdata dep),
 `internal/ingest` (slug × service grouping + per-service root assembly, design
-D-PH1/D-PH4), and the `behavior ingest` CLI verb that canonicalizes each
-fragment through the **unchanged** `canon` and prints the exercised
+D-PH1/D-PH4), the `behavior ingest` CLI verb that prints the exercised
 boundary-effect set + the `coverage.Delta` against a service's boundary
-contract. Always exits 0. Deferred: the post-hoc canon profile knobs ([P10.3]
-redaction/op-key ordering), and stage-2 `--update`/golden set-comparison.
+contract (always exits 0), and the **[P10.3] post-hoc canon profile** (mode-driven
+op-key sibling ordering; resource-noise stripping is subsumed by the existing
+attribute allowlist). Dogfooded end-to-end against the `loansut` fixture
+(`internal/ingest/dogfood_test.go`). Deferred: stage-2 `--update`/golden
+set-comparison, and pinning the decoder against a real collector sample.
 
 **Audience:** the flowmap team (the build asks below) and adopting service teams
 (the conventions in §4 and `docs/integration/`).
@@ -118,18 +120,26 @@ tag is ignored, not an error — the file may carry unrelated traffic.
 Out-of-process traces carry nondeterminism the in-process path never sees. A
 `canon` profile (a config flag, not a fork) handles it:
 
-- **Redaction, extended.** Strip/normalize `host.*`, `*.pod.*`, `*.port`,
-  `service.instance.id`, `process.*`, k8s/instance attributes, on top of the
-  existing UUID/timestamp/numeric-id redaction (`canon §3.2`).
-- **Ordering — keep what survives, drop only the in-process signals.**
-  `parent_span_id` and span links **survive in OTLP**, so causal (parent→child)
-  happens-before is still free; keep it. What does *not* survive is the in-process
-  sibling signal — `flowmap.goid` and same-process caller-clock intervals
-  (`capture.Concurrent`, `capture.go:164`). So in this profile, **ambiguous
-  siblings order by canonical op-key**, and `canon §3.3`'s "never compare
-  cross-service timestamps" / "default to concurrent on ambiguity" rules carry
-  the rest. Net: the readable sequence (charge→publishes→ledger) is preserved
-  where it is causal; only genuinely-concurrent peers fall back to op-key order.
+- **Redaction (already subsumed by the allowlist).** Resource noise —
+  `host.*`, pod, `*.port`, `service.instance.id`, `process.*`, k8s/instance
+  attributes — never reaches the snapshot, because `canon`'s attribute
+  projection is an **allowlist** (`canon.go:290`, default empty + a normalized
+  `db.statement`): anything not explicitly allowlisted is dropped, so the OTLP
+  resource attributes a post-hoc trace carries are excluded without any
+  post-hoc-specific code. Per-value redaction (UUID/id/timestamp placeholders)
+  still applies to whatever a service *does* allowlist.
+- **Ordering — preserve nesting, op-key the siblings** (`canon.go:135`, driven
+  by `cf.Mode == ModePostHoc`). Parent→child nesting **survives in OTLP**
+  (`parent_span_id`), so the tree depth — the real happens-before — is kept
+  untouched. What does *not* survive run-to-run is a sibling happens-before
+  signal: `flowmap.goid` is absent out of process, and exported caller-clock
+  intervals are not run-independent (a concurrent pair may or may not overlap in
+  a given capture). So per `canon §3.3` rule 3 (ambiguous ⇒ concurrent), a
+  parent's children become a **single concurrent group ordered by canonical
+  op-key** — timing- *and* span-id-independent. This is strictly more concurrent
+  than the in-process tree of the same flow (siblings the goroutine signal would
+  have sequenced are shown parallel); that is the honest out-of-process view, and
+  the set-based gate (below) does not depend on sibling order anyway.
 - **Gate on the boundary-effect *set*, not cardinality/ordering/timing.** The
   post-hoc assertion is the set of `boundaryKey`s the flow exercised — events
   published/consumed, deps called, entrypoints — **the same key space the
