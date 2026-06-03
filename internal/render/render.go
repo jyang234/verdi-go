@@ -201,10 +201,13 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	}
 
 	// Render the body; r.id records every lifeline an arrow or note touches and
-	// assigns aliases to peers met along the way.
+	// assigns aliases to peers met along the way. The root hop lands on entry
+	// (landingOf), but the root's children are issued by childFrom(root) — identical
+	// to entry for every kind except a producer, and the same seed serviceInfra walks
+	// from, so box ownership and the drawn arrows agree even for a producer root.
 	var body strings.Builder
 	body.WriteString("    " + r.msg(caller, entry, label(root)))
-	r.writeSystemGroups(&body, root.Children, entry, fallback, "    ")
+	r.writeSystemGroups(&body, root.Children, childFrom(root, fallback), fallback, "    ")
 
 	// Shared lifelines the body drew to that the plan didn't already place, sorted.
 	rest := make([]string, 0, len(r.ref))

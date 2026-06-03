@@ -396,6 +396,23 @@ func TestSystemMermaidAsyncConsumerFromPublisher(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidProducerRootChildrenFromService: when the root is a producer
+// (reachable via SystemMermaidRootedAt on a producer-entry), its children are issued
+// by the producer's service, so the body draws them from that service — matching the
+// childFrom seed serviceInfra walks from. The DB child must read Y->db1 (boxed under
+// Y), not Bus->db1, so box ownership and the drawn arrow agree.
+func TestSystemMermaidProducerRootChildrenFromService(t *testing.T) {
+	db := &ir.CanonicalSpan{Op: "DB postgres SELECT t", Kind: ir.KindClient, Peer: "db1", Service: "Y"}
+	root := &ir.CanonicalSpan{Op: "PUBLISH evt", Kind: ir.KindProducer, Peer: "Bus", Service: "Y",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{db}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "Y", Root: root})
+	mustContain(t, out, "Y->>db1: DB postgres SELECT t")
+	mustContain(t, out, "box transparent Y\n    participant Y as Y\n    participant db1 as db1\n    end\n")
+	if strings.Contains(out, "Bus->>db1") {
+		t.Errorf("producer root's DB child must be drawn from its service, not the bus:\n%s", out)
+	}
+}
+
 // TestSystemMermaidConsumerRootUsesBrokerPeer: a consumer-rooted flow whose broker
 // is a managed system (Peer canonicalized to "SQS"/"SNS") draws the trigger arrow
 // from that broker and declares it exactly once — not from a hardcoded, dangling
