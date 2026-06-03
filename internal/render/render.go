@@ -202,6 +202,11 @@ func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[strin
 	if s.Service != "" {
 		into[s.Service] = true
 	}
+	// A consumer poll lands on its own service but draws its hop to the bus
+	// (writeSystemSpan); declare that peer so it has a fixed-order participant.
+	if s.Kind == ir.KindConsumer && s.Peer != "" {
+		into[s.Peer] = true
+	}
 	for _, g := range s.Children {
 		for _, m := range g.Members {
 			collectSystemLifelines(m, fallback, into)
@@ -238,8 +243,18 @@ func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup,
 // arrived there is enough.
 func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
 	land := landingOf(m, fallback)
-	if land != from {
-		b.WriteString(indent + r.msg(from, land, label(m)))
+	drawTo := land
+	if land == from && m.Peer != "" && m.Peer != from {
+		// A nested broker interaction that lands on its own lifeline — a consumer
+		// poll / receive (SQS ReceiveMessage), which is KindConsumer and so lands
+		// on its own service rather than the bus — would otherwise draw no hop and
+		// vanish from the diagram. Draw the reach to its peer (the Bus) so the
+		// receive is as visible as the publish and the settle. Child threading
+		// stays on the landed lifeline.
+		drawTo = m.Peer
+	}
+	if drawTo != from {
+		b.WriteString(indent + r.msg(from, drawTo, label(m)))
 	}
 	r.writeSystemGroups(b, m.Children, land, fallback, indent)
 }

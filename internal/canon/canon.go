@@ -123,16 +123,21 @@ type canonicalizer struct {
 // groups the children by happens-before order (recursing into each).
 func (c *canonicalizer) build(s *capture.Span, childrenOf map[string][]*capture.Span) *ir.CanonicalSpan {
 	op, peer := opkey.Of(s.Kind, s.Attrs, s.Name)
+	// A managed-broker call (AWS SDK SNS/SQS) arrives as a CLIENT span but is
+	// behaviorally a producer/consumer; normalize to the messaging role so every
+	// kind-keyed consumer (gate, syscontext, render, tiering) classifies it as the
+	// broker interaction it is. For non-messaging spans this is the raw kind.
+	kind := opkey.EffectiveKind(s.Kind, s.Attrs)
 	cs := &ir.CanonicalSpan{
 		Op:        op,
-		Kind:      s.Kind,
+		Kind:      kind,
 		Peer:      peer,
 		Service:   s.Attr("service.name"), // owning lifeline; "" in-process (omitempty)
 		Status:    normalizeStatus(s.Status),
 		ErrorType: s.ErrorType,
 		Attrs:     c.projectAttrs(s),
 	}
-	cs.Tier, _ = c.classifier.Classify(c.features(s, op))
+	cs.Tier, _ = c.classifier.Classify(c.features(kind, s, op))
 	cs.Children = c.group(s.Goroutine, childrenOf[s.ID], childrenOf)
 	return cs
 }
@@ -396,9 +401,9 @@ func (c *canonicalizer) collapseLoops(groups []ir.ChildGroup) []ir.ChildGroup {
 // span's kind, op, and attributes (canon §3.6). It mirrors the static extractor's
 // intent so a publish is tier 1 and an internal compute is tier 3 whether seen
 // statically or at runtime.
-func (c *canonicalizer) features(s *capture.Span, op string) model.Features {
+func (c *canonicalizer) features(kind ir.Kind, s *capture.Span, op string) model.Features {
 	f := model.Features{Identity: op, Fallible: normalizeStatus(s.Status) == capture.StatusError}
-	switch s.Kind {
+	switch kind {
 	case ir.KindServer, ir.KindConsumer:
 		f.Boundary, f.Effect, f.Origin = model.BoundaryInbound, model.EffectIO, model.OriginFirstParty
 	case ir.KindProducer:

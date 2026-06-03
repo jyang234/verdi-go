@@ -399,6 +399,55 @@ func TestIngestAsyncBrokerFixture(t *testing.T) {
 	}
 }
 
+// TestIngestAWSSNSSQSFixture is the end-to-end AWS path: SNS/SQS are emitted by
+// the AWS SDK as CLIENT-kind RPC spans carrying messaging.* attributes. Decoding
+// + canonicalizing must recover the broker interactions from those attributes —
+// PUBLISH the SNS topic, CONSUME the SQS queue, and SETTLE (the delete that
+// drains the message) as a distinct effect from the receive — rather than three
+// bare HTTP/RPC calls. Sequential disjoint timing must also render them as
+// ordered steps, not concurrent.
+func TestIngestAWSSNSSQSFixture(t *testing.T) {
+	spans, err := otlpjson.DecodeFile("../../testdata/otlp/aws-sns-sqs.otlp.json")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	flows := Group(spans)
+	if len(flows) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(flows))
+	}
+	tr, err := canon.Canonicalize(flows[0].Flow, nil)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	got := BoundaryEffects(tr.Root)
+	want := []string{
+		"CONSUME loan-queue",
+		"HTTP POST /loan-application",
+		"PUBLISH loan-events",
+		"SETTLE loan-queue",
+	}
+	if !equalStrs(got, want) {
+		t.Errorf("AWS boundary effects = %v\n                   want %v", got, want)
+	}
+
+	// The three broker ops have disjoint intervals well past the order guard, so
+	// they must render as three sequential steps in publish→receive→settle order,
+	// not as one concurrent group.
+	if n := len(tr.Root.Children); n != 3 {
+		t.Fatalf("want 3 sequential steps under the entry, got %d", n)
+	}
+	order := []string{"PUBLISH loan-events", "CONSUME loan-queue", "SETTLE loan-queue"}
+	for i, w := range order {
+		g := tr.Root.Children[i]
+		if g.Concurrent || g.Unordered {
+			t.Errorf("step %d should be a plain sequential step, got %+v", i, g)
+		}
+		if g.Members[0].Op != w {
+			t.Errorf("step %d = %q, want %q", i, g.Members[0].Op, w)
+		}
+	}
+}
+
 func services(g []FlowCapture) []string {
 	out := make([]string, len(g))
 	for i := range g {

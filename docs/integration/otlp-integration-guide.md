@@ -146,6 +146,26 @@ the parent — never rewires the tree. Link targets are matched by `(traceId,
 spanId)`. See `../../testdata/otlp/async-broker.otlp.json` for a worked two-trace
 example.
 
+### Managed brokers (AWS SNS/SQS) — recognized from `messaging.*`
+
+The AWS SDK instrumentation models SNS/SQS as **`CLIENT`-kind RPC spans** (kind
+3), not `PRODUCER`/`CONSUMER`, yet it still emits the messaging
+semantic-convention attributes. flowmap classifies a broker interaction from
+those attributes regardless of span kind, so **no extra wiring is needed** if
+your SDK emits them:
+
+- `messaging.destination.name` → the topic/queue in the op key.
+- `messaging.operation` (or `messaging.operation.type` / `.name`) → the
+  direction: `publish`/`send`/`create` → **PUBLISH**, `receive`/`process` →
+  **CONSUME**, and `settle`/`ack`/`delete` (SQS `DeleteMessage`) → **SETTLE** —
+  the acknowledgment that drains the message, kept distinct from the receive
+  rather than merged with it.
+
+`rpc.system.name` is accepted alongside the older `rpc.system`, so an RPC client
+call carrying only the newer spelling is keyed as `RPC …`, not a bare HTTP call.
+See `../../testdata/otlp/aws-sns-sqs.otlp.json` for the worked publish → receive →
+settle shape.
+
 ## Step 5 — ingest after the e2e run (stage 1, non-gated)
 
 Add one step to your CI e2e job, after the run drains:

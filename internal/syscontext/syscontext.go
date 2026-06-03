@@ -135,10 +135,17 @@ func (b *builder) walk(s *ir.CanonicalSpan, parent, fallback string, solid bool)
 		}
 	case ir.KindProducer:
 		b.node(svc, KindService)
-		b.publish(strings.TrimPrefix(s.Op, opkey.PublishPrefix), svc, solid)
+		if opkey.IsSettle(s.Op) {
+			// A consumer-side acknowledgment (drain) is a broker interaction but
+			// not a publish: registering it as one would fabricate a
+			// publisher→subscriber choreography edge for the queue.
+			b.settle(opkey.BusDestination(s.Op), svc, solid)
+		} else {
+			b.publish(opkey.BusDestination(s.Op), svc, solid)
+		}
 	case ir.KindConsumer:
 		b.node(svc, KindService)
-		b.consume(strings.TrimPrefix(s.Op, opkey.ConsumePrefix), svc, solid)
+		b.consume(opkey.BusDestination(s.Op), svc, solid)
 	case ir.KindServer:
 		b.node(svc, KindService)
 		switch {
@@ -196,6 +203,18 @@ func (b *builder) publish(event, svc string, solid bool) {
 		b.node(busNode, KindBroker)
 		b.edge(svc, busNode, "publish "+event, solid)
 	}
+}
+
+// settle draws a service's acknowledgment of a queue (SQS delete, an ack) as a
+// broker interaction, without recording it in the pub map — an ack is not a
+// publish and must not seed a choreography edge. In choreography mode (no Bus
+// node) the ack has no publisher→subscriber meaning, so nothing is drawn.
+func (b *builder) settle(event, svc string, solid bool) {
+	if event == "" || b.choreography {
+		return
+	}
+	b.node(busNode, KindBroker)
+	b.edge(svc, busNode, "settle "+event, solid)
 }
 
 func (b *builder) consume(event, svc string, solid bool) {

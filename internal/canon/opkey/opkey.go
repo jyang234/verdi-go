@@ -30,6 +30,11 @@ const (
 	RPCPrefix     = "RPC "
 	PublishPrefix = "PUBLISH "
 	ConsumePrefix = "CONSUME "
+	// SettlePrefix keys a consumer-side acknowledgment that drains a message
+	// (SQS DeleteMessage, an ack/nack, a visibility extension). It is a distinct
+	// broker interaction from CONSUME — receiving a message and acknowledging it
+	// are two calls — so it must not collapse into the same op.
+	SettlePrefix = "SETTLE "
 )
 
 // Of returns the canonical operation key and peer (counterparty lifeline) for a
@@ -38,11 +43,21 @@ const (
 // producer/consumer spans, the peer service or db system for outbound calls, and
 // "" for internal work.
 func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
+	// A broker interaction is recognized from its messaging.* attributes before
+	// the kind switch, because SDK instrumentation for managed brokers (notably
+	// the AWS SDK for SNS/SQS) models the call as a CLIENT-kind RPC span that
+	// nonetheless carries messaging.destination.name and messaging.operation. The
+	// destination + operation are the identity; classifying by kind alone would
+	// render an SNS publish as a bare HTTP/RPC call to "sns" and merge an SQS
+	// receive with its delete.
+	if op, ok := messaging(kind, attrs); ok {
+		return op, "Bus"
+	}
 	switch kind {
 	case ir.KindServer:
 		return httpKey("HTTP", method(attrs), "", route(attrs)), ""
 	case ir.KindClient:
-		if sys := first(attrs, "rpc.system"); sys != "" || first(attrs, "rpc.service") != "" {
+		if sys := rpcSystem(attrs); sys != "" || first(attrs, "rpc.service") != "" {
 			return rpcKey(attrs), first(attrs, "rpc.service", "peer.service", "server.address")
 		}
 		if sys := dbSystem(attrs); sys != "" {
@@ -60,6 +75,99 @@ func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
 		}
 		return name, ""
 	}
+}
+
+// EffectiveKind is the messaging role a span plays, derived from its messaging.*
+// attributes when present and falling back to the raw span kind otherwise. It is
+// the single normalization that lets every kind-keyed consumer — the boundary-
+// effect gate, the system-context graph, the renderer, tiering — treat an AWS
+// SDK SNS/SQS CLIENT span as the producer/consumer it behaviorally is, without
+// each re-deriving the messaging role. A publish or settle is an outbound broker
+// interaction (KindProducer); a receive/process is inbound (KindConsumer).
+func EffectiveKind(kind ir.Kind, attrs map[string]string) ir.Kind {
+	if _, ok := messaging(kind, attrs); !ok {
+		return kind
+	}
+	if messagingDirection(kind, attrs) == dirConsume {
+		return ir.KindConsumer
+	}
+	return ir.KindProducer
+}
+
+// BusDestination strips the PUBLISH/CONSUME/SETTLE prefix from a messaging op
+// key, yielding the bare destination (topic/queue) for edge labeling.
+func BusDestination(op string) string {
+	for _, p := range []string{PublishPrefix, ConsumePrefix, SettlePrefix} {
+		if strings.HasPrefix(op, p) {
+			return strings.TrimPrefix(op, p)
+		}
+	}
+	return op
+}
+
+// IsSettle reports whether op is a consumer-side acknowledgment (drain), which a
+// choreography view must not treat as a publish.
+func IsSettle(op string) bool { return strings.HasPrefix(op, SettlePrefix) }
+
+// msgDir is the direction of a broker interaction.
+type msgDir int
+
+const (
+	dirPublish msgDir = iota
+	dirConsume
+	dirSettle
+)
+
+// messaging returns the canonical op key for a broker interaction, or ok=false
+// when the span carries no messaging destination. The destination is required —
+// it is the identity of the interaction — so a non-messaging span never matches.
+func messaging(kind ir.Kind, attrs map[string]string) (string, bool) {
+	dest := destination(attrs)
+	if dest == "" {
+		return "", false
+	}
+	switch messagingDirection(kind, attrs) {
+	case dirConsume:
+		return ConsumePrefix + dest, true
+	case dirSettle:
+		return SettlePrefix + dest, true
+	default:
+		return PublishPrefix + dest, true
+	}
+}
+
+// messagingDirection classifies the operation. It reads messaging.operation.type
+// (the semconv enum: publish/create/receive/process/settle) and tolerates the
+// older messaging.operation and the lower-level messaging.operation.name, which
+// carry SDK method names (SendMessage, ReceiveMessage, DeleteMessage). Settle is
+// checked first so "DeleteMessage" drains rather than being mistaken for a
+// destination op; with no operation hint, the span kind decides.
+func messagingDirection(kind ir.Kind, attrs map[string]string) msgDir {
+	op := strings.ToLower(first(attrs,
+		"messaging.operation.type", "messaging.operation", "messaging.operation.name"))
+	switch {
+	case op == "":
+		// fall through to kind
+	case containsAny(op, "settle", "ack", "nack", "delete", "complete", "abandon", "reject", "extend", "visibility"):
+		return dirSettle
+	case containsAny(op, "receive", "process", "poll", "deliver", "consume"):
+		return dirConsume
+	case containsAny(op, "publish", "send", "create", "produce", "enqueue"):
+		return dirPublish
+	}
+	if kind == ir.KindConsumer {
+		return dirConsume
+	}
+	return dirPublish
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // httpKey assembles "HTTP <METHOD> [<peer> ]<route>". The peer is included for
@@ -134,6 +242,14 @@ func destination(attrs map[string]string) string {
 
 func dbSystem(attrs map[string]string) string {
 	return first(attrs, "db.system", "db.system.name")
+}
+
+// rpcSystem reads the RPC system, accepting both the original rpc.system and the
+// newer rpc.system.name spelling (AWS SDK instrumentation emits the latter), so
+// an RPC client call is not misclassified as a bare HTTP call when only the
+// newer attribute is present.
+func rpcSystem(attrs map[string]string) string {
+	return first(attrs, "rpc.system", "rpc.system.name")
 }
 
 func statement(attrs map[string]string) string {
