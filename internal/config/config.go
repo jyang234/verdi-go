@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -98,6 +99,12 @@ type CanonConfig struct {
 	// timestamp value matchers. Only attributes that are retained (an allowlisted
 	// key) are projected, so a redact key has effect only when it is also kept.
 	RedactKeys []string `yaml:"redactKeys"`
+	// OrderGuardMs is the out-of-process sibling-ordering guard, in milliseconds.
+	// Two disjoint sibling spans separated by more than this are ordered
+	// sequentially (a reliable happens-before); a smaller gap leaves them
+	// unordered rather than over-claiming a sequence. 0 => default (100ms), well
+	// past same-host scheduling jitter; raise it in a high-latency environment.
+	OrderGuardMs int `yaml:"orderGuardMs"`
 }
 
 // ClassifyHints name the libraries flowmap cannot infer: loggers, the bus client,
@@ -238,6 +245,16 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// OrderGuard returns the out-of-process sibling-ordering guard, or the 100ms
+// default. A disjoint sibling gap larger than this is treated as a reliable
+// happens-before; a smaller gap is left unordered.
+func (c *CanonConfig) OrderGuard() time.Duration {
+	if c.OrderGuardMs > 0 {
+		return time.Duration(c.OrderGuardMs) * time.Millisecond
+	}
+	return 100 * time.Millisecond
 }
 
 // salienceTiers maps a salience name to the maximum tier retained in a snapshot.

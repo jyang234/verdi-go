@@ -211,8 +211,8 @@ func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[strin
 
 func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
 	for _, g := range groups {
-		if g.Concurrent {
-			b.WriteString(indent + "par concurrent\n")
+		if g.Concurrent || g.Unordered {
+			b.WriteString(indent + "par " + groupLabel(g) + "\n")
 			for i, m := range g.Members {
 				if i > 0 {
 					b.WriteString(indent + "and\n")
@@ -277,8 +277,8 @@ func (r *renderer) writeParticipants(b *strings.Builder, t *ir.CanonicalTrace) {
 // groups as par/and/end, and a collapsed loop as a multiplicity note.
 func (r *renderer) writeGroups(b *strings.Builder, groups []ir.ChildGroup, indent string) {
 	for _, g := range groups {
-		if g.Concurrent {
-			b.WriteString(indent + "par concurrent\n")
+		if g.Concurrent || g.Unordered {
+			b.WriteString(indent + "par " + groupLabel(g) + "\n")
 			for i, m := range g.Members {
 				if i > 0 {
 					b.WriteString(indent + "and\n")
@@ -318,6 +318,15 @@ func (r *renderer) id(label string) string {
 		return id
 	}
 	return sanitize(label)
+}
+
+// groupLabel distinguishes a genuine race (concurrent) from siblings whose order
+// could not be established (unordered) in a par block's label.
+func groupLabel(g ir.ChildGroup) string {
+	if g.Unordered {
+		return "unordered"
+	}
+	return "concurrent"
 }
 
 // label is the message text for a span: its canonical op, annotated with the

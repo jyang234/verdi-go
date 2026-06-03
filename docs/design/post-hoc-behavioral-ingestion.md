@@ -11,8 +11,9 @@ out-of-process capture.
 D-PH1/D-PH4), the `behavior ingest` CLI verb that prints the exercised
 boundary-effect set + the `coverage.Delta` against a service's boundary
 contract (always exits 0), the **[P10.3] post-hoc canon profile** (mode-driven
-op-key sibling ordering; resource-noise stripping is subsumed by the existing
-attribute allowlist), and the **stage-2 opt-in gate**: `--update` rebases the
+three-state sibling ordering — sequential / concurrent / unordered; resource-noise
+stripping is subsumed by the existing attribute allowlist), and the **stage-2
+opt-in gate**: `--update` rebases the
 per-(slug,service) `*.effects.json` golden + `*.flow.md` view; without it,
 `--flows-dir` enforces each committed golden with **no-new-effects** semantics
 (D-PH3) and skip-on-no-capture (D-PH2), failing non-zero on a new boundary
@@ -162,18 +163,25 @@ Out-of-process traces carry nondeterminism the in-process path never sees. A
   resource attributes a post-hoc trace carries are excluded without any
   post-hoc-specific code. Per-value redaction (UUID/id/timestamp placeholders)
   still applies to whatever a service *does* allowlist.
-- **Ordering — preserve nesting, op-key the siblings** (`canon.go:135`, driven
-  by `cf.Mode == ModePostHoc`). Parent→child nesting **survives in OTLP**
-  (`parent_span_id`), so the tree depth — the real happens-before — is kept
-  untouched. What does *not* survive run-to-run is a sibling happens-before
-  signal: `flowmap.goid` is absent out of process, and exported caller-clock
-  intervals are not run-independent (a concurrent pair may or may not overlap in
-  a given capture). So per `canon §3.3` rule 3 (ambiguous ⇒ concurrent), a
-  parent's children become a **single concurrent group ordered by canonical
-  op-key** — timing- *and* span-id-independent. This is strictly more concurrent
-  than the in-process tree of the same flow (siblings the goroutine signal would
-  have sequenced are shown parallel); that is the honest out-of-process view, and
-  the set-based gate (below) does not depend on sibling order anyway.
+- **Ordering — three states, not two** (`canon.go` `groupPostHoc`, driven by
+  `cf.Mode == ModePostHoc`). Parent→child nesting survives in OTLP, so tree depth
+  (the real happens-before) is kept. For *siblings* the goroutine signal is gone,
+  but absolute timestamps jittering does **not** mean order is unknown: the order
+  of *disjoint* intervals is highly run-stable even when the absolute values are
+  not. So siblings are classified into three states rather than all-concurrent:
+  - **overlapping** intervals → concurrent (genuine parallelism, `par`).
+  - **disjoint by more than `canon.orderGuardMs`** (default 100ms, ≫ scheduling
+    jitter) → sequential, emitted in start order — a reliable happens-before.
+  - **disjoint within the guard, or untimed** → *unordered*: a distinct group
+    (`ir.ChildGroup.Unordered`, rendered `par unordered`) that claims neither a
+    sequence nor a race.
+  Concurrent/unordered members are op-key + subtree-signature sorted, so a same-op
+  tie is run-independent. This recovers real sequence (a "user does A then B then
+  C" flow, and multi-trace baggage-stitched flows ordered by root-span start)
+  without over-claiming parallelism, while the guard separates clearly-causal gaps
+  from coincidentally-disjoint parallel ops. It is **view-only** — the set-based
+  gate (below) is order-independent — so this trades the over-strong all-concurrent
+  rule for accuracy without affecting any verdict.
 - **Gate on the boundary-effect *set*, not cardinality/ordering/timing.** The
   post-hoc assertion is the set of `boundaryKey`s the flow exercised — events
   published/consumed, deps called, entrypoints — **the same key space the
@@ -208,7 +216,7 @@ config, the **"flowmap-tagged flows are 100% sampled"** rule, and the
 | Dimension | In-process | Post-hoc |
 |---|---|---|
 | canon over a fixed file | deterministic | **deterministic** (same guarantee) |
-| sibling order signal | goroutine + caller-clock | op-key only (causal order kept) |
+| sibling order | goroutine + caller-clock | disjoint-interval order (3-state: sequential / concurrent / unordered) |
 | capture completeness | quiescence + re-drive | root+markers present ⇒ gate; else skip-with-warning |
 | gate contract | full ordered tree, byte-exact | boundary-effect set, no-new-effects (cardinality opt-in) |
 | self-test (3× re-drive) | required | **N/A** — file is the fixed input |

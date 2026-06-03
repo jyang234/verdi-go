@@ -7,85 +7,115 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
-// postHocFlow builds a root server span with three sibling publishes, with the
-// siblings' caller-clock intervals supplied by starts (ms). mode selects the
-// capture topology so the same spans can be canonicalized in-process vs.
-// post-hoc.
-func postHocFlow(mode capture.CaptureMode, starts [3]int) capture.CapturedFlow {
+// postHocFlow builds a root server span with three sibling publishes whose
+// [start,end] caller-clock intervals (ms) are given by iv. mode selects the
+// capture topology. The topics are intentionally not in op-key order.
+func postHocFlow(mode capture.CaptureMode, iv [3][2]int) capture.CapturedFlow {
 	spans := []capture.Span{
-		{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
+		{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 1000),
 			Attrs: map[string]string{"http.request.method": "POST", "http.route": "/x"}},
 	}
-	for i, topic := range []string{"c.third", "a.first", "b.second"} { // intentionally not op-key order
+	for i, topic := range []string{"c.third", "a.first", "b.second"} {
 		spans = append(spans, capture.Span{
 			ID: topic, ParentID: "root", Kind: ir.KindProducer,
-			Start: ms(0, starts[i]), End: ms(0, starts[i]+1),
+			Start: ms(0, iv[i][0]), End: ms(0, iv[i][1]),
 			Attrs: map[string]string{"messaging.destination.name": topic},
 		})
 	}
 	return capture.CapturedFlow{Flow: "x", Service: "s", Mode: mode, Spans: spans, Root: &spans[0], Complete: true}
 }
 
-// TestPostHocOrdersSiblingsByOpKey: out of process, a parent's children form one
-// canonical-key-ordered concurrent group regardless of their caller-clock
-// intervals — the in-process path would sequence non-overlapping siblings.
-func TestPostHocOrdersSiblingsByOpKey(t *testing.T) {
-	// Non-overlapping, strictly sequential starts: in-process this is three
-	// sequential groups; post-hoc it must be one concurrent group, op-key ordered.
-	tr := mustCanon(t, postHocFlow(capture.ModePostHoc, [3]int{0, 10, 20}))
-
-	if len(tr.Root.Children) != 1 {
-		t.Fatalf("post-hoc siblings should be one group, got %d", len(tr.Root.Children))
+// TestPostHocSequentialRecovery: siblings disjoint by well over the order guard
+// (200ms gaps vs the 100ms default) are a reliable happens-before — they must be
+// rendered as sequential groups in start order, not concurrent.
+func TestPostHocSequentialRecovery(t *testing.T) {
+	// c.third@0, a.first@200, b.second@400 — disjoint by ~200ms.
+	tr := mustCanon(t, postHocFlow(capture.ModePostHoc, [3][2]int{{0, 1}, {200, 201}, {400, 401}}))
+	if len(tr.Root.Children) != 3 {
+		t.Fatalf("clearly-disjoint siblings should be 3 sequential groups, got %d:\n%s", len(tr.Root.Children), marshal(t, tr))
 	}
-	g := tr.Root.Children[0]
-	if !g.Concurrent {
-		t.Errorf("the multi-member sibling group should be flagged concurrent")
-	}
-	want := []string{"PUBLISH a.first", "PUBLISH b.second", "PUBLISH c.third"}
-	if len(g.Members) != len(want) {
-		t.Fatalf("got %d members, want %d", len(g.Members), len(want))
-	}
+	want := []string{"PUBLISH c.third", "PUBLISH a.first", "PUBLISH b.second"} // start order, not op order
 	for i, w := range want {
-		if g.Members[i].Op != w {
-			t.Errorf("member %d = %q, want %q (canonical-key order)", i, g.Members[i].Op, w)
+		g := tr.Root.Children[i]
+		if g.Concurrent || g.Unordered {
+			t.Errorf("group %d should be a plain sequential step, got %+v", i, g)
+		}
+		if g.Members[0].Op != w {
+			t.Errorf("group %d = %q, want %q (start order)", i, g.Members[0].Op, w)
 		}
 	}
 }
 
-// TestPostHocOrderingIsTimingIndependent: permuting the siblings' wall-clock
-// intervals (and thus their span order in the flat set) yields byte-identical
-// IR — the property a fixed trace file must satisfy regardless of export jitter.
-func TestPostHocOrderingIsTimingIndependent(t *testing.T) {
-	a := marshal(t, mustCanon(t, postHocFlow(capture.ModePostHoc, [3]int{0, 10, 20})))
-	b := marshal(t, mustCanon(t, postHocFlow(capture.ModePostHoc, [3]int{20, 0, 10})))
-	c := marshal(t, mustCanon(t, postHocFlow(capture.ModePostHoc, [3]int{5, 5, 5}))) // simultaneous
-	if string(a) != string(b) || string(a) != string(c) {
-		t.Errorf("post-hoc IR is timing-dependent:\n a=%s\n b=%s\n c=%s", a, b, c)
+// TestPostHocConcurrentOnOverlap: siblings whose intervals overlap are genuine
+// parallelism — one concurrent group, members in canonical-key order.
+func TestPostHocConcurrentOnOverlap(t *testing.T) {
+	tr := mustCanon(t, postHocFlow(capture.ModePostHoc, [3][2]int{{0, 50}, {10, 60}, {20, 70}}))
+	if len(tr.Root.Children) != 1 || !tr.Root.Children[0].Concurrent {
+		t.Fatalf("overlapping siblings should be one concurrent group, got %+v", tr.Root.Children)
+	}
+	want := []string{"PUBLISH a.first", "PUBLISH b.second", "PUBLISH c.third"}
+	for i, w := range want {
+		if tr.Root.Children[0].Members[i].Op != w {
+			t.Errorf("member %d = %q, want %q", i, tr.Root.Children[0].Members[i].Op, w)
+		}
 	}
 }
 
-// TestInProcessStillSequencesSiblings guards that the profile is scoped to
-// post-hoc: the same strictly-sequential spans captured in-process remain
-// distinct sequential groups in happens-before order, unchanged.
+// TestPostHocUnorderedWithinGuard: siblings disjoint by less than the guard
+// (9ms gaps) could be coincidentally disjoint — render them unordered, claiming
+// neither sequence nor parallelism, but still deterministically (op-key order).
+func TestPostHocUnorderedWithinGuard(t *testing.T) {
+	tr := mustCanon(t, postHocFlow(capture.ModePostHoc, [3][2]int{{0, 1}, {10, 11}, {20, 21}}))
+	if len(tr.Root.Children) != 1 {
+		t.Fatalf("within-guard siblings should be one group, got %d:\n%s", len(tr.Root.Children), marshal(t, tr))
+	}
+	g := tr.Root.Children[0]
+	if g.Concurrent || !g.Unordered {
+		t.Errorf("group should be unordered (not concurrent), got %+v", g)
+	}
+	// Determinism is preserved for the ambiguous case: permuting input is identical.
+	a := marshal(t, mustCanon(t, postHocFlow(capture.ModePostHoc, [3][2]int{{0, 1}, {10, 11}, {20, 21}})))
+	b := marshal(t, mustCanon(t, postHocFlow(capture.ModePostHoc, [3][2]int{{20, 21}, {0, 1}, {10, 11}})))
+	if string(a) != string(b) {
+		t.Errorf("unordered IR depends on input order:\n a=%s\n b=%s", a, b)
+	}
+}
+
+// TestPostHocUnorderedWhenUntimed: with no timing at all, siblings are unordered
+// rather than imposed into an arbitrary deterministic sequence.
+func TestPostHocUnorderedWhenUntimed(t *testing.T) {
+	spans := []capture.Span{
+		{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK,
+			Attrs: map[string]string{"http.request.method": "POST", "http.route": "/x"}},
+	}
+	for _, topic := range []string{"a", "b"} {
+		spans = append(spans, capture.Span{ID: topic, ParentID: "root", Kind: ir.KindProducer,
+			Attrs: map[string]string{"messaging.destination.name": topic}})
+	}
+	tr := mustCanon(t, capture.CapturedFlow{Flow: "x", Service: "s", Mode: capture.ModePostHoc, Spans: spans, Root: &spans[0], Complete: true})
+	if len(tr.Root.Children) != 1 || !tr.Root.Children[0].Unordered {
+		t.Fatalf("untimed siblings should be one unordered group, got %+v", tr.Root.Children)
+	}
+}
+
+// TestInProcessStillSequencesSiblings guards that the guard/unordered logic is
+// scoped to post-hoc: in-process, disjoint siblings stay sequential in
+// happens-before order (the 3-run self-test, not a guard, validates stability).
 func TestInProcessStillSequencesSiblings(t *testing.T) {
-	tr := mustCanon(t, postHocFlow(capture.ModeInProcess, [3]int{0, 10, 20}))
+	tr := mustCanon(t, postHocFlow(capture.ModeInProcess, [3][2]int{{0, 1}, {10, 11}, {20, 21}}))
 	if len(tr.Root.Children) != 3 {
-		t.Fatalf("in-process non-overlapping siblings should stay 3 sequential groups, got %d:\n%s",
+		t.Fatalf("in-process disjoint siblings should stay 3 sequential groups, got %d:\n%s",
 			len(tr.Root.Children), marshal(t, tr))
 	}
-	// happens-before order follows the caller clock: c.third started first.
 	if got := tr.Root.Children[0].Members[0].Op; got != "PUBLISH c.third" {
 		t.Errorf("first sequential group = %q, want PUBLISH c.third (earliest start)", got)
 	}
 }
 
-// TestPostHocTiebreakIsSignatureNotFileOrder: two siblings sharing an Op but with
-// different subtrees must order run-independently (by canonical subtree), not by
-// the order they happened to be decoded — otherwise the post-hoc IR/.flow.md
-// churns between exports of the same flow.
-func TestPostHocTiebreakIsSignatureNotFileOrder(t *testing.T) {
-	// Two "HTTP GET api" client siblings with distinct child subtrees (one
-	// publishes a.x, the other b.y). Build the flow in both input orders.
+// TestPostHocTiebreakIsSignatureNotDecodeOrder: two siblings sharing an op but
+// with different subtrees order run-independently (by canonical subtree), whether
+// they land in a concurrent or unordered group — never by volatile decode order.
+func TestPostHocTiebreakIsSignatureNotDecodeOrder(t *testing.T) {
 	mk := func(firstChild, secondChild string) capture.CapturedFlow {
 		spans := []capture.Span{
 			{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
@@ -101,10 +131,9 @@ func TestPostHocTiebreakIsSignatureNotFileOrder(t *testing.T) {
 		}
 		return capture.CapturedFlow{Flow: "x", Service: "s", Mode: capture.ModePostHoc, Spans: spans, Root: &spans[0], Complete: true}
 	}
-	// Same flow, the two same-Op clients in swapped decode order.
 	a := marshal(t, mustCanon(t, mk("a.x", "b.y")))
 	b := marshal(t, mustCanon(t, mk("b.y", "a.x")))
 	if string(a) != string(b) {
-		t.Errorf("post-hoc IR depends on decode order for same-Op siblings:\n a=%s\n b=%s", a, b)
+		t.Errorf("post-hoc IR depends on decode order for same-op siblings:\n a=%s\n b=%s", a, b)
 	}
 }

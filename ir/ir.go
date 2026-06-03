@@ -66,7 +66,12 @@ type CanonicalSpan struct {
 // happens-before order; within a Concurrent group, members are stored in
 // canonical-key order so a race does not perturb the snapshot.
 type ChildGroup struct {
-	Concurrent   bool             `json:"concurrent,omitempty"`
+	Concurrent bool `json:"concurrent,omitempty"`
+	// Unordered marks members whose relative order could not be reliably
+	// established (out-of-process siblings disjoint within the order guard, or
+	// untimed) — distinct from Concurrent, which asserts parallelism. It claims
+	// neither a sequence nor a race.
+	Unordered    bool             `json:"unordered,omitempty"`
 	Multiplicity string           `json:"multiplicity,omitempty"`
 	Members      []*CanonicalSpan `json:"members"`
 }
