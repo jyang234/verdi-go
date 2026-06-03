@@ -362,6 +362,57 @@ func TestSystemMermaidBoxOwnerMatchesDrawnArrow(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidNestedProducerVisible: a publish nested under another publish is
+// still issued by the service, so it must render as a service→bus hop, not vanish as
+// a suppressed bus→bus self-hop (the reciprocal of the consumer self-landing rule —
+// a producer's children are threaded from its own service, not the bus it landed on).
+func TestSystemMermaidNestedProducerVisible(t *testing.T) {
+	inner := &ir.CanonicalSpan{Op: "PUBLISH inner", Kind: ir.KindProducer, Peer: "Bus", Service: "svc"}
+	outer := &ir.CanonicalSpan{Op: "PUBLISH outer", Kind: ir.KindProducer, Peer: "Bus", Service: "svc",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{inner}}}}
+	tr := &ir.CanonicalTrace{Service: "svc", Root: &ir.CanonicalSpan{
+		Op: "HTTP POST /x", Kind: ir.KindServer, Service: "svc",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{outer}}}}}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "svc->>Bus: PUBLISH outer")
+	mustContain(t, out, "svc->>Bus: PUBLISH inner")
+}
+
+// TestSystemMermaidAsyncConsumerFromPublisher: when a stitched async consumer is
+// nested under the producer it followed (the real reparented shape), its dashed hop
+// is drawn from the publishing service — "caused by this publish" — not from the bus.
+func TestSystemMermaidAsyncConsumerFromPublisher(t *testing.T) {
+	cons := &ir.CanonicalSpan{Op: "CONSUME evt", Kind: ir.KindConsumer, Peer: "Bus", Service: "Y", Async: true}
+	prod := &ir.CanonicalSpan{Op: "PUBLISH evt", Kind: ir.KindProducer, Peer: "Bus", Service: "X",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{cons}}}}
+	tr := &ir.CanonicalTrace{Service: "X", Root: &ir.CanonicalSpan{
+		Op: "HTTP POST /p", Kind: ir.KindServer, Service: "X",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{prod}}}}}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "X->>Bus: PUBLISH evt")
+	mustContain(t, out, "X--)Y: CONSUME evt")
+	if strings.Contains(out, "Bus--)Y") {
+		t.Errorf("async consumer should be drawn from the publishing service, not the bus:\n%s", out)
+	}
+}
+
+// TestSystemMermaidProducerRootChildrenFromService: when the root is a producer
+// (reachable via SystemMermaidRootedAt on a producer-entry), its children are issued
+// by the producer's service, so the body draws them from that service — matching the
+// childFrom seed serviceInfra walks from. The DB child must read Y->db1 (boxed under
+// Y), not Bus->db1, so box ownership and the drawn arrow agree.
+func TestSystemMermaidProducerRootChildrenFromService(t *testing.T) {
+	db := &ir.CanonicalSpan{Op: "DB postgres SELECT t", Kind: ir.KindClient, Peer: "db1", Service: "Y"}
+	root := &ir.CanonicalSpan{Op: "PUBLISH evt", Kind: ir.KindProducer, Peer: "Bus", Service: "Y",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{db}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "Y", Root: root})
+	mustContain(t, out, "Y->>db1: DB postgres SELECT t")
+	mustContain(t, out, "box transparent Y\n    participant Y as Y\n    participant db1 as db1\n    end\n")
+	if strings.Contains(out, "Bus->>db1") {
+		t.Errorf("producer root's DB child must be drawn from its service, not the bus:\n%s", out)
+	}
+}
+
 // TestSystemMermaidConsumerRootUsesBrokerPeer: a consumer-rooted flow whose broker
 // is a managed system (Peer canonicalized to "SQS"/"SNS") draws the trigger arrow
 // from that broker and declares it exactly once — not from a hardcoded, dangling

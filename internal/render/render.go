@@ -201,10 +201,13 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	}
 
 	// Render the body; r.id records every lifeline an arrow or note touches and
-	// assigns aliases to peers met along the way.
+	// assigns aliases to peers met along the way. The root hop lands on entry
+	// (landingOf), but the root's children are issued by childFrom(root) — identical
+	// to entry for every kind except a producer, and the same seed serviceInfra walks
+	// from, so box ownership and the drawn arrows agree even for a producer root.
 	var body strings.Builder
 	body.WriteString("    " + r.msg(caller, entry, label(root)))
-	r.writeSystemGroups(&body, root.Children, entry, fallback, "    ")
+	r.writeSystemGroups(&body, root.Children, childFrom(root, fallback), fallback, "    ")
 
 	// Shared lifelines the body drew to that the plan didn't already place, sorted.
 	rest := make([]string, 0, len(r.ref))
@@ -372,14 +375,14 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 			}
 			dbOwners[s.Peer][from] = true
 		}
-		childFrom := landingOf(s, fallback)
+		cf := childFrom(s, fallback)
 		for _, g := range s.Children {
 			for _, m := range g.Members {
-				walk(m, childFrom)
+				walk(m, cf)
 			}
 		}
 	}
-	walk(root, landingOf(root, fallback))
+	walk(root, childFrom(root, fallback))
 
 	ownedDB = map[string][]string{}
 	for db, owners := range dbOwners {
@@ -453,7 +456,7 @@ func (r *renderer) writeAsyncSystemSpan(b *strings.Builder, m *ir.CanonicalSpan,
 		b.WriteString(indent + r.amsg(from, drawTo, label(m)))
 		b.WriteString(indent + "Note over " + r.id(drawTo) + ": async (FOLLOWS_FROM)\n")
 	}
-	r.writeSystemGroups(b, m.Children, landingOf(m, fallback), fallback, indent)
+	r.writeSystemGroups(b, m.Children, childFrom(m, fallback), fallback, indent)
 }
 
 // splitAsync partitions a group's members into synchronous members and async
@@ -485,6 +488,22 @@ func drawTarget(m *ir.CanonicalSpan, from, fallback string) string {
 	return land
 }
 
+// childFrom is the lifeline that issues m's nested spans — the `from` threaded when
+// recursing into m's children. For most spans it is where m lands: a client call
+// hands execution to the remote peer, whose spans nest under it, so the peer issues
+// them. A producer is the reciprocal exception to landingOf: publishing does not
+// transfer execution, so a producer's nested spans — further local work, or the
+// async consumer it caused — are still issued by the producer's own service, not the
+// bus it landed on. Threading the bus there would draw the service's nested calls as
+// the bus's, and collapse a nested publish (which also lands on the bus) into a
+// suppressed bus→bus self-hop, making it vanish.
+func childFrom(m *ir.CanonicalSpan, fallback string) string {
+	if m.Kind == ir.KindProducer {
+		return lifelineLabel(m.Service, fallback)
+	}
+	return landingOf(m, fallback)
+}
+
 // writeSystemSpan draws the hop into a span (from the caller lifeline to where the
 // span lands) and recurses, threading the landed lifeline as the new caller. When
 // the span lands on the lifeline it was already called from — a callee's own
@@ -494,7 +513,7 @@ func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from
 	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		b.WriteString(indent + r.msg(from, drawTo, label(m)))
 	}
-	r.writeSystemGroups(b, m.Children, landingOf(m, fallback), fallback, indent)
+	r.writeSystemGroups(b, m.Children, childFrom(m, fallback), fallback, indent)
 }
 
 // writeParticipants declares lifelines in a fixed order: the caller, the self
