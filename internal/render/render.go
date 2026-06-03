@@ -15,8 +15,51 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// SystemGraph renders a deduplicated system-context graph (services + the
+// infrastructure they touch) as a Mermaid flowchart. Solid edges were exercised
+// by a captured flow; dashed edges come only from the static contract overlay
+// (can happen, untested). Node shapes distinguish the kinds: services are
+// rectangles, the broker a hexagon, external peers/DBs stadiums.
+func SystemGraph(g *syscontext.Graph) string {
+	var b strings.Builder
+	b.WriteString("graph LR\n")
+	alias := make(map[string]string, len(g.Nodes))
+	used := map[string]bool{}
+	for _, n := range g.Nodes {
+		id := uniqueID(sanitize(n.Name), used)
+		alias[n.Name] = id
+		open, close := nodeShape(n.Kind)
+		b.WriteString("    " + id + open + `"` + n.Name + `"` + close + "\n")
+	}
+	for _, e := range g.Edges {
+		arrow := "-->"
+		if e.Dashed {
+			arrow = "-.->"
+		}
+		line := "    " + alias[e.From] + " " + arrow
+		if e.Label != "" {
+			line += "|\"" + e.Label + "\"|"
+		}
+		line += " " + alias[e.To] + "\n"
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+func nodeShape(k syscontext.NodeKind) (open, close string) {
+	switch k {
+	case syscontext.KindBroker:
+		return "{{", "}}"
+	case syscontext.KindExternal:
+		return "([", "])"
+	default: // service, client
+		return "[", "]"
+	}
+}
 
 // Mermaid renders t as a Mermaid sequenceDiagram. The output ends with a newline
 // and is a pure, deterministic function of the IR.

@@ -21,8 +21,15 @@ also emits a **cross-service** `<slug>.system.flow.md` (`ingest.WholeFlows` +
 `render.SystemMermaid`) — the whole-flow choreography across every service the
 flow touched, a non-gated view. `--render-dir D` emits those diagrams in **any**
 mode (including non-gated stage 1), and `--root SVC` centers a diagram on one
-service's subtree (`render.SystemMermaidRootedAt`). Dogfooded end-to-end against
-the `loansut` fixture (`internal/ingest/dogfood_test.go`).
+service's subtree (`render.SystemMermaidRootedAt`). `--render-dir D --merged`
+writes `system.context.md`: **all flows merged into one deduplicated
+service-interaction graph** (`internal/syscontext` + `render.SystemGraph`) — a
+Mermaid flowchart of services + infra (broker/DBs/external peers). `--choreography`
+joins publisher→subscriber on the event name instead of routing through a Bus
+node; `--contracts dirs` overlays the static boundary contracts as **dashed**
+edges (can-happen but no flow exercised — a system-level coverage view).
+Dogfooded end-to-end against the `loansut` fixture
+(`internal/ingest/dogfood_test.go`).
 
 The decoder is **pinned to authoritative collector output**: `testdata/otlpgen`
 (a standalone module, so `pdata` stays off the engine's graph) renders a

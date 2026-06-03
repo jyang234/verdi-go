@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/irtest"
+	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -194,5 +195,34 @@ func TestSystemMermaidRootedAt(t *testing.T) {
 	}
 	if _, ok := SystemMermaidRootedAt(tr, "absent"); ok {
 		t.Error("absent service should return ok=false")
+	}
+}
+
+// TestSystemGraph renders a system-context graph: graph LR, node shapes by kind,
+// solid vs dashed edges.
+func TestSystemGraph(t *testing.T) {
+	g := &syscontext.Graph{
+		Nodes: []syscontext.Node{
+			{Name: "loansvc", Kind: syscontext.KindService},
+			{Name: "Bus", Kind: syscontext.KindBroker},
+			{Name: "pg", Kind: syscontext.KindExternal},
+		},
+		Edges: []syscontext.Edge{
+			{From: "loansvc", To: "Bus", Label: "publish e1", Dashed: false},
+			{From: "loansvc", To: "pg", Label: "DB", Dashed: true},
+		},
+	}
+	out := SystemGraph(g)
+	for _, want := range []string{
+		"graph LR",
+		`Bus{{"Bus"}}`,       // broker hexagon
+		`pg(["pg"])`,         // external stadium
+		`loansvc["loansvc"]`, // service rectangle
+		`-->|"publish e1"|`,  // solid edge
+		`-.->|"DB"|`,         // dashed (contract-only) edge
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }

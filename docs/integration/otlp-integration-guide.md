@@ -143,6 +143,19 @@ flowmap behavior ingest --render-dir e2e-diagrams/ /var/lib/flowmap/traces/e2e.o
 flowmap behavior ingest --render-dir e2e-diagrams/ --root payments-svc /var/lib/flowmap/traces/e2e.otlp.json
 ```
 
+For a **system context map** — every flow merged into one deduplicated
+service-interaction graph (`e2e-diagrams/system.context.md`) — add `--merged`.
+Overlay your static contracts with `--contracts` to see, dashed, the
+interactions your code can do but the e2e never touched (a system-level coverage
+view); use `--choreography` to draw publisher→subscriber edges directly instead
+of via the Bus node:
+
+```sh
+flowmap behavior ingest --render-dir e2e-diagrams/ --merged \
+    --contracts services/loansvc,services/payments \
+    /var/lib/flowmap/traces/e2e.otlp.json
+```
+
 > **Flags precede the trace path** (`flowmap behavior ingest [flags] <path>`).
 > `<path>` may be a file or a directory of rotated `*.json`.
 

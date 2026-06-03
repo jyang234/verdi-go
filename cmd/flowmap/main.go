@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/canon"
@@ -23,6 +24,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/boundary"
 	"github.com/jyang234/golang-code-graph/internal/static/graphio"
+	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -232,14 +234,23 @@ func cmdIngest(args []string) error {
 	update := fs.Bool("update", false, "with --flows-dir, rebase the post-hoc goldens and .flow.md views from the traces")
 	renderDir := fs.String("render-dir", "", "write a cross-service <slug>.system.flow.md per flow here (any mode, non-gated)")
 	root := fs.String("root", "", "with --render-dir, center the diagram on this service's subtree")
+	merged := fs.Bool("merged", false, "with --render-dir, also write system.context.md: all flows merged into one service-interaction graph")
+	choreography := fs.Bool("choreography", false, "with --merged, join publisher→subscriber on the event name instead of routing through a Bus node")
+	contracts := fs.String("contracts", "", "with --merged, comma-separated service source dirs whose static boundary contracts overlay the graph (dashed = untested)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: flowmap behavior ingest <traces-file-or-dir> [--flows-dir D] [--service-dir D] [--update] [--render-dir D [--root SVC]]")
+		return fmt.Errorf("usage: flowmap behavior ingest <traces-file-or-dir> [--flows-dir D] [--service-dir D] [--update] [--render-dir D [--root SVC] [--merged [--choreography] [--contracts dirs]]]")
 	}
 	if *root != "" && *renderDir == "" {
 		return fmt.Errorf("--root requires --render-dir")
+	}
+	if (*merged || *choreography || *contracts != "") && *renderDir == "" {
+		return fmt.Errorf("--merged/--choreography/--contracts require --render-dir")
+	}
+	if (*choreography || *contracts != "") && !*merged {
+		return fmt.Errorf("--choreography/--contracts require --merged")
 	}
 
 	spans, err := otlpjson.DecodePath(fs.Arg(0))
@@ -274,6 +285,11 @@ func cmdIngest(args []string) error {
 	if *renderDir != "" {
 		if err := writeSystemDiagrams(*renderDir, spans, *root); err != nil {
 			return err
+		}
+		if *merged {
+			if err := writeSystemContext(*renderDir, spans, *contracts, *choreography); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -440,6 +456,73 @@ func writeSystemDiagrams(dir string, spans []capture.Span, rootSvc string) error
 		fmt.Printf("wrote %s.flow.md (cross-service view%s)\n", stem, note)
 	}
 	return nil
+}
+
+// writeSystemContext merges every captured flow into one deduplicated
+// service-interaction graph (system.context.md), optionally overlaying the
+// static boundary contracts of the given service dirs (dashed = can-happen but
+// no flow exercised it). It is a non-gated view.
+func writeSystemContext(dir string, spans []capture.Span, contractDirs string, choreography bool) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	var traces []*ir.CanonicalTrace
+	for _, wf := range ingest.WholeFlows(spans) {
+		tr, err := canon.Canonicalize(wf.Flow, nil)
+		if err != nil {
+			fmt.Printf("  - %-24s system-context: flow skipped: %v\n", wf.Slug, err)
+			continue
+		}
+		traces = append(traces, tr)
+	}
+
+	var statics []syscontext.Contract
+	for _, d := range splitList(contractDirs) {
+		c, err := boundary.Generate(d)
+		if err != nil {
+			return fmt.Errorf("contract %s: %w", d, err)
+		}
+		statics = append(statics, contractToSyscontext(c))
+	}
+
+	g := syscontext.Build(traces, statics, syscontext.Options{Choreography: choreography})
+	path := filepath.Join(dir, "system.context.md")
+	if err := os.WriteFile(path, []byte(render.SystemGraph(g)), 0o644); err != nil {
+		return err
+	}
+	overlay := ""
+	if len(statics) > 0 {
+		overlay = fmt.Sprintf(" + %d contract(s) overlaid", len(statics))
+	}
+	fmt.Printf("wrote %s (%d node(s), %d edge(s)%s)\n", path, len(g.Nodes), len(g.Edges), overlay)
+	return nil
+}
+
+// contractToSyscontext flattens a static boundary contract into the neutral form
+// the system-context builder consumes, so syscontext stays free of the static
+// analyzer's dependencies.
+func contractToSyscontext(c *boundary.Contract) syscontext.Contract {
+	sc := syscontext.Contract{Service: c.Service}
+	for _, e := range c.Published {
+		sc.Published = append(sc.Published, e.Event)
+	}
+	for _, e := range c.Consumed {
+		sc.Consumed = append(sc.Consumed, e.Event)
+	}
+	for _, d := range c.ExternalDeps {
+		sc.Deps = append(sc.Deps, syscontext.Dep{Peer: d.Peer, Kind: d.Kind})
+	}
+	return sc
+}
+
+func splitList(csv string) []string {
+	var out []string
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // printExercised lists the union of boundary effects across all fragments.
