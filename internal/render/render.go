@@ -65,7 +65,8 @@ func nodeShape(k syscontext.NodeKind) (open, close string) {
 // Mermaid renders t as a Mermaid sequenceDiagram. The output ends with a newline
 // and is a pure, deterministic function of the IR.
 func Mermaid(t *ir.CanonicalTrace) string {
-	r := &renderer{self: lifelineLabel(t.Service, "service")}
+	r := newRenderer()
+	r.self = lifelineLabel(t.Service, "service")
 	r.caller = callerLabel(t.Root)
 
 	var b strings.Builder
@@ -82,11 +83,33 @@ type renderer struct {
 	self   string
 	caller string
 	alias  map[string]string // lifeline label -> mermaid-safe id
+	used   map[string]bool   // taken ids, for unique-id assignment
 	// ref records the lifelines an arrow or note actually drew to. The cross-service
 	// renderer declares only these, pruning over-declared participants no edge
-	// touches. Nil for the per-service Mermaid renderer, which declares its fixed
-	// caller/self/peer set up front and draws to each, so nothing is pruned.
+	// touches. The per-service Mermaid renderer declares its fixed caller/self/peer
+	// set up front and draws to each, so it reads nothing from ref.
 	ref map[string]bool
+}
+
+// newRenderer returns a renderer with its maps initialized.
+func newRenderer() *renderer {
+	return &renderer{
+		alias: map[string]string{},
+		used:  map[string]bool{},
+		ref:   map[string]bool{},
+	}
+}
+
+// aliasOf returns the Mermaid-safe id for a lifeline, assigning a unique one on
+// first sight. It records nothing about whether the lifeline is drawn — callers
+// that mean "this lifeline is touched by an edge" use id instead.
+func (r *renderer) aliasOf(name string) string {
+	if id, ok := r.alias[name]; ok {
+		return id
+	}
+	id := uniqueID(sanitize(name), r.used)
+	r.alias[name] = id
+	return id
 }
 
 // SystemMermaid renders a whole-flow, CROSS-SERVICE sequence diagram from a trace
@@ -150,123 +173,137 @@ func SystemMermaidRootedAt(t *ir.CanonicalTrace, service string) (string, bool) 
 // from an explicit caller lifeline. fallback is the service to attribute spans
 // that carry no service.name.
 func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) string {
-	r := &renderer{alias: map[string]string{}, ref: map[string]bool{}}
+	r := newRenderer()
 	entry := landingOf(root, fallback)
 
-	lifelines := map[string]bool{}
-	collectSystemLifelines(root, fallback, lifelines)
-	lifelines[caller] = true
-	lifelines[entry] = true
-
-	// Participants are laid out family-adjacent: the synthetic caller, then each
-	// service immediately followed by — and boxed with — the databases it
-	// exclusively owns (a store reached only from that service), then the remaining
-	// shared lifelines (the broker, external peers, multi-owner databases) sorted.
-	// This keeps a service and its infrastructure together instead of interleaving
-	// every service's databases alphabetically. Aliases are assigned in this order
-	// (so a name's id is stable), but the declarations are emitted only for the
-	// lifelines an arrow or note actually touches (see below).
+	// Plan the participant layout family-adjacent: the synthetic caller, then each
+	// service boxed with the databases it exclusively owns (a store reached only from
+	// that service), then — appended after the body is rendered — the shared lifelines
+	// the body actually drew to (the broker, external peers, multi-owner databases),
+	// sorted. This keeps a service and its infrastructure together instead of
+	// interleaving every service's databases alphabetically. Aliases are assigned as
+	// the plan is built (so an id is stable); declarations are emitted only for the
+	// lifelines r.ref says an arrow or note touched, so an over-declared peer is
+	// pruned rather than drawn as a bare, dangling line.
 	services, ownedDB := serviceInfra(root, fallback)
-	used := map[string]bool{}
-	assign := func(name string) {
-		if name == "" {
-			return
-		}
-		if _, ok := r.alias[name]; !ok {
-			r.alias[name] = uniqueID(sanitize(name), used)
-		}
-	}
-
-	// A box groups a service with the databases it owns; a loose entry is a lone
-	// participant. Build the ordered plan and assign aliases as we go.
-	type block struct {
-		box   string   // "" => loose participants
-		names []string // box: [service, owned dbs…]; loose: [name]
-	}
-	var plan []block
-	loose := func(name string) {
-		assign(name)
-		plan = append(plan, block{names: []string{name}})
-	}
-
-	loose(caller) // the ingress/bus, never boxed with a service
-
-	svcOrder := make([]string, 0, len(services)+1)
-	if entry != caller {
-		svcOrder = append(svcOrder, entry)
-	}
-	rest := make([]string, 0, len(services))
+	plan := newParticipantPlan(r)
+	plan.loose(caller)                  // the ingress/bus, never boxed with a service
+	plan.service(entry, ownedDB[entry]) // the entry service leads, boxed with its dbs
+	svcs := make([]string, 0, len(services))
 	for s := range services {
 		if s != entry && s != caller {
-			rest = append(rest, s)
+			svcs = append(svcs, s)
 		}
 	}
-	sort.Strings(rest)
-	svcOrder = append(svcOrder, rest...)
-
-	for _, svc := range svcOrder {
-		if svc == "" {
-			continue
-		}
-		assign(svc)
-		if infra := ownedDB[svc]; len(infra) > 0 {
-			names := append([]string{svc}, infra...)
-			for _, db := range infra {
-				assign(db)
-			}
-			plan = append(plan, block{box: svc, names: names})
-		} else {
-			plan = append(plan, block{names: []string{svc}})
-		}
+	sort.Strings(svcs)
+	for _, svc := range svcs {
+		plan.service(svc, ownedDB[svc])
 	}
 
-	// Whatever is left (broker, external peers, shared/multi-owner databases).
-	remaining := make([]string, 0, len(lifelines))
-	for l := range lifelines {
-		if _, ok := r.alias[l]; !ok {
-			remaining = append(remaining, l)
-		}
-	}
-	sort.Strings(remaining)
-	for _, l := range remaining {
-		loose(l)
-	}
-
-	// Render the body first; r.id records every lifeline an arrow or note touches.
+	// Render the body; r.id records every lifeline an arrow or note touches and
+	// assigns aliases to peers met along the way.
 	var body strings.Builder
 	body.WriteString("    " + r.msg(caller, entry, label(root)))
 	r.writeSystemGroups(&body, root.Children, entry, fallback, "    ")
 
-	// Declare only the participants an edge actually touches, preserving the planned
-	// order and boxing. A lifeline that no arrow or note references — an over-declared
-	// peer — is pruned rather than drawn as a bare, dangling line. A box collapses to
-	// a loose participant when only the service (no owned database) was referenced.
+	// Shared lifelines the body drew to that the plan didn't already place, sorted.
+	rest := make([]string, 0, len(r.ref))
+	for name := range r.ref {
+		if !plan.placed[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	for _, name := range rest {
+		plan.loose(name)
+	}
+
 	var b strings.Builder
 	b.WriteString("sequenceDiagram\n")
+	plan.declare(&b, r.ref)
+	b.WriteString(body.String())
+	return b.String()
+}
+
+// participantPlan accumulates the ordered participant layout — loose lifelines and
+// service boxes — and the aliases for each, so declarations can be emitted after the
+// body has revealed which lifelines an edge touches.
+type participantPlan struct {
+	r      *renderer
+	blocks []participantBlock
+	placed map[string]bool // names already planned (deduped)
+}
+
+// participantBlock is one unit of the layout: a loose participant (box == "") or a
+// service boxed with the databases it owns (names == [service, dbs…]).
+type participantBlock struct {
+	box   string
+	names []string
+}
+
+func newParticipantPlan(r *renderer) *participantPlan {
+	return &participantPlan{r: r, placed: map[string]bool{}}
+}
+
+// loose plans one standalone participant.
+func (p *participantPlan) loose(name string) {
+	if name == "" || p.placed[name] {
+		return
+	}
+	p.placed[name] = true
+	p.r.aliasOf(name)
+	p.blocks = append(p.blocks, participantBlock{names: []string{name}})
+}
+
+// service plans a service boxed with the databases it exclusively owns, or — when it
+// owns none — as a loose participant.
+func (p *participantPlan) service(svc string, ownedDB []string) {
+	if svc == "" || p.placed[svc] {
+		return
+	}
+	if len(ownedDB) == 0 {
+		p.loose(svc)
+		return
+	}
+	p.placed[svc] = true
+	p.r.aliasOf(svc)
+	names := []string{svc}
+	for _, db := range ownedDB {
+		p.placed[db] = true
+		p.r.aliasOf(db)
+		names = append(names, db)
+	}
+	p.blocks = append(p.blocks, participantBlock{box: svc, names: names})
+}
+
+// declare emits a participant line for every planned lifeline that ref marks as
+// touched by an edge, preserving plan order and boxing. A box collapses to a loose
+// participant when only its service (no owned database) was referenced.
+func (p *participantPlan) declare(b *strings.Builder, ref map[string]bool) {
 	declared := map[string]bool{}
-	declOne := func(name string) {
-		if !r.ref[name] || declared[name] {
+	one := func(name string) {
+		if !ref[name] || declared[name] {
 			return
 		}
 		declared[name] = true
-		b.WriteString("    participant " + r.alias[name] + " as " + name + "\n")
+		b.WriteString("    participant " + p.r.aliasOf(name) + " as " + name + "\n")
 	}
-	for _, bl := range plan {
+	for _, bl := range p.blocks {
 		if bl.box == "" {
 			for _, n := range bl.names {
-				declOne(n)
+				one(n)
 			}
 			continue
 		}
-		members := make([]string, 0, len(bl.names))
+		var members []string
 		for _, n := range bl.names {
-			if r.ref[n] && !declared[n] {
+			if ref[n] && !declared[n] {
 				members = append(members, n)
 			}
 		}
 		if len(members) <= 1 { // nothing, or only the bare service: no box
 			for _, n := range members {
-				declOne(n)
+				one(n)
 			}
 			continue
 		}
@@ -275,12 +312,10 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 		// color so the service name always lands in the title slot.
 		b.WriteString("    box transparent " + bl.box + "\n")
 		for _, n := range members {
-			declOne(n)
+			one(n)
 		}
 		b.WriteString("    end\n")
 	}
-	b.WriteString(body.String())
-	return b.String()
 }
 
 // landingOf is the lifeline an operation lands on: for an inbound entry
@@ -324,7 +359,7 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 		// A database lifeline exists only where the DB hop actually lands on the peer
 		// (an outbound client DB call). An ORM-emitted internal DB op lands on its own
 		// service and is never drawn, so it must not seed a phantom DB participant —
-		// mirroring collectSystemLifelines / writeSystemSpan.
+		// mirroring the drawTarget rule the body uses.
 		if s.Peer != "" && landingOf(s, fallback) == s.Peer && strings.HasPrefix(s.Op, opkey.DBPrefix) {
 			if dbOwners[s.Peer] == nil {
 				dbOwners[s.Peer] = map[string]bool{}
@@ -352,26 +387,6 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 		sort.Strings(ownedDB[s])
 	}
 	return services, ownedDB
-}
-
-func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[string]bool) {
-	if s == nil {
-		return
-	}
-	into[landingOf(s, fallback)] = true
-	if s.Service != "" {
-		into[s.Service] = true
-	}
-	// A consumer poll lands on its own service but draws its hop to the bus
-	// (writeSystemSpan); declare that peer so it has a fixed-order participant.
-	if s.Kind == ir.KindConsumer && s.Peer != "" {
-		into[s.Peer] = true
-	}
-	for _, g := range s.Children {
-		for _, m := range g.Members {
-			collectSystemLifelines(m, fallback, into)
-		}
-	}
 }
 
 func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
@@ -452,9 +467,9 @@ func splitAsync(members []*ir.CanonicalSpan) (sync, async []*ir.CanonicalSpan) {
 // than the bus) draws to its broker peer so the receive stays as visible as the
 // publish and the settle. Restricted to KindConsumer so a peer-bearing self-landing
 // span of another kind (an ORM-emitted internal DB op, whose peer is the db system)
-// is not drawn — matching collectSystemLifelines, which declares the peer participant
-// only for consumers. Shared by the synchronous and async hop renderers so the rule
-// has one definition.
+// is not drawn — matching serviceInfra, which counts a DB participant only where the
+// hop lands on the peer. Shared by the synchronous and async hop renderers so the
+// rule has one definition.
 func drawTarget(m *ir.CanonicalSpan, from, fallback string) string {
 	land := landingOf(m, fallback)
 	if land == from && m.Kind == ir.KindConsumer && m.Peer != "" && m.Peer != from {
@@ -492,15 +507,11 @@ func (r *renderer) writeParticipants(b *strings.Builder, t *ir.CanonicalTrace) {
 	sort.Strings(rest)
 	order = append(order, rest...)
 
-	r.alias = make(map[string]string, len(order))
-	used := map[string]bool{}
 	for _, name := range order {
 		if _, ok := r.alias[name]; ok {
 			continue
 		}
-		id := uniqueID(sanitize(name), used)
-		r.alias[name] = id
-		b.WriteString("    participant " + id + " as " + name + "\n")
+		b.WriteString("    participant " + r.aliasOf(name) + " as " + name + "\n")
 	}
 }
 
@@ -551,13 +562,8 @@ func (r *renderer) amsg(from, to, text string) string {
 }
 
 func (r *renderer) id(label string) string {
-	if r.ref != nil {
-		r.ref[label] = true // this lifeline is touched by the arrow/note being drawn
-	}
-	if id, ok := r.alias[label]; ok {
-		return id
-	}
-	return sanitize(label)
+	r.ref[label] = true // this lifeline is touched by the arrow/note being drawn
+	return r.aliasOf(label)
 }
 
 // groupLabel distinguishes a genuine race (concurrent) from siblings whose order
@@ -586,10 +592,9 @@ func label(s *ir.CanonicalSpan) string {
 // inbound HTTP server root, and for a consumed-event root the broker it consumed
 // from. That broker is the root's own Peer, which opkey.brokerPeer already
 // canonicalizes per messaging system (Bus / SNS / SQS / …), so the trigger lifeline
-// coincides with the participant collectSystemLifelines / collectPeers declare for
-// the consumer — rather than a hardcoded "Bus" that would leave the real broker as a
-// dangling, unconnected participant. "Bus" remains the fallback for a hand-built
-// consumer root carrying no peer.
+// coincides with the consumer root's own peer — rather than a hardcoded "Bus" that
+// would draw the trigger arrow from a lifeline distinct from the real broker. "Bus"
+// remains the fallback for a hand-built consumer root carrying no peer.
 func callerLabel(root *ir.CanonicalSpan) string {
 	if root != nil && root.Kind == ir.KindConsumer {
 		if root.Peer != "" {
