@@ -15,8 +15,51 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// SystemGraph renders a deduplicated system-context graph (services + the
+// infrastructure they touch) as a Mermaid flowchart. Solid edges were exercised
+// by a captured flow; dashed edges come only from the static contract overlay
+// (can happen, untested). Node shapes distinguish the kinds: services are
+// rectangles, the broker a hexagon, external peers/DBs stadiums.
+func SystemGraph(g *syscontext.Graph) string {
+	var b strings.Builder
+	b.WriteString("graph LR\n")
+	alias := make(map[string]string, len(g.Nodes))
+	used := map[string]bool{}
+	for _, n := range g.Nodes {
+		id := uniqueID(sanitize(n.Name), used)
+		alias[n.Name] = id
+		open, close := nodeShape(n.Kind)
+		b.WriteString("    " + id + open + `"` + n.Name + `"` + close + "\n")
+	}
+	for _, e := range g.Edges {
+		arrow := "-->"
+		if e.Dashed {
+			arrow = "-.->"
+		}
+		line := "    " + alias[e.From] + " " + arrow
+		if e.Label != "" {
+			line += "|\"" + e.Label + "\"|"
+		}
+		line += " " + alias[e.To] + "\n"
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+func nodeShape(k syscontext.NodeKind) (open, close string) {
+	switch k {
+	case syscontext.KindBroker:
+		return "{{", "}}"
+	case syscontext.KindExternal:
+		return "([", "])"
+	default: // service, client
+		return "[", "]"
+	}
+}
 
 // Mermaid renders t as a Mermaid sequenceDiagram. The output ends with a newline
 // and is a pure, deterministic function of the IR.
@@ -38,6 +81,167 @@ type renderer struct {
 	self   string
 	caller string
 	alias  map[string]string // lifeline label -> mermaid-safe id
+}
+
+// SystemMermaid renders a whole-flow, CROSS-SERVICE sequence diagram from a trace
+// whose spans carry per-span Service (an out-of-process whole-flow capture). Where
+// Mermaid pins one self lifeline, this switches lifelines per span so the diagram
+// shows every service the flow touched and the hops between them — what a service
+// interacts with end to end (post-hoc design: the diagram unit is the whole
+// flow, not the per-service gate fragment). It is a view, never gated.
+func SystemMermaid(t *ir.CanonicalTrace) string {
+	if t.Root == nil {
+		return "sequenceDiagram\n"
+	}
+	return systemMermaidCore(callerLabel(t.Root), t.Root, t.Service)
+}
+
+// SystemMermaidRootedAt renders the cross-service view centered on one service:
+// the subtree(s) the service owns — everything it does and reaches downstream —
+// with the lifeline that called into it as the caller. It returns ok=false if the
+// service does not appear in the flow. A service entered more than once in the
+// flow gets its entries gathered under a synthetic root.
+func SystemMermaidRootedAt(t *ir.CanonicalTrace, service string) (string, bool) {
+	var entries []*ir.CanonicalSpan
+	var callers []string
+	var walk func(n *ir.CanonicalSpan, parentSvc string)
+	walk = func(n *ir.CanonicalSpan, parentSvc string) {
+		if n == nil {
+			return
+		}
+		if n.Service == service && parentSvc != service {
+			entries = append(entries, n) // its whole subtree (incl. nested re-entries) renders together
+			callers = append(callers, parentSvc)
+			return
+		}
+		for _, g := range n.Children {
+			for _, m := range g.Members {
+				walk(m, n.Service)
+			}
+		}
+	}
+	walk(t.Root, "")
+
+	switch len(entries) {
+	case 0:
+		return "", false
+	case 1:
+		caller := callers[0]
+		if caller == "" {
+			caller = callerLabel(entries[0])
+		}
+		return systemMermaidCore(caller, entries[0], t.Service), true
+	default:
+		syn := &ir.CanonicalSpan{
+			Op: service, Kind: ir.KindServer, Service: service,
+			Children: []ir.ChildGroup{{Concurrent: true, Members: entries}},
+		}
+		return systemMermaidCore("Client", syn, t.Service), true
+	}
+}
+
+// systemMermaidCore renders the cross-service sequence diagram for one subtree,
+// from an explicit caller lifeline. fallback is the service to attribute spans
+// that carry no service.name.
+func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) string {
+	var b strings.Builder
+	b.WriteString("sequenceDiagram\n")
+	r := &renderer{alias: map[string]string{}}
+	entry := landingOf(root, fallback)
+
+	// Lifelines in a fixed order: caller, entry service, then every other
+	// service/peer the flow reaches, sorted.
+	lifelines := map[string]bool{}
+	collectSystemLifelines(root, fallback, lifelines)
+	order := []string{caller, entry}
+	rest := make([]string, 0, len(lifelines))
+	for l := range lifelines {
+		if l != caller && l != entry {
+			rest = append(rest, l)
+		}
+	}
+	sort.Strings(rest)
+	order = append(order, rest...)
+
+	used := map[string]bool{}
+	for _, name := range order {
+		if _, ok := r.alias[name]; ok {
+			continue
+		}
+		id := uniqueID(sanitize(name), used)
+		r.alias[name] = id
+		b.WriteString("    participant " + id + " as " + name + "\n")
+	}
+
+	b.WriteString("    " + r.msg(caller, entry, label(root)))
+	r.writeSystemGroups(&b, root.Children, entry, fallback, "    ")
+	return b.String()
+}
+
+// landingOf is the lifeline an operation lands on: for an inbound entry
+// (server/consumer) or internal op, its own owning service; for an outbound call
+// (client/producer), the counterparty Peer. The fallback (the trace's Service)
+// covers a span with no folded service.name.
+func landingOf(s *ir.CanonicalSpan, fallback string) string {
+	switch s.Kind {
+	case ir.KindClient, ir.KindProducer:
+		if s.Peer != "" {
+			return s.Peer
+		}
+		return lifelineLabel(s.Service, fallback)
+	default: // server, consumer, internal
+		return lifelineLabel(s.Service, fallback)
+	}
+}
+
+func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[string]bool) {
+	if s == nil {
+		return
+	}
+	into[landingOf(s, fallback)] = true
+	if s.Service != "" {
+		into[s.Service] = true
+	}
+	for _, g := range s.Children {
+		for _, m := range g.Members {
+			collectSystemLifelines(m, fallback, into)
+		}
+	}
+}
+
+func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
+	for _, g := range groups {
+		if g.Concurrent {
+			b.WriteString(indent + "par concurrent\n")
+			for i, m := range g.Members {
+				if i > 0 {
+					b.WriteString(indent + "and\n")
+				}
+				r.writeSystemSpan(b, m, from, fallback, indent+"    ")
+			}
+			b.WriteString(indent + "end\n")
+		} else {
+			for _, m := range g.Members {
+				r.writeSystemSpan(b, m, from, fallback, indent)
+			}
+		}
+		if g.Multiplicity != "" {
+			b.WriteString(indent + "Note over " + r.id(from) + ": ×" + g.Multiplicity + "\n")
+		}
+	}
+}
+
+// writeSystemSpan draws the hop into a span (from the caller lifeline to where the
+// span lands) and recurses, threading the landed lifeline as the new caller. When
+// the span lands on the lifeline it was already called from — a callee's own
+// entry span, or an internal self-op — no redundant arrow is drawn; the call that
+// arrived there is enough.
+func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
+	land := landingOf(m, fallback)
+	if land != from {
+		b.WriteString(indent + r.msg(from, land, label(m)))
+	}
+	r.writeSystemGroups(b, m.Children, land, fallback, indent)
 }
 
 // writeParticipants declares lifelines in a fixed order: the caller, the self

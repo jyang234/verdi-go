@@ -109,3 +109,27 @@ func TestInternalKeyFallsBackToName(t *testing.T) {
 		t.Errorf("op=%q peer=%q", op, peer)
 	}
 }
+
+// TestPrefixConstantsMatchOf pins the exported prefix constants to Of's actual
+// output, so a change to the rendered grammar can't silently desync a consumer
+// (the system-context graph, coverage) that matches on the constants.
+func TestPrefixConstantsMatchOf(t *testing.T) {
+	cases := []struct {
+		kind   ir.Kind
+		attrs  map[string]string
+		prefix string
+	}{
+		{ir.KindProducer, map[string]string{"messaging.destination.name": "e"}, PublishPrefix},
+		{ir.KindConsumer, map[string]string{"messaging.destination.name": "e"}, ConsumePrefix},
+		{ir.KindClient, map[string]string{"db.system": "postgres", "db.statement": "SELECT 1 FROM t"}, DBPrefix},
+		{ir.KindClient, map[string]string{"rpc.service": "S", "rpc.method": "M"}, RPCPrefix},
+		{ir.KindClient, map[string]string{"http.request.method": "GET", "peer.service": "p", "http.route": "/x"}, HTTPPrefix},
+		{ir.KindServer, map[string]string{"http.request.method": "GET", "http.route": "/x"}, HTTPPrefix},
+	}
+	for _, c := range cases {
+		op, _ := Of(c.kind, c.attrs, "name")
+		if len(op) < len(c.prefix) || op[:len(c.prefix)] != c.prefix {
+			t.Errorf("Of(%s)=%q, want prefix %q", c.kind, op, c.prefix)
+		}
+	}
+}

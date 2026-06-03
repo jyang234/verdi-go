@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/irtest"
+	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -122,5 +123,106 @@ func mustContain(t *testing.T, out, want string) {
 	t.Helper()
 	if !strings.Contains(out, want) {
 		t.Errorf("output missing %q:\n%s", want, out)
+	}
+}
+
+// TestSystemMermaidCrossService: the whole-flow renderer switches lifelines per
+// span's owning Service, draws the cross-service hops, and collapses a callee's
+// own entry span (no redundant self-hop).
+func TestSystemMermaidCrossService(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "loansvc",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /loan-application", Kind: ir.KindServer, Service: "loansvc",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "HTTP GET credit-bureau /score/{id}", Kind: ir.KindClient, Peer: "credit-bureau", Service: "loansvc",
+					Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+						{Op: "HTTP GET /score", Kind: ir.KindServer, Service: "credit-bureau",
+							Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+								{Op: "DB postgres SELECT bureau", Kind: ir.KindClient, Peer: "postgres", Service: "credit-bureau"},
+							}}}},
+					}}}},
+			}}},
+		},
+	}
+	out := SystemMermaid(tr)
+	for _, want := range []string{
+		"Client->>loansvc: HTTP POST /loan-application",
+		"loansvc->>credit_bureau: HTTP GET credit-bureau /score/{id}",
+		"credit_bureau->>postgres: DB postgres SELECT bureau",
+		"participant loansvc", "participant credit_bureau", "participant postgres",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "credit_bureau->>credit_bureau") {
+		t.Errorf("callee entry span drew a redundant self-hop:\n%s", out)
+	}
+}
+
+// TestSystemMermaidRootedAt centers the view on a middle service: the caller is
+// the real upstream, the subtree is the service's downstream, and ops above the
+// service are excluded. An absent service returns ok=false.
+func TestSystemMermaidRootedAt(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "loansvc",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /loan-application", Kind: ir.KindServer, Service: "loansvc",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "HTTP GET credit-bureau /score/{id}", Kind: ir.KindClient, Peer: "credit-bureau", Service: "loansvc",
+					Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+						{Op: "HTTP GET /score", Kind: ir.KindServer, Service: "credit-bureau",
+							Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+								{Op: "DB postgres SELECT bureau", Kind: ir.KindClient, Peer: "postgres", Service: "credit-bureau"},
+							}}}},
+					}}}},
+			}}},
+		},
+	}
+	out, ok := SystemMermaidRootedAt(tr, "credit-bureau")
+	if !ok {
+		t.Fatal("credit-bureau should be found")
+	}
+	if !strings.Contains(out, "loansvc->>credit_bureau: HTTP GET /score") {
+		t.Errorf("expected upstream→svc entry arrow, got:\n%s", out)
+	}
+	if !strings.Contains(out, "credit_bureau->>postgres: DB postgres SELECT bureau") {
+		t.Errorf("expected the service's subtree, got:\n%s", out)
+	}
+	if strings.Contains(out, "/loan-application") {
+		t.Errorf("a rooted view must exclude ops above the service:\n%s", out)
+	}
+	if _, ok := SystemMermaidRootedAt(tr, "absent"); ok {
+		t.Error("absent service should return ok=false")
+	}
+}
+
+// TestSystemGraph renders a system-context graph: graph LR, node shapes by kind,
+// solid vs dashed edges.
+func TestSystemGraph(t *testing.T) {
+	g := &syscontext.Graph{
+		Nodes: []syscontext.Node{
+			{Name: "loansvc", Kind: syscontext.KindService},
+			{Name: "Bus", Kind: syscontext.KindBroker},
+			{Name: "pg", Kind: syscontext.KindExternal},
+		},
+		Edges: []syscontext.Edge{
+			{From: "loansvc", To: "Bus", Label: "publish e1", Dashed: false},
+			{From: "loansvc", To: "pg", Label: "DB", Dashed: true},
+		},
+	}
+	out := SystemGraph(g)
+	for _, want := range []string{
+		"graph LR",
+		`Bus{{"Bus"}}`,       // broker hexagon
+		`pg(["pg"])`,         // external stadium
+		`loansvc["loansvc"]`, // service rectangle
+		`-->|"publish e1"|`,  // solid edge
+		`-.->|"DB"|`,         // dashed (contract-only) edge
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }

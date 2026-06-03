@@ -133,6 +133,36 @@ delta against the service's static boundary contract. **It always exits 0** —
 pure feedback, zero flakiness risk. Ship this first; it harvests your existing
 e2e investment immediately and gives teams a reason to add the tag.
 
+To **see the cross-service choreography** at this stage — before committing any
+golden — add `--render-dir`; it writes a `<slug>.system.flow.md` per flow (the
+whole-flow diagram across every service the flow touched), in any mode:
+
+```sh
+flowmap behavior ingest --render-dir e2e-diagrams/ /var/lib/flowmap/traces/e2e.otlp.json
+# center the diagram on one service's subtree (what it touches downstream):
+flowmap behavior ingest --render-dir e2e-diagrams/ --root payments-svc /var/lib/flowmap/traces/e2e.otlp.json
+```
+
+For a **system context map** — every flow merged into one deduplicated
+service-interaction graph (`e2e-diagrams/system.context.md`) — add `--merged`.
+Overlay your static contracts with `--contracts` to see, dashed, the
+interactions your code can do but the e2e never touched (a system-level coverage
+view); use `--choreography` to draw publisher→subscriber edges directly instead
+of via the Bus node:
+
+```sh
+flowmap behavior ingest --render-dir e2e-diagrams/ --merged \
+    --contracts services/loansvc,services/payments \
+    /var/lib/flowmap/traces/e2e.otlp.json
+```
+
+A node in the merged graph is identified by its lifeline name, so a caller's
+`peer.service` must match the callee's resource `service.name` or the one service
+shows up as two nodes (an external peer with the inbound edge, and a service with
+its own downstream edges). Keep those names aligned across your instrumentation.
+A `--contracts` dir that fails to load is warned and skipped — the overlay never
+fails the run or the gate.
+
 > **Flags precede the trace path** (`flowmap behavior ingest [flags] <path>`).
 > `<path>` may be a file or a directory of rotated `*.json`.
 
@@ -141,13 +171,19 @@ e2e investment immediately and gives teams a reason to add the tag.
 Once a flow reliably exercises a stable set of boundary effects:
 
 ```sh
-# snapshot its effect set + rendered view; commit the ones you want gated.
+# snapshot its effect set + rendered views; commit the ones you want gated.
 flowmap behavior ingest --flows-dir flows/ --update <traces>
 git add flows/<slug>.<svc>.effects.json flows/<slug>.<svc>.flow.md
 
 # CI enforces every committed golden (no --update):
 flowmap behavior ingest --flows-dir flows/ <traces>
 ```
+
+`--update` also writes a **cross-service** `flows/<slug>.system.flow.md`: the
+whole-flow choreography across *every* service the flow touched (not split per
+service), so you can see everything the flow interacts with end to end. Only the
+per-service `*.effects.json` gates; the `.flow.md` views (per-service and system)
+are committed for human review.
 
 The gate fails **only on a new boundary effect** (`[CONTRACT] ADDED …`) — a new
 published event, dependency, or entrypoint. A missing/under-exercised effect is

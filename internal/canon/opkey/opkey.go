@@ -19,6 +19,19 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
+// Canonical op-key prefixes. Of emits keys beginning with these. Any consumer
+// that must classify an op (the system-context graph, coverage) should match on
+// these constants rather than re-typing the literals, so the rendered grammar
+// has one source of truth and a change here can't silently desync a consumer.
+// The opkey tests pin that Of's output actually begins with each.
+const (
+	HTTPPrefix    = "HTTP "
+	DBPrefix      = "DB "
+	RPCPrefix     = "RPC "
+	PublishPrefix = "PUBLISH "
+	ConsumePrefix = "CONSUME "
+)
+
 // Of returns the canonical operation key and peer (counterparty lifeline) for a
 // span. name is the raw span name, used only as the fallback identity for an
 // internal operation that carries no boundary attributes. Peer is "Bus" for
@@ -38,9 +51,9 @@ func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
 		p := first(attrs, "peer.service", "server.address")
 		return httpKey("HTTP", method(attrs), p, route(attrs)), p
 	case ir.KindProducer:
-		return "PUBLISH " + destination(attrs), "Bus"
+		return PublishPrefix + destination(attrs), "Bus"
 	case ir.KindConsumer:
-		return "CONSUME " + destination(attrs), "Bus"
+		return ConsumePrefix + destination(attrs), "Bus"
 	default: // internal
 		if sys := dbSystem(attrs); sys != "" {
 			return dbKey(sys, attrs), sys
@@ -96,11 +109,11 @@ func rpcKey(attrs map[string]string) string {
 	m := first(attrs, "rpc.method")
 	switch {
 	case svc != "" && m != "":
-		return "RPC " + svc + "/" + m
+		return RPCPrefix + svc + "/" + m
 	case svc != "":
-		return "RPC " + svc
+		return RPCPrefix + svc
 	default:
-		return "RPC " + m
+		return RPCPrefix + m
 	}
 }
 
