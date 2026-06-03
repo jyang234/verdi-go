@@ -280,14 +280,20 @@ func cmdIngest(args []string) error {
 		frags = append(frags, ingestFragment{fc: fc, trace: tr, effects: eff})
 	}
 
+	// The cross-service views share one whole-flow canonicalization pass across
+	// the per-flow diagrams, the merged graph, and the --update companion.
+	var whole []wholeFlow
+	if *renderDir != "" || (*update && *flowsDir != "") {
+		whole = canonWholeFlows(spans)
+	}
 	// The cross-service view is independent of gating: emit it in any mode
 	// (including non-gated stage 1) when a render dir is given.
 	if *renderDir != "" {
-		if err := writeSystemDiagrams(*renderDir, spans, *root); err != nil {
+		if err := writeSystemDiagrams(*renderDir, whole, *root); err != nil {
 			return err
 		}
 		if *merged {
-			if err := writeSystemContext(*renderDir, spans, *contracts, *choreography); err != nil {
+			if err := writeSystemContext(*renderDir, whole, *contracts, *choreography); err != nil {
 				return err
 			}
 		}
@@ -298,7 +304,7 @@ func cmdIngest(args []string) error {
 		if err := updateEffectGoldens(*flowsDir, frags); err != nil {
 			return err
 		}
-		return writeSystemDiagrams(*flowsDir, spans, "") // the committed companion is the full choreography
+		return writeSystemDiagrams(*flowsDir, whole, "") // the committed companion is the full choreography
 	case *flowsDir != "":
 		return gateEffectGoldens(*flowsDir, frags)
 	default:
@@ -425,32 +431,51 @@ func gateEffectGoldens(dir string, frags []ingestFragment) error {
 // unit, design D-PH1), distinct from the per-service gated artifacts. It is a
 // view — never gated — so a fragment with no clean entry (synthesized root) is
 // rendered best-effort with a note rather than skipped.
-func writeSystemDiagrams(dir string, spans []capture.Span, rootSvc string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+// wholeFlow is one flow's canonicalized cross-service tree, computed once and
+// shared by every cross-service view.
+type wholeFlow struct {
+	slug        string
+	synthesized bool
+	trace       *ir.CanonicalTrace
+}
+
+// canonWholeFlows assembles and canonicalizes each flow's whole-flow tree once,
+// so the per-flow diagrams, the merged graph, and the --update companion don't
+// repeat the work.
+func canonWholeFlows(spans []capture.Span) []wholeFlow {
+	var out []wholeFlow
 	for _, wf := range ingest.WholeFlows(spans) {
 		tr, err := canon.Canonicalize(wf.Flow, nil)
 		if err != nil {
 			fmt.Printf("  - %-24s cross-service view skipped: %v\n", wf.Slug, err)
 			continue
 		}
-		stem := filepath.Join(dir, golden.Slug(wf.Slug)+".system")
-		md := render.SystemMermaid(tr)
+		out = append(out, wholeFlow{slug: wf.Slug, synthesized: wf.Synthesized, trace: tr})
+	}
+	return out
+}
+
+func writeSystemDiagrams(dir string, flows []wholeFlow, rootSvc string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, wf := range flows {
+		stem := filepath.Join(dir, golden.Slug(wf.slug)+".system")
+		md := render.SystemMermaid(wf.trace)
 		if rootSvc != "" {
-			out, ok := render.SystemMermaidRootedAt(tr, rootSvc)
+			out, ok := render.SystemMermaidRootedAt(wf.trace, rootSvc)
 			if !ok {
-				fmt.Printf("  - %-24s service %q not in this flow — skipped\n", wf.Slug, rootSvc)
+				fmt.Printf("  - %-24s service %q not in this flow — skipped\n", wf.slug, rootSvc)
 				continue
 			}
 			md = out
-			stem = filepath.Join(dir, golden.Slug(wf.Slug)+"."+golden.Slug(rootSvc)+".system")
+			stem = filepath.Join(dir, golden.Slug(wf.slug)+"."+golden.Slug(rootSvc)+".system")
 		}
 		if err := os.WriteFile(stem+".flow.md", []byte(md), 0o644); err != nil {
 			return err
 		}
 		note := ""
-		if rootSvc == "" && wf.Synthesized {
+		if rootSvc == "" && wf.synthesized {
 			note = " (no single entry — best-effort)"
 		}
 		fmt.Printf("wrote %s.flow.md (cross-service view%s)\n", stem, note)
@@ -462,25 +487,24 @@ func writeSystemDiagrams(dir string, spans []capture.Span, rootSvc string) error
 // service-interaction graph (system.context.md), optionally overlaying the
 // static boundary contracts of the given service dirs (dashed = can-happen but
 // no flow exercised it). It is a non-gated view.
-func writeSystemContext(dir string, spans []capture.Span, contractDirs string, choreography bool) error {
+func writeSystemContext(dir string, flows []wholeFlow, contractDirs string, choreography bool) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	var traces []*ir.CanonicalTrace
-	for _, wf := range ingest.WholeFlows(spans) {
-		tr, err := canon.Canonicalize(wf.Flow, nil)
-		if err != nil {
-			fmt.Printf("  - %-24s system-context: flow skipped: %v\n", wf.Slug, err)
-			continue
-		}
-		traces = append(traces, tr)
+	traces := make([]*ir.CanonicalTrace, 0, len(flows))
+	for _, wf := range flows {
+		traces = append(traces, wf.trace)
 	}
 
 	var statics []syscontext.Contract
 	for _, d := range splitList(contractDirs) {
 		c, err := boundary.Generate(d)
 		if err != nil {
-			return fmt.Errorf("contract %s: %w", d, err)
+			// A contract overlay is a non-gated view; a load failure must not abort
+			// the ingest (and, when combined with --flows-dir, must not fail the
+			// gate). Warn and skip the bad contract.
+			fmt.Printf("  - contract %s: skipped: %v\n", d, err)
+			continue
 		}
 		statics = append(statics, contractToSyscontext(c))
 	}

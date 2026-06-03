@@ -220,3 +220,23 @@ func TestWholeFlowsKeepsCrossService(t *testing.T) {
 		t.Errorf("whole-flow should keep all 5 spans across services, got %d", len(f.Flow.Spans))
 	}
 }
+
+// TestWholeFlowsSynthesizedUsesSlug: a multi-entry / publisher-only whole flow
+// synthesizes a root with no service.name; its lifeline must fall back to the
+// flow slug, not "" (which would render an unnamed participant).
+func TestWholeFlowsSynthesizedUsesSlug(t *testing.T) {
+	spans := []capture.Span{
+		span("1", "remote", "emit", "emitter", ir.KindProducer, map[string]string{"messaging.destination.name": "x"}),
+		span("2", "remote", "emit", "emitter", ir.KindProducer, map[string]string{"messaging.destination.name": "y"}),
+	}
+	wf := WholeFlows(spans)
+	if len(wf) != 1 {
+		t.Fatalf("got %d, want 1", len(wf))
+	}
+	if !wf[0].Synthesized {
+		t.Fatal("two parentless producers should synthesize a root")
+	}
+	if wf[0].Service != "emit" || wf[0].Flow.Service != "emit" {
+		t.Errorf("synthesized whole-flow Service = %q/%q, want slug \"emit\"", wf[0].Service, wf[0].Flow.Service)
+	}
+}

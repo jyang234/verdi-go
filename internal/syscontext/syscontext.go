@@ -13,12 +13,21 @@
 //
 // The graph is a pure function of its inputs: nodes and edges are sorted and
 // deduplicated, so re-running the e2e suite never churns it.
+//
+// Node identity is the lifeline name string: a service.name (callee side) and a
+// peer.service / server.address (caller side) coincide into one node only when
+// they are byte-equal. If a caller names a dependency differently from the
+// callee's own resource service.name, that one service appears as two nodes
+// (an external peer with the inbound edge and a service with its downstream
+// edges). Keep peer.service aligned with the callee's service.name across your
+// instrumentation, or expect a split.
 package syscontext
 
 import (
 	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -132,10 +141,10 @@ func (b *builder) walk(s *ir.CanonicalSpan, fallback string, solid bool) {
 		}
 	case ir.KindProducer:
 		b.node(svc, KindService)
-		b.publish(stripPrefix(s.Op, "PUBLISH "), svc, solid)
+		b.publish(strings.TrimPrefix(s.Op, opkey.PublishPrefix), svc, solid)
 	case ir.KindConsumer:
 		b.node(svc, KindService)
-		b.consume(stripPrefix(s.Op, "CONSUME "), svc, solid)
+		b.consume(strings.TrimPrefix(s.Op, opkey.ConsumePrefix), svc, solid)
 	case ir.KindServer:
 		b.node(svc, KindService) // a callee entry is a node; its hop is the caller's client edge
 	}
@@ -268,9 +277,9 @@ func lifeline(name, fallback string) string {
 
 func clientLabel(op string) string {
 	switch {
-	case strings.HasPrefix(op, "DB "):
+	case strings.HasPrefix(op, opkey.DBPrefix):
 		return "DB"
-	case strings.HasPrefix(op, "RPC "):
+	case strings.HasPrefix(op, opkey.RPCPrefix):
 		return "RPC"
 	default:
 		return "HTTP"
@@ -287,8 +296,6 @@ func depLabel(kind string) string {
 		return strings.ToUpper(kind)
 	}
 }
-
-func stripPrefix(s, prefix string) string { return strings.TrimPrefix(s, prefix) }
 
 func rankOf(k NodeKind) int {
 	switch k {

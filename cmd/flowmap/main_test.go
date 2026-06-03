@@ -319,3 +319,54 @@ func TestBehaviorIngestMerged(t *testing.T) {
 		t.Fatal("expected error: --choreography without --merged")
 	}
 }
+
+// TestBehaviorIngestContractSkipsBadDir: a --contracts overlay dir that fails to
+// load is a non-gated view concern — it must warn-and-skip, not fail the ingest.
+func TestBehaviorIngestContractSkipsBadDir(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+	trace := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"loansvc"}}]},"scopeSpans":[{"spans":[
+        {"spanId":"01","parentSpanId":"","name":"e","kind":2,"attributes":[{"key":"flowmap.flow","value":{"stringValue":"loan"}},{"key":"http.request.method","value":{"stringValue":"POST"}},{"key":"http.route","value":{"stringValue":"/x"}}],"status":{"code":1}}
+      ]}]}]}`
+	tf := filepath.Join(dir, "t.json")
+	if err := os.WriteFile(tf, []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	if err := run([]string{"behavior", "ingest", "--render-dir", out, "--merged", "--contracts", filepath.Join(dir, "nonexistent"), tf}); err != nil {
+		t.Fatalf("a bad --contracts dir must warn+skip, not error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "system.context.md")); err != nil {
+		t.Fatalf("system.context.md should still be written: %v", err)
+	}
+}
+
+// TestBehaviorIngestSynthesizedLifeline: a multi-entry whole flow (two top-level
+// entries under one slug → synthesized root) must not render an unnamed
+// participant; the lifeline falls back to the slug.
+func TestBehaviorIngestSynthesizedLifeline(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+	trace := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"loansvc"}}]},"scopeSpans":[{"spans":[
+        {"spanId":"01","parentSpanId":"","name":"a","kind":2,"attributes":[{"key":"flowmap.flow","value":{"stringValue":"loan"}},{"key":"http.request.method","value":{"stringValue":"POST"}},{"key":"http.route","value":{"stringValue":"/a"}}],"status":{"code":1}},
+        {"spanId":"02","parentSpanId":"","name":"b","kind":2,"attributes":[{"key":"flowmap.flow","value":{"stringValue":"loan"}},{"key":"http.request.method","value":{"stringValue":"POST"}},{"key":"http.route","value":{"stringValue":"/b"}}],"status":{"code":1}}
+      ]}]}]}`
+	tf := filepath.Join(dir, "t.json")
+	if err := os.WriteFile(tf, []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	if err := run([]string{"behavior", "ingest", "--render-dir", out, tf}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "loan.system.flow.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `as ""`) {
+		t.Errorf("synthesized root rendered an unnamed participant:\n%s", b)
+	}
+	if !strings.Contains(string(b), "loan") {
+		t.Errorf("expected the slug as the fallback lifeline:\n%s", b)
+	}
+}

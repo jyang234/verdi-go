@@ -125,7 +125,14 @@ func WholeFlows(spans []capture.Span) []FlowCapture {
 	out := make([]FlowCapture, 0, len(order))
 	for _, slug := range order {
 		spans, root, trigger, synth := assembleRoot(slug, buckets[slug])
-		svc := root.Attr(serviceKey) // the entry service owns the trace lifeline
+		// The entry service owns the trace lifeline. A synthesized root (no single
+		// inbound entry — a multi-trace slug or an event-only flow) has no
+		// service.name, so fall back to the flow slug rather than an empty
+		// lifeline; the renderer would otherwise emit an unnamed participant.
+		svc := root.Attr(serviceKey)
+		if svc == "" {
+			svc = slug
+		}
 		out = append(out, FlowCapture{
 			Slug:        slug,
 			Service:     svc,

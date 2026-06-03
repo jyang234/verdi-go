@@ -156,6 +156,13 @@ flowmap behavior ingest --render-dir e2e-diagrams/ --merged \
     /var/lib/flowmap/traces/e2e.otlp.json
 ```
 
+A node in the merged graph is identified by its lifeline name, so a caller's
+`peer.service` must match the callee's resource `service.name` or the one service
+shows up as two nodes (an external peer with the inbound edge, and a service with
+its own downstream edges). Keep those names aligned across your instrumentation.
+A `--contracts` dir that fails to load is warned and skipped — the overlay never
+fails the run or the gate.
+
 > **Flags precede the trace path** (`flowmap behavior ingest [flags] <path>`).
 > `<path>` may be a file or a directory of rotated `*.json`.
 
