@@ -195,7 +195,10 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 			continue
 		}
 		if infra := ownedDB[svc]; len(infra) > 0 {
-			b.WriteString("    box " + svc + "\n")
+			// Mermaid parses `box [color] [title]`, so a service named a color word
+			// (e.g. "aqua") would be swallowed as the box color. Emit an explicit
+			// `transparent` color so the service name always lands in the title slot.
+			b.WriteString("    box transparent " + svc + "\n")
 			decl(svc)
 			for _, db := range infra {
 				decl(db)
@@ -316,41 +319,30 @@ func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[strin
 
 func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
 	for _, g := range groups {
+		// Synchronous members keep the group's ordering framing. Async (FOLLOWS_FROM)
+		// continuations — consumers separately polled later — must not nest in the
+		// producer's synchronous block, where they read as calls made during the
+		// publish; they render as distinct dashed interactions, but still keep the
+		// group's framing among themselves when several consumers fan out at once.
 		sync, async := splitAsync(g.Members)
-		if len(async) > 0 {
-			// A link-caused continuation (a consumer separately polled later) must not
-			// be nested in the producer's synchronous block, where it reads as a call
-			// made during the publish. Render the synchronous members with the group's
-			// own semantics, then each async member as its own distinct interaction.
-			r.writeSyncMembers(b, g, sync, from, fallback, indent)
-			for _, m := range async {
-				r.writeAsyncSystemSpan(b, m, from, fallback, indent)
-			}
-		} else if g.Concurrent || g.Unordered {
-			b.WriteString(indent + "par " + groupLabel(g) + "\n")
-			for i, m := range g.Members {
-				if i > 0 {
-					b.WriteString(indent + "and\n")
-				}
-				r.writeSystemSpan(b, m, from, fallback, indent+"    ")
-			}
-			b.WriteString(indent + "end\n")
-		} else {
-			for _, m := range g.Members {
-				r.writeSystemSpan(b, m, from, fallback, indent)
-			}
-		}
+		r.writeMembers(b, g, sync, indent, func(m *ir.CanonicalSpan, ind string) {
+			r.writeSystemSpan(b, m, from, fallback, ind)
+		})
+		r.writeMembers(b, g, async, indent, func(m *ir.CanonicalSpan, ind string) {
+			r.writeAsyncSystemSpan(b, m, from, fallback, ind)
+		})
 		if g.Multiplicity != "" {
 			b.WriteString(indent + "Note over " + r.id(from) + ": ×" + g.Multiplicity + "\n")
 		}
 	}
 }
 
-// writeSyncMembers renders the synchronous members extracted from a group with the
-// group's ordering semantics: a concurrent/unordered group of two or more becomes a
-// par/and/end block; a lone member (or a sequential group) renders inline. Empty
-// renders nothing — a group of purely async continuations draws no sync block.
-func (r *renderer) writeSyncMembers(b *strings.Builder, g ir.ChildGroup, members []*ir.CanonicalSpan, from, fallback, indent string) {
+// writeMembers renders members with the group's ordering framing: a concurrent or
+// unordered group of two or more members becomes a par/and/end block; a lone member
+// (a deduped loop representative or a sequential step) renders inline. draw emits one
+// member's hop and subtree, so the same framing serves both synchronous hops and
+// dashed async continuations. Empty members render nothing.
+func (r *renderer) writeMembers(b *strings.Builder, g ir.ChildGroup, members []*ir.CanonicalSpan, indent string, draw func(m *ir.CanonicalSpan, indent string)) {
 	if len(members) == 0 {
 		return
 	}
@@ -360,31 +352,29 @@ func (r *renderer) writeSyncMembers(b *strings.Builder, g ir.ChildGroup, members
 			if i > 0 {
 				b.WriteString(indent + "and\n")
 			}
-			r.writeSystemSpan(b, m, from, fallback, indent+"    ")
+			draw(m, indent+"    ")
 		}
 		b.WriteString(indent + "end\n")
 		return
 	}
 	for _, m := range members {
-		r.writeSystemSpan(b, m, from, fallback, indent)
+		draw(m, indent)
 	}
 }
 
 // writeAsyncSystemSpan renders a FOLLOWS_FROM continuation — a consumer polled
 // later, caused by (not called during) the producer's work — as a distinct async
 // interaction: a dashed, open-arrow hop and a Note marking it asynchronous, drawn
-// outside any synchronous block. Its subtree then renders normally.
+// outside any synchronous block. Its subtree then renders normally. As in
+// writeSystemSpan, a span that lands on the lifeline it was already reached from
+// draws no redundant arrow (and so no async note); for a real link-stitched consumer
+// that never coincides, since it lands on its own service.
 func (r *renderer) writeAsyncSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
-	land := landingOf(m, fallback)
-	drawTo := land
-	if land == from && m.Kind == ir.KindConsumer && m.Peer != "" && m.Peer != from {
-		drawTo = m.Peer
-	}
-	if drawTo != from {
+	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		b.WriteString(indent + r.amsg(from, drawTo, label(m)))
 		b.WriteString(indent + "Note over " + r.id(drawTo) + ": async (FOLLOWS_FROM)\n")
 	}
-	r.writeSystemGroups(b, m.Children, land, fallback, indent)
+	r.writeSystemGroups(b, m.Children, landingOf(m, fallback), fallback, indent)
 }
 
 // splitAsync partitions a group's members into synchronous members and async
@@ -400,30 +390,32 @@ func splitAsync(members []*ir.CanonicalSpan) (sync, async []*ir.CanonicalSpan) {
 	return sync, async
 }
 
+// drawTarget is the lifeline a hop into m is drawn to: normally where m lands, but a
+// self-landing consumer poll (an SQS ReceiveMessage lands on its own service rather
+// than the bus) draws to its broker peer so the receive stays as visible as the
+// publish and the settle. Restricted to KindConsumer so a peer-bearing self-landing
+// span of another kind (an ORM-emitted internal DB op, whose peer is the db system)
+// is not drawn — matching collectSystemLifelines, which declares the peer participant
+// only for consumers. Shared by the synchronous and async hop renderers so the rule
+// has one definition.
+func drawTarget(m *ir.CanonicalSpan, from, fallback string) string {
+	land := landingOf(m, fallback)
+	if land == from && m.Kind == ir.KindConsumer && m.Peer != "" && m.Peer != from {
+		return m.Peer
+	}
+	return land
+}
+
 // writeSystemSpan draws the hop into a span (from the caller lifeline to where the
 // span lands) and recurses, threading the landed lifeline as the new caller. When
 // the span lands on the lifeline it was already called from — a callee's own
 // entry span, or an internal self-op — no redundant arrow is drawn; the call that
 // arrived there is enough.
 func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
-	land := landingOf(m, fallback)
-	drawTo := land
-	if land == from && m.Kind == ir.KindConsumer && m.Peer != "" && m.Peer != from {
-		// A consumer poll / receive (SQS ReceiveMessage) is KindConsumer and so
-		// lands on its own service rather than the bus; nested under that same
-		// service it would otherwise draw no hop and vanish. Draw the reach to its
-		// peer (the Bus) so the receive is as visible as the publish and the settle.
-		// Restricted to KindConsumer so a peer-bearing self-landing span of another
-		// kind (an ORM-emitted internal DB op, whose peer is the db system) is not
-		// drawn here — that matches collectSystemLifelines, which declares the peer
-		// participant only for KindConsumer. Child threading stays on the landed
-		// lifeline.
-		drawTo = m.Peer
-	}
-	if drawTo != from {
+	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		b.WriteString(indent + r.msg(from, drawTo, label(m)))
 	}
-	r.writeSystemGroups(b, m.Children, land, fallback, indent)
+	r.writeSystemGroups(b, m.Children, landingOf(m, fallback), fallback, indent)
 }
 
 // writeParticipants declares lifelines in a fixed order: the caller, the self
@@ -531,9 +523,18 @@ func label(s *ir.CanonicalSpan) string {
 }
 
 // callerLabel is the lifeline that triggered the flow: a generic Client for an
-// inbound HTTP server root, the Bus for a consumed event.
+// inbound HTTP server root, and for a consumed-event root the broker it consumed
+// from. That broker is the root's own Peer, which opkey.brokerPeer already
+// canonicalizes per messaging system (Bus / SNS / SQS / …), so the trigger lifeline
+// coincides with the participant collectSystemLifelines / collectPeers declare for
+// the consumer — rather than a hardcoded "Bus" that would leave the real broker as a
+// dangling, unconnected participant. "Bus" remains the fallback for a hand-built
+// consumer root carrying no peer.
 func callerLabel(root *ir.CanonicalSpan) string {
 	if root != nil && root.Kind == ir.KindConsumer {
+		if root.Peer != "" {
+			return root.Peer
+		}
 		return "Bus"
 	}
 	return "Client"

@@ -294,8 +294,8 @@ func TestSystemMermaidBoxesOwnedInfra(t *testing.T) {
 	out := SystemMermaid(tr)
 	// Each service's owned database sits inside that service's box.
 	for _, want := range []string{
-		"box event-bus\n    participant event_bus as event-bus\n    participant postgresql_event_bus_test as postgresql/event_bus_test\n    end\n",
-		"box cgate\n    participant cgate as cgate\n    participant postgresql_cgate_test as postgresql/cgate_test\n    end\n",
+		"box transparent event-bus\n    participant event_bus as event-bus\n    participant postgresql_event_bus_test as postgresql/event_bus_test\n    end\n",
+		"box transparent cgate\n    participant cgate as cgate\n    participant postgresql_cgate_test as postgresql/cgate_test\n    end\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing boxed family layout:\nwant:\n%s\ngot:\n%s", want, out)
@@ -305,6 +305,79 @@ func TestSystemMermaidBoxesOwnedInfra(t *testing.T) {
 	if i, j := strings.Index(out, "end\n    participant Bus as Bus"), strings.Index(out, "box"); i < 0 || i < j {
 		t.Errorf("shared Bus should be declared unboxed after the service boxes:\n%s", out)
 	}
+}
+
+// TestSystemMermaidConsumerRootUsesBrokerPeer: a consumer-rooted flow whose broker
+// is a managed system (Peer canonicalized to "SQS"/"SNS") draws the trigger arrow
+// from that broker and declares it exactly once — not from a hardcoded, dangling
+// "Bus" lifeline.
+func TestSystemMermaidConsumerRootUsesBrokerPeer(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "notifier",
+		Root: &ir.CanonicalSpan{
+			Op: "CONSUME loan-queue", Kind: ir.KindConsumer, Peer: "SQS", Service: "notifier",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "DB postgres UPDATE loans", Kind: ir.KindClient, Peer: "postgres", Service: "notifier"},
+			}}},
+		},
+	}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "SQS->>notifier: CONSUME loan-queue")
+	if strings.Contains(out, "Bus") {
+		t.Errorf("consumer root from a managed broker must not draw a phantom Bus lifeline:\n%s", out)
+	}
+	if n := strings.Count(out, "participant SQS as SQS"); n != 1 {
+		t.Errorf("broker SQS should be declared exactly once (caller == consumer peer), got %d:\n%s", n, out)
+	}
+
+	// The default event bus (no managed system) keeps the generic "Bus" caller, so
+	// existing single-bus consumer diagrams are unchanged.
+	busTr := &ir.CanonicalTrace{
+		Service: "loansvc",
+		Root:    &ir.CanonicalSpan{Op: "CONSUME payment.settled", Kind: ir.KindConsumer, Peer: "Bus", Service: "loansvc"},
+	}
+	if out := SystemMermaid(busTr); !strings.Contains(out, "Bus->>loansvc: CONSUME payment.settled") {
+		t.Errorf("default-bus consumer root should still be triggered from Bus:\n%s", out)
+	}
+}
+
+// TestSystemMermaidAllAsyncGroupKeepsFraming: a producer fanned out to several
+// link-stitched consumers (a concurrent group of async members) still renders the
+// concurrency framing — a par block of dashed arrows — rather than bare hops.
+func TestSystemMermaidAllAsyncGroupKeepsFraming(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "publisher",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /fanout", Kind: ir.KindServer, Service: "publisher",
+			Children: []ir.ChildGroup{{Concurrent: true, Members: []*ir.CanonicalSpan{
+				{Op: "CONSUME a", Kind: ir.KindConsumer, Peer: "Bus", Service: "c1", Async: true},
+				{Op: "CONSUME b", Kind: ir.KindConsumer, Peer: "Bus", Service: "c2", Async: true},
+			}}},
+		},
+	}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "par concurrent")
+	mustContain(t, out, "publisher--)c1: CONSUME a")
+	mustContain(t, out, "publisher--)c2: CONSUME b")
+	if strings.Count(out, "\n    and\n") != 1 { // the two async members share one par block
+		t.Errorf("two concurrent async consumers should share one par block:\n%s", out)
+	}
+}
+
+// TestSystemMermaidBoxTitleNotSwallowedAsColor: a service whose name is a color word
+// still appears as the box title (an explicit transparent color occupies the color
+// slot), not as the box's background color.
+func TestSystemMermaidBoxTitleNotSwallowedAsColor(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "aqua",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /x", Kind: ir.KindServer, Service: "aqua",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "DB postgres INSERT t", Kind: ir.KindClient, Peer: "postgres", Service: "aqua"},
+			}}},
+		},
+	}
+	mustContain(t, SystemMermaid(tr), "box transparent aqua\n")
 }
 
 // TestSystemGraph renders a system-context graph: graph LR, node shapes by kind,
