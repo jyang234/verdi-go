@@ -132,10 +132,20 @@ func WholeFlows(spans []capture.Span) []FlowCapture {
 	for _, slug := range order {
 		spans, root, trigger, synth := assembleRoot(slug, buckets[slug])
 		// The entry service owns the trace lifeline. A synthesized root (no single
-		// inbound entry — a multi-trace slug or an event-only flow) has no
-		// service.name, so fall back to the flow slug rather than an empty
-		// lifeline; the renderer would otherwise emit an unnamed participant.
+		// inbound entry — a multi-trace slug or an event-only flow) carries no
+		// service.name. When every span in the flow belongs to one service, that
+		// service is the unambiguous owner and names the lifeline (a test that
+		// awaits several requests against one service synthesizes a root, but the
+		// flow is still that service's). Only when the flow spans multiple services
+		// — so no single owner exists — does it fall back to the flow slug, rather
+		// than an empty lifeline the renderer would draw as an unnamed participant.
+		// This is a render-only label: the synthesized span's own Service is left
+		// empty, so the per-span attribution the system-context graph keys on (and
+		// its ingress-edge recovery) is unchanged.
 		svc := root.Attr(serviceKey)
+		if svc == "" {
+			svc = commonService(spans)
+		}
 		if svc == "" {
 			svc = slug
 		}
@@ -196,6 +206,25 @@ func assembleRoot(synthName string, spans []capture.Span) ([]capture.Span, *capt
 	}
 	spans = append(spans, syn)
 	return spans, &spans[len(spans)-1], trigger, true
+}
+
+// commonService returns the single service.name shared by every span carrying
+// one, or "" if the spans span more than one service (no single owner) or none
+// name a service. The synthesized root's empty service is ignored.
+func commonService(spans []capture.Span) string {
+	svc := ""
+	for i := range spans {
+		s := spans[i].Attr(serviceKey)
+		if s == "" {
+			continue
+		}
+		if svc == "" {
+			svc = s
+		} else if svc != s {
+			return ""
+		}
+	}
+	return svc
 }
 
 // skey is a span's global identity. A flow that crosses a broker spans multiple

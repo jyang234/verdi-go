@@ -529,10 +529,10 @@ func services(g []FlowCapture) []string {
 	return out
 }
 
-// TestWholeFlowsSynthesizedUsesSlug: a multi-entry / publisher-only whole flow
-// synthesizes a root with no service.name; its lifeline must fall back to the
-// flow slug, not "" (which would render an unnamed participant).
-func TestWholeFlowsSynthesizedUsesSlug(t *testing.T) {
+// TestWholeFlowsSynthesizedUsesCommonService: a synthesized root (no inbound
+// entry) whose flow belongs entirely to one service names its lifeline after
+// that service — the unambiguous owner — not the flow slug.
+func TestWholeFlowsSynthesizedUsesCommonService(t *testing.T) {
 	spans := []capture.Span{
 		span("1", "remote", "emit", "emitter", ir.KindProducer, map[string]string{"messaging.destination.name": "x"}),
 		span("2", "remote", "emit", "emitter", ir.KindProducer, map[string]string{"messaging.destination.name": "y"}),
@@ -544,7 +544,33 @@ func TestWholeFlowsSynthesizedUsesSlug(t *testing.T) {
 	if !wf[0].Synthesized {
 		t.Fatal("two parentless producers should synthesize a root")
 	}
-	if wf[0].Service != "emit" || wf[0].Flow.Service != "emit" {
-		t.Errorf("synthesized whole-flow Service = %q/%q, want slug \"emit\"", wf[0].Service, wf[0].Flow.Service)
+	if wf[0].Service != "emitter" || wf[0].Flow.Service != "emitter" {
+		t.Errorf("synthesized whole-flow Service = %q/%q, want owning service \"emitter\"", wf[0].Service, wf[0].Flow.Service)
+	}
+	// The synthesized span's own service stays empty — the label is render-only and
+	// must not leak into the per-span model the system-context graph keys on.
+	if wf[0].Flow.Root.Attr("service.name") != "" {
+		t.Errorf("synthesized root span should carry no service.name, got %q", wf[0].Flow.Root.Attr("service.name"))
+	}
+}
+
+// TestWholeFlowsSynthesizedMultiServiceFallsBackToSlug: when a synthesized whole
+// flow spans more than one service there is no single owner, so the lifeline
+// falls back to the flow slug rather than picking one service arbitrarily or
+// rendering an unnamed participant.
+func TestWholeFlowsSynthesizedMultiServiceFallsBackToSlug(t *testing.T) {
+	spans := []capture.Span{
+		span("1", "remote", "emit", "svc-a", ir.KindProducer, map[string]string{"messaging.destination.name": "x"}),
+		span("2", "remote", "emit", "svc-b", ir.KindProducer, map[string]string{"messaging.destination.name": "y"}),
+	}
+	wf := WholeFlows(spans)
+	if len(wf) != 1 {
+		t.Fatalf("got %d, want 1", len(wf))
+	}
+	if !wf[0].Synthesized {
+		t.Fatal("two parentless producers should synthesize a root")
+	}
+	if wf[0].Service != "emit" {
+		t.Errorf("multi-service synthesized flow Service = %q, want slug \"emit\"", wf[0].Service)
 	}
 }
