@@ -116,6 +116,71 @@ requests at `AlwaysSample`, or rely on the `tail_sampling/flowmap` policy from
 step 1 (it keeps every trace carrying the attribute). Don't leave tagged flows
 subject to a 1% head sampler.
 
+## Step 4b — async flows across a broker (span links, no extra wiring)
+
+Baggage does **not** cross a message broker: the consumer runs later, on its own
+trace, and `flowmap.flow` is gone. That is correct propagation behavior, not a
+bug — but it means the consumer's spans arrive untagged, and `parent_span_id`
+does not reach back to the producer either. flowmap recovers the join from the
+**OTLP span link** the consumer's messaging instrumentation already emits: a
+`FOLLOWS_FROM`-style link from the consume span back to the producer span it
+processed (provider-derived and forgery-resistant — the broker, not the test,
+stamps it).
+
+If your consumer instrumentation records that link (the OTel messaging
+conventions do by default), **no extra wiring is needed**. Ingest follows the
+link to do two things:
+
+- **Membership** — the consumer (and its whole subtree) inherits the producer's
+  `flowmap.flow` slug across the hand-off, so an untagged consumer trace still
+  joins the flow and is gated as its own per-service fragment. Membership
+  propagates to a fixpoint, so a multi-hop chain (produce → consume → produce →
+  consume) is recovered end to end.
+- **Stitching** — for the cross-service render (`--render-dir`, `--merged`), the
+  consumer subtree is reparented onto the producer, so the two traces draw as one
+  connected flow instead of two disconnected roots.
+
+Links are followed only on a **genuine new root** (a span whose own
+`parent_span_id` is empty), so a mid-trace link — a causal reference that is not
+the parent — never rewires the tree. Link targets are matched by `(traceId,
+spanId)`. See `../../testdata/otlp/async-broker.otlp.json` for a worked two-trace
+example.
+
+### Managed brokers (AWS SNS/SQS) — recognized from the AWS layer
+
+The AWS SDK instrumentation models SNS/SQS as **`CLIENT`-kind RPC spans** (kind
+3), not `PRODUCER`/`CONSUMER`, and each span carries *three* layers of
+attributes: the messaging layer (`messaging.*`), the RPC layer (`rpc.*`), and the
+underlying HTTP-to-endpoint transport (`url.full` to LocalStack/AWS). flowmap
+prefers the messaging/RPC layer over the transport, so a broker call is never
+flattened to a bare HTTP edge to the endpoint host. **No extra wiring is needed**
+if your SDK emits the standard attributes:
+
+- **`rpc.system.name`** is accepted alongside the older `rpc.system` (the AWS SDK
+  emits the former); without it these calls fall through to the bare HTTP
+  transport, which is the root of both "the publish vanished" and "receive looks
+  like delete."
+- **SNS** carries `messaging.destination.name` → **PUBLISH `<topic>`** (the
+  direction comes from `messaging.operation` / `.operation.type`, e.g. `send`).
+- **SQS** typically carries *no* `messaging.destination.name` or
+  `messaging.operation` — only `rpc.method` (`SQS/ReceiveMessage` vs
+  `SQS/DeleteMessage`). That `rpc.method` is the discriminator, so a receive and
+  its delete are kept **distinct** (`RPC SQS/ReceiveMessage` / `RPC
+  SQS/DeleteMessage`) rather than merged, and the peer is the AWS service (`SQS`),
+  not the transport host. When an instrumentation *does* emit
+  `messaging.operation`, `settle`/`ack`/`delete` is keyed as **SETTLE `<dest>`**.
+
+**Cross-trace ordering.** When a test awaits several steps, each is often its own
+root trace (no cross-trace parent/child). For a slug spanning multiple such
+traces, the post-hoc canon sequences the top-level traces by their **disjoint
+root intervals** (happens-before; concurrent only on genuine overlap), so
+`publish → receive → ack` renders in time order rather than collapsing into one
+op-key-ordered concurrent group.
+
+See `../../testdata/otlp/aws-eventbridge.otlp.json` (the real four-trace SNS/SQS
+shape) and `../../testdata/otlp/aws-sns-sqs.otlp.json` (the messaging-rich
+publish → receive → settle shape).
+
 ## Step 5 — ingest after the e2e run (stage 1, non-gated)
 
 Add one step to your CI e2e job, after the run drains:

@@ -21,6 +21,32 @@ RTA/VTA need roots, and the roots that matter aren't only `main`. For an event-d
 
 `roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (libraries) exported funcs`
 
+Registration patterns vary. flowmap recognizes stdlib `(*http.ServeMux).HandleFunc`
+(method in the route string, `"POST /x"`) and **go-chi's per-method router**
+(`r.Post`/`r.Get`, the method implied by the function name) — the latter is how
+**oapi-codegen's chi server** registers handlers. Two wrinkles that pattern adds
+are handled: chi's `Router` is an *interface*, so registration is an
+interface-method *invoke* (no static callee) rather than a direct call; and the
+route is a `baseURL + "/path"` concatenation, so the route template is recovered
+from the constant segments (eliding the non-constant base URL). The handler is
+the generated wrapper method, which reaches the real implementation through the
+`ServerInterface` — connected by RTA like any other interface call. The same
+concatenation recovery makes oapi-codegen's **std-net/http** server work too
+(`m.HandleFunc("GET "+baseURL+"/path", wrapper.X)`).
+
+Other method-named routers (echo, custom) are declarable via `static.routers` in
+`.flowmap.yaml` (package + the registration function names; the HTTP method is
+the name uppercased). A matched call is only treated as a registration when its
+handler argument is **func-typed** — so an incidental name collision (a config
+registrar matching, say, a `cache.Get`) is skipped silently rather than
+mis-recorded as a gated blind spot, while a genuinely dynamic func handler is
+still disclosed. **gin** is covered too: its handler is variadic, arriving as a
+slice the caller builds, from which the final handler (after any middleware) is
+recovered and rooted. The one shape still out of scope is **gorilla/mux**, where
+the HTTP method comes from a chained `.Methods(...)` call on the returned
+`*Route` rather than the function name or route — it needs the chained call
+followed, not just a config hint.
+
 This **aligns the static graph with the behavioral flows**: the static roots (handlers, consumers, mains) mirror the behavioral triggers (HTTP, event). Organize the graph **per entry point** — the subtree reachable from each handler/consumer — so the static artifact and the per-flow snapshots are about the same units.
 
 ---

@@ -1,0 +1,97 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "loansvc" } },
+          { "key": "host.name", "value": { "stringValue": "pod-7f9c" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "spanId": "0000000000000a01",
+              "parentSpanId": "",
+              "name": "POST /loan-application",
+              "kind": 2,
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000000050000000",
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.route", "value": { "stringValue": "/loan-application" } },
+                { "key": "flowmap.flow", "value": { "stringValue": "loan-application" } }
+              ],
+              "status": { "code": 1 }
+            },
+            {
+              "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "spanId": "0000000000000a02",
+              "parentSpanId": "0000000000000a01",
+              "name": "loan.approved send",
+              "kind": 4,
+              "startTimeUnixNano": "1700000000035000000",
+              "endTimeUnixNano": "1700000000036000000",
+              "attributes": [
+                { "key": "messaging.destination.name", "value": { "stringValue": "loan.approved" } },
+                { "key": "messaging.operation", "value": { "stringValue": "publish" } },
+                { "key": "flowmap.flow", "value": { "stringValue": "loan-application" } }
+              ],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "notifier" } },
+          { "key": "host.name", "value": { "stringValue": "pod-22ab" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "spanId": "0000000000000b01",
+              "parentSpanId": "",
+              "name": "loan.approved process",
+              "kind": 5,
+              "startTimeUnixNano": "1700000000100000000",
+              "endTimeUnixNano": "1700000000130000000",
+              "links": [
+                {
+                  "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "spanId": "0000000000000a02"
+                }
+              ],
+              "attributes": [
+                { "key": "messaging.destination.name", "value": { "stringValue": "loan.approved" } },
+                { "key": "messaging.operation", "value": { "stringValue": "process" } }
+              ],
+              "status": { "code": 1 }
+            },
+            {
+              "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "spanId": "0000000000000b02",
+              "parentSpanId": "0000000000000b01",
+              "name": "POST",
+              "kind": 3,
+              "startTimeUnixNano": "1700000000110000000",
+              "endTimeUnixNano": "1700000000120000000",
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.route", "value": { "stringValue": "/send" } },
+                { "key": "peer.service", "value": { "stringValue": "email-gw" } }
+              ],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

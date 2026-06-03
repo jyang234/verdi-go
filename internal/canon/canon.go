@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
@@ -122,16 +123,21 @@ type canonicalizer struct {
 // groups the children by happens-before order (recursing into each).
 func (c *canonicalizer) build(s *capture.Span, childrenOf map[string][]*capture.Span) *ir.CanonicalSpan {
 	op, peer := opkey.Of(s.Kind, s.Attrs, s.Name)
+	// A managed-broker call (AWS SDK SNS/SQS) arrives as a CLIENT span but is
+	// behaviorally a producer/consumer; normalize to the messaging role so every
+	// kind-keyed consumer (gate, syscontext, render, tiering) classifies it as the
+	// broker interaction it is. For non-messaging spans this is the raw kind.
+	kind := opkey.EffectiveKind(s.Kind, s.Attrs)
 	cs := &ir.CanonicalSpan{
 		Op:        op,
-		Kind:      s.Kind,
+		Kind:      kind,
 		Peer:      peer,
 		Service:   s.Attr("service.name"), // owning lifeline; "" in-process (omitempty)
 		Status:    normalizeStatus(s.Status),
 		ErrorType: s.ErrorType,
 		Attrs:     c.projectAttrs(s),
 	}
-	cs.Tier, _ = c.classifier.Classify(c.features(s, op))
+	cs.Tier, _ = c.classifier.Classify(c.features(kind, s, op))
 	cs.Children = c.group(s.Goroutine, childrenOf[s.ID], childrenOf)
 	return cs
 }
@@ -149,26 +155,8 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 		return nil
 	}
 
-	// Post-hoc profile: siblings carry no run-independent happens-before signal
-	// (no goroutine dispatch, jittery cross-run clocks), so they become a single
-	// canonical-key-ordered group rather than being sequenced by caller-clock.
-	// collapseLoops still folds identical repeated members into a 1..* class.
 	if c.postHoc {
-		members := make([]*ir.CanonicalSpan, 0, len(kids))
-		for _, k := range kids {
-			members = append(members, c.build(k, childrenOf))
-		}
-		// Order by op key, then by canonical subtree signature as a tiebreak. The
-		// signature breaks ties run-independently: two siblings sharing an Op but
-		// with different subtrees would otherwise keep their decode/file order,
-		// which is not stable across exports — defeating the profile's whole point.
-		sort.SliceStable(members, func(i, j int) bool {
-			if members[i].Op != members[j].Op {
-				return members[i].Op < members[j].Op
-			}
-			return signature(members[i]) < signature(members[j])
-		})
-		return c.collapseLoops([]ir.ChildGroup{{Concurrent: len(members) > 1, Members: members}})
+		return c.groupPostHoc(kids, childrenOf)
 	}
 
 	ordered := make([]*capture.Span, len(kids))
@@ -232,16 +220,141 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 	return c.collapseLoops(groups)
 }
 
+// groupPostHoc orders siblings out of process, where the goroutine dispatch
+// signal is gone but the exported intervals remain. Absolute timestamps jitter
+// run-to-run, but the *order* of disjoint intervals does not, so three states are
+// distinguished instead of forcing everything concurrent (canon §3.3, post-hoc):
+//
+//   - overlapping intervals → concurrent (genuine parallelism, par).
+//   - disjoint by more than the order guard → sequential (a reliable
+//     happens-before; groups emitted in start order).
+//   - disjoint within the guard, or untimed → unordered (a distinct render that
+//     claims neither a sequence nor parallelism).
+//
+// Concurrent and unordered members are sorted by op key then canonical subtree
+// signature so a same-op tie is run-independent.
+func (c *canonicalizer) groupPostHoc(kids []*capture.Span, childrenOf map[string][]*capture.Span) []ir.ChildGroup {
+	ordered := make([]*capture.Span, len(kids))
+	copy(ordered, kids)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if !ordered[i].Start.Equal(ordered[j].Start) {
+			return ordered[i].Start.Before(ordered[j].Start)
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
+	// Overlap components: two siblings whose caller-clock intervals intersect are
+	// concurrent (goroutine signal absent out of process, so pass 0).
+	n := len(ordered)
+	uf := make([]int, n)
+	for i := range uf {
+		uf[i] = i
+	}
+	find := func(x int) int {
+		for uf[x] != x {
+			uf[x] = uf[uf[x]]
+			x = uf[x]
+		}
+		return x
+	}
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if capture.Concurrent(*ordered[i], *ordered[j], 0) {
+				if ri, rj := find(i), find(j); ri != rj {
+					uf[ri] = rj
+				}
+			}
+		}
+	}
+
+	type unit struct {
+		members    []*ir.CanonicalSpan
+		start, end time.Time
+		timed      bool
+	}
+	comps := map[int][]int{}
+	var roots []int
+	for i := 0; i < n; i++ {
+		r := find(i)
+		if _, seen := comps[r]; !seen {
+			roots = append(roots, r)
+		}
+		comps[r] = append(comps[r], i)
+	}
+	sort.SliceStable(roots, func(i, j int) bool { return comps[roots[i]][0] < comps[roots[j]][0] })
+
+	bySig := func(ms []*ir.CanonicalSpan) {
+		sort.SliceStable(ms, func(i, j int) bool {
+			if ms[i].Op != ms[j].Op {
+				return ms[i].Op < ms[j].Op
+			}
+			return signature(ms[i]) < signature(ms[j])
+		})
+	}
+
+	units := make([]unit, 0, len(roots))
+	for _, r := range roots {
+		u := unit{timed: true}
+		for k, idx := range comps[r] {
+			s := ordered[idx]
+			u.members = append(u.members, c.build(s, childrenOf))
+			if s.Start.IsZero() || s.End.IsZero() {
+				u.timed = false
+			}
+			if k == 0 || s.Start.Before(u.start) {
+				u.start = s.Start
+			}
+			if k == 0 || s.End.After(u.end) {
+				u.end = s.End
+			}
+		}
+		if len(u.members) > 1 {
+			bySig(u.members) // members of a concurrent component
+		}
+		units = append(units, u)
+	}
+
+	if len(units) == 1 {
+		u := units[0]
+		return c.collapseLoops([]ir.ChildGroup{{Concurrent: len(u.members) > 1, Members: u.members}})
+	}
+
+	guard := c.cfg.Canon.OrderGuard()
+	cleanlyOrdered := true
+	for i := range units {
+		if !units[i].timed || (i > 0 && units[i].start.Sub(units[i-1].end) <= guard) {
+			cleanlyOrdered = false
+			break
+		}
+	}
+	if cleanlyOrdered {
+		groups := make([]ir.ChildGroup, 0, len(units))
+		for _, u := range units {
+			groups = append(groups, ir.ChildGroup{Concurrent: len(u.members) > 1, Members: u.members})
+		}
+		return c.collapseLoops(groups)
+	}
+
+	// Not cleanly orderable: present together as unordered rather than over-claim a
+	// sequence (op-key/arbitrary) or parallelism (par).
+	var all []*ir.CanonicalSpan
+	for _, u := range units {
+		all = append(all, u.members...)
+	}
+	bySig(all)
+	return c.collapseLoops([]ir.ChildGroup{{Unordered: len(all) > 1, Members: all}})
+}
+
 // collapseLoops folds data-dependent repetition into one representative with a
 // multiplicity class so processing 3 vs. 300 items yields the same snapshot
 // (canon §3.7). Two shapes are collapsed: a run of consecutive sequential groups
-// with identical canonical subtrees, and identical members within a concurrent
-// group.
+// with identical canonical subtrees, and identical members within a concurrent or
+// unordered group.
 func (c *canonicalizer) collapseLoops(groups []ir.ChildGroup) []ir.ChildGroup {
-	// Dedupe identical concurrent members.
+	// Dedupe identical concurrent/unordered members.
 	for gi := range groups {
 		g := &groups[gi]
-		if g.Concurrent {
+		if g.Concurrent || g.Unordered {
 			deduped := g.Members[:0:0]
 			seen := map[string]bool{}
 			collapsed := false
@@ -288,9 +401,9 @@ func (c *canonicalizer) collapseLoops(groups []ir.ChildGroup) []ir.ChildGroup {
 // span's kind, op, and attributes (canon §3.6). It mirrors the static extractor's
 // intent so a publish is tier 1 and an internal compute is tier 3 whether seen
 // statically or at runtime.
-func (c *canonicalizer) features(s *capture.Span, op string) model.Features {
+func (c *canonicalizer) features(kind ir.Kind, s *capture.Span, op string) model.Features {
 	f := model.Features{Identity: op, Fallible: normalizeStatus(s.Status) == capture.StatusError}
-	switch s.Kind {
+	switch kind {
 	case ir.KindServer, ir.KindConsumer:
 		f.Boundary, f.Effect, f.Origin = model.BoundaryInbound, model.EffectIO, model.OriginFirstParty
 	case ir.KindProducer:

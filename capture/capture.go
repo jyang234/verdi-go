@@ -51,6 +51,10 @@ const (
 // caller-clock timestamps used transiently to decide sibling ordering (§3.3) and
 // then discarded by the canonicalizer; they are never serialized into a golden.
 type Span struct {
+	// TraceID identifies the span's trace. Out of process a flow can cross trace
+	// boundaries (an async broker hand-off starts a new trace), so a span is
+	// identified by (TraceID, ID) and a Link's target by (TraceID, SpanID).
+	TraceID  string
 	ID       string
 	ParentID string
 	Name     string
@@ -63,12 +67,25 @@ type Span struct {
 	Start time.Time
 	End   time.Time
 
+	// Links are the span's OTLP links — references to causally-related spans in
+	// other traces. The async-flow membership signal across a broker (a FOLLOWS_FROM
+	// from a consumer back to the producer it processes), where neither baggage nor
+	// parent_span_id crosses. Empty for purely synchronous in-process flows.
+	Links []SpanLink
+
 	// Goroutine is the id of the goroutine the span started on — the structural
 	// concurrency signal (canon §3.3, plan [C2]). A child that runs on a different
 	// goroutine than its parent was dispatched asynchronously; two such siblings
 	// are a race regardless of how their intervals happen to fall. Zero means the
 	// signal was unavailable, and ordering falls back to caller-clock overlap.
 	Goroutine uint64
+}
+
+// SpanLink is a reference from one span to another (OTLP span link), identified by
+// the linked span's (TraceID, SpanID).
+type SpanLink struct {
+	TraceID string
+	SpanID  string
 }
 
 // CapturedFlow is the harness's output and the canonicalizer's input

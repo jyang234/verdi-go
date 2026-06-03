@@ -130,6 +130,24 @@ static:
   highFanOutThreshold: 20   # default 8; flags dynamic-dispatch sites with more callees
 ```
 
+**HTTP routers.** Root discovery recognizes stdlib `ServeMux` and go-chi (so
+oapi-codegen's chi *and* std-net/http servers work out of the box). For another
+method-named router — echo, or a custom one where each registration function is
+an HTTP method and the handler is a single positional argument — declare it:
+
+```yaml
+static:
+  routers:
+    - package: github.com/labstack/echo/v4   # where the router type is declared
+      methods: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]  # HTTP method = name uppercased
+      # routeArg: 0  (default)   handlerArg: 1  (default)
+```
+
+gin's per-method router works the same way — its handler is variadic, and the
+final handler in `r.GET(path, mw…, h)` is the one rooted. The one shape this
+does **not** cover is gorilla/mux, where the method comes from a chained
+`.Methods("GET")` call rather than the function name or route string.
+
 ---
 
 ## Scope (v1)

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -48,6 +49,24 @@ type StaticConfig struct {
 	// site is flagged as likely over-approximation in the (non-gated) graph
 	// blind-spots. 0 => the built-in default. Interface-dense services may raise it.
 	HighFanOutThreshold int `yaml:"highFanOutThreshold"`
+
+	// Routers declares HTTP route-registration functions root discovery should
+	// recognize, beyond the built-in stdlib ServeMux and go-chi. Each entry covers
+	// a router whose method is implied by the registration function name and whose
+	// handler is a single positional func argument (echo and most custom routers;
+	// not gin's variadic handlers or gorilla's chained .Methods()).
+	Routers []RouterHint `yaml:"routers"`
+}
+
+// RouterHint declares a per-method HTTP router for root discovery. Each named
+// function registers a handler for the HTTP method that is its name uppercased
+// (chi's "Get" and echo's "GET" both map to GET), with the route at RouteArg and
+// the handler func at HandlerArg (logical positions, excluding any receiver).
+type RouterHint struct {
+	Package    string   `yaml:"package"`    // import path declaring the router type
+	Methods    []string `yaml:"methods"`    // registration function names, e.g. [GET, POST]
+	RouteArg   *int     `yaml:"routeArg"`   // logical position of the route string; nil => 0
+	HandlerArg *int     `yaml:"handlerArg"` // logical position of the handler func; nil => 1
 }
 
 // defaultHighFanOutThreshold is the built-in fan-out flag threshold.
@@ -80,6 +99,12 @@ type CanonConfig struct {
 	// timestamp value matchers. Only attributes that are retained (an allowlisted
 	// key) are projected, so a redact key has effect only when it is also kept.
 	RedactKeys []string `yaml:"redactKeys"`
+	// OrderGuardMs is the out-of-process sibling-ordering guard, in milliseconds.
+	// Two disjoint sibling spans separated by more than this are ordered
+	// sequentially (a reliable happens-before); a smaller gap leaves them
+	// unordered rather than over-claiming a sequence. 0 => default (100ms), well
+	// past same-host scheduling jitter; raise it in a high-latency environment.
+	OrderGuardMs int `yaml:"orderGuardMs"`
 }
 
 // ClassifyHints name the libraries flowmap cannot infer: loggers, the bus client,
@@ -205,7 +230,31 @@ func (c *Config) validate() error {
 	if _, ok := salienceTiers[c.Canon.SalienceTier]; c.Canon.SalienceTier != "" && !ok {
 		return fmt.Errorf("flowmap config: canon.salienceTier %q not one of warn|info|debug|all", c.Canon.SalienceTier)
 	}
+	for i, r := range c.Static.Routers {
+		if r.Package == "" {
+			return fmt.Errorf("flowmap config: static.routers[%d].package is required", i)
+		}
+		if len(r.Methods) == 0 {
+			return fmt.Errorf("flowmap config: static.routers[%d] (%s) lists no methods", i, r.Package)
+		}
+		if r.RouteArg != nil && *r.RouteArg < 0 {
+			return fmt.Errorf("flowmap config: static.routers[%d].routeArg %d must be >= 0", i, *r.RouteArg)
+		}
+		if r.HandlerArg != nil && *r.HandlerArg < 0 {
+			return fmt.Errorf("flowmap config: static.routers[%d].handlerArg %d must be >= 0", i, *r.HandlerArg)
+		}
+	}
 	return nil
+}
+
+// OrderGuard returns the out-of-process sibling-ordering guard, or the 100ms
+// default. A disjoint sibling gap larger than this is treated as a reliable
+// happens-before; a smaller gap is left unordered.
+func (c *CanonConfig) OrderGuard() time.Duration {
+	if c.OrderGuardMs > 0 {
+		return time.Duration(c.OrderGuardMs) * time.Millisecond
+	}
+	return 100 * time.Millisecond
 }
 
 // salienceTiers maps a salience name to the maximum tier retained in a snapshot.

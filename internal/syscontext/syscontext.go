@@ -119,18 +119,12 @@ func (b *builder) addTrace(t *ir.CanonicalTrace) {
 	if t == nil || t.Root == nil {
 		return
 	}
-	fallback := t.Service
-	rootSvc := lifeline(t.Root.Service, fallback)
-	// Ingress edge for an HTTP entry; an event entry is covered by pub/sub.
-	if t.Root.Kind == ir.KindServer {
-		b.node("Client", KindClient)
-		b.node(rootSvc, KindService)
-		b.edge("Client", rootSvc, "", true)
-	}
-	b.walk(t.Root, fallback, true)
+	b.walk(t.Root, "", t.Service, true)
 }
 
-func (b *builder) walk(s *ir.CanonicalSpan, fallback string, solid bool) {
+// walk visits a span carrying parent — the service that owns the enclosing span,
+// which is the lifeline the inbound hop comes from.
+func (b *builder) walk(s *ir.CanonicalSpan, parent, fallback string, solid bool) {
 	svc := lifeline(s.Service, fallback)
 	switch s.Kind {
 	case ir.KindClient:
@@ -141,16 +135,41 @@ func (b *builder) walk(s *ir.CanonicalSpan, fallback string, solid bool) {
 		}
 	case ir.KindProducer:
 		b.node(svc, KindService)
-		b.publish(strings.TrimPrefix(s.Op, opkey.PublishPrefix), svc, solid)
+		if opkey.IsSettle(s.Op) {
+			// A consumer-side acknowledgment (drain) is a broker interaction but
+			// not a publish: registering it as one would fabricate a
+			// publisher→subscriber choreography edge for the queue.
+			b.settle(opkey.BusDestination(s.Op), svc, solid)
+		} else {
+			b.publish(opkey.BusDestination(s.Op), svc, solid)
+		}
 	case ir.KindConsumer:
 		b.node(svc, KindService)
-		b.consume(strings.TrimPrefix(s.Op, opkey.ConsumePrefix), svc, solid)
+		b.consume(opkey.BusDestination(s.Op), svc, solid)
 	case ir.KindServer:
-		b.node(svc, KindService) // a callee entry is a node; its hop is the caller's client edge
+		b.node(svc, KindService)
+		switch {
+		case parent == "":
+			// An ingress with no in-flow caller (the entry, or a multi-entry
+			// flow's entries).
+			b.node("Client", KindClient)
+			b.edge("Client", svc, "", solid)
+		case parent != svc:
+			// A callee entry: recover the cross-service hop from the tree nesting
+			// rather than the caller's client span, whose peer.service may differ
+			// from this service's service.name (or may be absent from the capture).
+			b.edge(parent, svc, "", solid)
+		}
+	}
+	// Children are owned by this span's service when it has one; a service-less
+	// node (a synthesized root) passes the parent through unchanged.
+	childParent := parent
+	if s.Service != "" {
+		childParent = svc
 	}
 	for _, g := range s.Children {
 		for _, m := range g.Members {
-			b.walk(m, fallback, solid)
+			b.walk(m, childParent, fallback, solid)
 		}
 	}
 }
@@ -184,6 +203,18 @@ func (b *builder) publish(event, svc string, solid bool) {
 		b.node(busNode, KindBroker)
 		b.edge(svc, busNode, "publish "+event, solid)
 	}
+}
+
+// settle draws a service's acknowledgment of a queue (SQS delete, an ack) as a
+// broker interaction, without recording it in the pub map — an ack is not a
+// publish and must not seed a choreography edge. In choreography mode (no Bus
+// node) the ack has no publisher→subscriber meaning, so nothing is drawn.
+func (b *builder) settle(event, svc string, solid bool) {
+	if event == "" || b.choreography {
+		return
+	}
+	b.node(busNode, KindBroker)
+	b.edge(svc, busNode, "settle "+event, solid)
 }
 
 func (b *builder) consume(event, svc string, solid bool) {

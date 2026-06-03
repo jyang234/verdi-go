@@ -202,6 +202,11 @@ func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[strin
 	if s.Service != "" {
 		into[s.Service] = true
 	}
+	// A consumer poll lands on its own service but draws its hop to the bus
+	// (writeSystemSpan); declare that peer so it has a fixed-order participant.
+	if s.Kind == ir.KindConsumer && s.Peer != "" {
+		into[s.Peer] = true
+	}
 	for _, g := range s.Children {
 		for _, m := range g.Members {
 			collectSystemLifelines(m, fallback, into)
@@ -211,8 +216,8 @@ func collectSystemLifelines(s *ir.CanonicalSpan, fallback string, into map[strin
 
 func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
 	for _, g := range groups {
-		if g.Concurrent {
-			b.WriteString(indent + "par concurrent\n")
+		if g.Concurrent || g.Unordered {
+			b.WriteString(indent + "par " + groupLabel(g) + "\n")
 			for i, m := range g.Members {
 				if i > 0 {
 					b.WriteString(indent + "and\n")
@@ -238,8 +243,21 @@ func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup,
 // arrived there is enough.
 func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
 	land := landingOf(m, fallback)
-	if land != from {
-		b.WriteString(indent + r.msg(from, land, label(m)))
+	drawTo := land
+	if land == from && m.Kind == ir.KindConsumer && m.Peer != "" && m.Peer != from {
+		// A consumer poll / receive (SQS ReceiveMessage) is KindConsumer and so
+		// lands on its own service rather than the bus; nested under that same
+		// service it would otherwise draw no hop and vanish. Draw the reach to its
+		// peer (the Bus) so the receive is as visible as the publish and the settle.
+		// Restricted to KindConsumer so a peer-bearing self-landing span of another
+		// kind (an ORM-emitted internal DB op, whose peer is the db system) is not
+		// drawn here — that matches collectSystemLifelines, which declares the peer
+		// participant only for KindConsumer. Child threading stays on the landed
+		// lifeline.
+		drawTo = m.Peer
+	}
+	if drawTo != from {
+		b.WriteString(indent + r.msg(from, drawTo, label(m)))
 	}
 	r.writeSystemGroups(b, m.Children, land, fallback, indent)
 }
@@ -277,8 +295,8 @@ func (r *renderer) writeParticipants(b *strings.Builder, t *ir.CanonicalTrace) {
 // groups as par/and/end, and a collapsed loop as a multiplicity note.
 func (r *renderer) writeGroups(b *strings.Builder, groups []ir.ChildGroup, indent string) {
 	for _, g := range groups {
-		if g.Concurrent {
-			b.WriteString(indent + "par concurrent\n")
+		if g.Concurrent || g.Unordered {
+			b.WriteString(indent + "par " + groupLabel(g) + "\n")
 			for i, m := range g.Members {
 				if i > 0 {
 					b.WriteString(indent + "and\n")
@@ -318,6 +336,15 @@ func (r *renderer) id(label string) string {
 		return id
 	}
 	return sanitize(label)
+}
+
+// groupLabel distinguishes a genuine race (concurrent) from siblings whose order
+// could not be established (unordered) in a par block's label.
+func groupLabel(g ir.ChildGroup) string {
+	if g.Unordered {
+		return "unordered"
+	}
+	return "concurrent"
 }
 
 // label is the message text for a span: its canonical op, annotated with the
