@@ -164,8 +164,8 @@ func TestSystemMermaidCrossService(t *testing.T) {
 // TestSystemMermaidInternalDBNotDrawn: an ORM-emitted DB op arrives as
 // KindInternal with the db system as its peer and lands on its own service. The
 // system view must NOT draw a hop to the database — that self-landing reach is
-// reserved for consumer polls (KindConsumer) — matching collectSystemLifelines,
-// which declares the peer participant only for consumers.
+// reserved for consumer polls (KindConsumer) — matching serviceInfra, which counts a
+// DB participant only where the hop lands on the peer.
 func TestSystemMermaidInternalDBNotDrawn(t *testing.T) {
 	tr := &ir.CanonicalTrace{
 		Service: "loansvc",
@@ -284,6 +284,7 @@ func TestSystemMermaidBoxesOwnedInfra(t *testing.T) {
 			Op: "HTTP POST /publish", Kind: ir.KindServer, Service: "event-bus",
 			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
 				{Op: "DB postgresql SELECT publishers", Kind: ir.KindClient, Peer: "postgresql/event_bus_test", Service: "event-bus"},
+				{Op: "PUBLISH cgate-email", Kind: ir.KindProducer, Peer: "Bus", Service: "event-bus"}, // draws event-bus→Bus
 				{Op: "CONSUME cgate-email", Kind: ir.KindConsumer, Peer: "Bus", Service: "cgate", Async: true,
 					Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
 						{Op: "DB postgresql INSERT messages", Kind: ir.KindClient, Peer: "postgresql/cgate_test", Service: "cgate"},
@@ -304,6 +305,60 @@ func TestSystemMermaidBoxesOwnedInfra(t *testing.T) {
 	// The shared broker is declared outside any box (after the service boxes).
 	if i, j := strings.Index(out, "end\n    participant Bus as Bus"), strings.Index(out, "box"); i < 0 || i < j {
 		t.Errorf("shared Bus should be declared unboxed after the service boxes:\n%s", out)
+	}
+}
+
+// TestSystemMermaidPrunesEdgelessParticipants: a lifeline that no arrow or note
+// touches (here a Bus that a nested consumer references as its peer but is never
+// drawn to, because the consumer hop lands on the consuming service) is pruned, not
+// declared as a bare, dangling participant.
+func TestSystemMermaidPrunesEdgelessParticipants(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "publisher",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /x", Kind: ir.KindServer, Service: "publisher",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				// A link-stitched consumer: its hop draws publisher→notifier, so its
+				// Peer "Bus" is referenced by no edge.
+				{Op: "CONSUME e", Kind: ir.KindConsumer, Peer: "Bus", Service: "notifier", Async: true},
+			}}},
+		},
+	}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "publisher--)notifier: CONSUME e")
+	if strings.Contains(out, "participant Bus") {
+		t.Errorf("edgeless Bus participant should be pruned:\n%s", out)
+	}
+	// Every declared participant must appear on some arrow.
+	for _, p := range []string{"publisher", "notifier"} {
+		if !strings.Contains(out, "participant "+p+" as "+p) {
+			t.Errorf("expected participant %q declared:\n%s", p, out)
+		}
+	}
+}
+
+// TestSystemMermaidBoxOwnerMatchesDrawnArrow: a database is boxed under the lifeline
+// the DB hop is actually drawn from, never under the span's service.name when the two
+// differ (a DB nested under a same-service client call, where the hop is drawn from
+// the call's peer). The box must not claim a database that service never visibly
+// reaches.
+func TestSystemMermaidBoxOwnerMatchesDrawnArrow(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "A",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /x", Kind: ir.KindServer, Service: "A",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "HTTP GET B /v", Kind: ir.KindClient, Peer: "B", Service: "A",
+					Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+						{Op: "DB postgres SELECT t", Kind: ir.KindClient, Peer: "db1", Service: "A"},
+					}}}},
+			}}},
+		},
+	}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "B->>db1: DB postgres SELECT t")
+	if strings.Contains(out, "box transparent A") {
+		t.Errorf("db1 is reached from B, not A; it must not be boxed under A:\n%s", out)
 	}
 }
 
