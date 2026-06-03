@@ -158,11 +158,13 @@ func toCapture(sp spanJSON, service string) capture.Span {
 		attrs[serviceNameAttr] = service
 	}
 	cs := capture.Span{
+		TraceID:  sp.TraceID,
 		ID:       sp.SpanID,
 		ParentID: sp.ParentSpanID,
 		Name:     sp.Name,
 		Kind:     kindOf(sp.Kind),
 		Attrs:    attrs,
+		Links:    links(sp.Links),
 		Start:    unixNano(sp.Start),
 		End:      unixNano(sp.End),
 	}
@@ -247,6 +249,7 @@ type scopeSpans struct {
 }
 
 type spanJSON struct {
+	TraceID      string          `json:"traceId"`
 	SpanID       string          `json:"spanId"`
 	ParentSpanID string          `json:"parentSpanId"`
 	Name         string          `json:"name"`
@@ -254,7 +257,34 @@ type spanJSON struct {
 	Start        json.RawMessage `json:"startTimeUnixNano"`
 	End          json.RawMessage `json:"endTimeUnixNano"`
 	Attributes   []keyValue      `json:"attributes"`
+	Links        []linkJSON      `json:"links"`
 	Status       statusJSON      `json:"status"`
+}
+
+// linkJSON is one OTLP span link: a reference to a causally-related span,
+// identified by its (traceId, spanId). flowmap reads links to follow async
+// flow membership across a broker hand-off, where parent_span_id does not
+// cross (a new trace begins on the consumer side). Link attributes are not
+// read — the (traceId, spanId) target is the whole signal.
+type linkJSON struct {
+	TraceID string `json:"traceId"`
+	SpanID  string `json:"spanId"`
+}
+
+// links converts OTLP link records into the capture model, dropping any with
+// an empty target span id (nothing to match against).
+func links(ls []linkJSON) []capture.SpanLink {
+	if len(ls) == 0 {
+		return nil
+	}
+	out := make([]capture.SpanLink, 0, len(ls))
+	for _, l := range ls {
+		if l.SpanID == "" {
+			continue
+		}
+		out = append(out, capture.SpanLink{TraceID: l.TraceID, SpanID: l.SpanID})
+	}
+	return out
 }
 
 type statusJSON struct {

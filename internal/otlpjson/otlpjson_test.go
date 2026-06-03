@@ -119,6 +119,36 @@ func TestAnyValueUnion(t *testing.T) {
 	}
 }
 
+// TestDecodeTraceIDAndLinks: the decoder carries traceId onto every span and
+// reads OTLP span links (traceId, spanId) — the cross-trace async-flow signal
+// the stitcher consumes. Links with an empty target span id are dropped.
+func TestDecodeTraceIDAndLinks(t *testing.T) {
+	in := `{"resourceSpans":[{"scopeSpans":[{"spans":[
+		{"traceId":"b","spanId":"c1","name":"consume","kind":5,
+		 "links":[
+			{"traceId":"a","spanId":"p1"},
+			{"traceId":"a","spanId":""}
+		 ],
+		 "attributes":[],"status":{"code":1}}]}]}]}`
+	spans, err := Decode(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	s := spans[0]
+	if s.TraceID != "b" {
+		t.Errorf("traceId = %q, want b", s.TraceID)
+	}
+	if len(s.Links) != 1 {
+		t.Fatalf("got %d links, want 1 (empty-target link dropped)", len(s.Links))
+	}
+	if s.Links[0].TraceID != "a" || s.Links[0].SpanID != "p1" {
+		t.Errorf("link = %+v, want {a p1}", s.Links[0])
+	}
+}
+
 // TestDecodeEmpty tolerates an empty file (a collector that flushed nothing).
 func TestDecodeEmpty(t *testing.T) {
 	spans, err := Decode(strings.NewReader("  \n"))

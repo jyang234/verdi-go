@@ -151,6 +151,36 @@ Select only spans carrying a `flowmap.flow` attribute; support `Correlation-Id`
 as an alternate key (already propagated today). A trace with no `flowmap.flow`
 tag is ignored, not an error — the file may carry unrelated traffic.
 
+**Async hand-offs across a broker — span links as the membership signal**
+(`ingest.stitch`). Predominantly-async services join distinct traces by
+**OTLP span links** (provider-derived `FOLLOWS_FROM`), not by baggage: baggage
+correctly does **not** cross the broker, so a consumer's trace arrives without
+`flowmap.flow`, and `parent_span_id` does not reach back to the producer either.
+A pre-grouping `stitch` pass recovers the flow across that boundary using the
+link the consumer's messaging instrumentation already emits:
+
+- **Global identity.** A flow crossing a broker spans multiple traces whose span
+  ids are unique only *within* a trace, so span identity becomes the `(traceId,
+  spanId)` pair; parent and link references are rewritten to that key so they
+  resolve across traces without collision. In-process / single-trace inputs carry
+  no `TraceID` and keep their bare span id, leaving existing grouping untouched.
+- **New-root gate.** Links are followed only on a **genuine new root** (original
+  `parent_span_id` empty). A mid-trace link is a causal reference that is *not*
+  the parent, and must never rewire the tree. (`all links` ≈ `new-root + link`
+  ≫ `link-attribute filter`; the new-root gate is the cheap insurance and the
+  natural place to harden later.)
+- **Membership propagation.** The link target's flow slug propagates to the
+  link-joined new root and then down parent edges to a **fixpoint**, so a
+  multi-hop chain (produce → consume → produce → consume) is fully recovered and
+  each joined service is gated as its own per-service fragment (D-PH4) even though
+  it never carried the baggage.
+- **Tree stitch (render).** For `WholeFlows`, the new root is reparented onto its
+  link target, so an async continuation in a separate trace draws as one
+  connected flow instead of a second synthesized root.
+
+This is purely additive to the synchronous, single-trace, baggage-propagated
+path: a flow with no links groups exactly as before.
+
 ### [P10.3] Post-hoc canonicalization profile — *the hard, essential part*
 Out-of-process traces carry nondeterminism the in-process path never sees. A
 `canon` profile (a config flag, not a fork) handles it:

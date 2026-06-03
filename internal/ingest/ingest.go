@@ -44,8 +44,11 @@ type FlowCapture struct {
 // Group partitions spans by (flow slug, service) and assembles each partition
 // into a CapturedFlow. Spans not carrying FlowKey are ignored — the export may
 // contain unrelated traffic. The result is ordered by slug then service so the
-// output is stable.
+// output is stable. Span links are stitched first (stitch), so a consumer that
+// joins a flow across a broker hand-off — arriving on its own trace without the
+// flow baggage — is recovered and gated as its own per-service fragment.
 func Group(spans []capture.Span) []FlowCapture {
+	spans = stitch(spans)
 	type key struct{ slug, svc string }
 	buckets := map[key][]capture.Span{}
 	var order []key
@@ -104,10 +107,13 @@ func assemble(slug, svc string, spans []capture.Span) FlowCapture {
 // gating (design D-PH1: the diagram unit). It buckets spans by flow slug only —
 // no per-service split — and assembles one tree spanning every service the flow
 // touched, joined by parent_span_id (causal links survive in OTLP, so no
-// cross-clock comparison is needed). The result feeds canonicalization and the
-// cross-service renderer; it is never gated. The trace's Service is the entry
-// service (the root span's owning service).
+// cross-clock comparison is needed) and by span links across broker hand-offs
+// (stitch reparents a link-joined new-root span onto its producer, so an async
+// continuation in a separate trace lands in the same tree). The result feeds
+// canonicalization and the cross-service renderer; it is never gated. The
+// trace's Service is the entry service (the root span's owning service).
 func WholeFlows(spans []capture.Span) []FlowCapture {
+	spans = stitch(spans)
 	buckets := map[string][]capture.Span{}
 	var order []string
 	for _, s := range spans {
@@ -190,4 +196,107 @@ func assembleRoot(synthName string, spans []capture.Span) ([]capture.Span, *capt
 	}
 	spans = append(spans, syn)
 	return spans, &spans[len(spans)-1], trigger, true
+}
+
+// skey is a span's global identity. A flow that crosses a broker spans multiple
+// traces, and OTLP span ids are unique only within a trace, so identity is the
+// (traceId, spanId) pair. In-process fixtures and pre-stitch tests carry no
+// TraceID; those keep their bare span id, leaving existing single-trace
+// grouping untouched.
+func skey(traceID, spanID string) string {
+	if traceID == "" {
+		return spanID
+	}
+	return traceID + "|" + spanID
+}
+
+// stitch joins the traces of an async flow into one connected span set before
+// grouping, using OTLP span links as the cross-trace membership signal. The
+// flow baggage that carries the slug does not cross a broker (correctly — the
+// consumer runs later, on its own trace), so a consumer's spans arrive without
+// FlowKey and parent_span_id does not reach back to the producer. The consumer's
+// entry span instead carries a link (FOLLOWS_FROM) to the producer span it
+// processed; stitch follows that link to (a) reparent the consumer subtree onto
+// the producer and (b) propagate the producer's flow slug across the hand-off.
+//
+// It rewrites span ids to global (traceId, spanId) keys so parent and link
+// references resolve across traces without collision, follows links only on
+// genuine new roots (original parent_span_id empty) so a mid-trace causal link
+// never rewires the tree, and propagates the slug down parent edges to a
+// fixpoint so a multi-hop async chain (produce → consume → produce → consume)
+// is fully recovered. Inputs are copied; the caller's spans are not mutated.
+func stitch(spans []capture.Span) []capture.Span {
+	if len(spans) == 0 {
+		return spans
+	}
+	out := make([]capture.Span, len(spans))
+	copy(out, spans)
+
+	byID := make(map[string]*capture.Span, len(out))
+	wasRoot := make([]bool, len(out))
+	for i := range out {
+		wasRoot[i] = out[i].ParentID == ""
+		out[i].ID = skey(out[i].TraceID, out[i].ID)
+		if out[i].ParentID != "" {
+			out[i].ParentID = skey(out[i].TraceID, out[i].ParentID)
+		}
+		byID[out[i].ID] = &out[i]
+	}
+
+	// Cross-trace tree stitch: a new-root span (a consumer beginning a fresh
+	// trace) whose link targets a known span is reparented onto that target, so
+	// the async continuation joins the producer's tree. The same edge carries
+	// slug membership below.
+	for i := range out {
+		if !wasRoot[i] {
+			continue
+		}
+		for _, l := range out[i].Links {
+			tk := skey(l.TraceID, l.SpanID)
+			if _, ok := byID[tk]; ok {
+				out[i].ParentID = tk
+				break
+			}
+		}
+	}
+
+	// Propagate flow-slug membership down parent edges (which now include the
+	// stitched link edges) to a fixpoint, so every span reachable from a
+	// flow-tagged entry inherits the slug even though its baggage was lost at the
+	// broker.
+	slug := make(map[string]string, len(out))
+	for i := range out {
+		if s := out[i].Attr(FlowKey); s != "" {
+			slug[out[i].ID] = s
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for i := range out {
+			if slug[out[i].ID] != "" {
+				continue
+			}
+			if s := slug[out[i].ParentID]; s != "" {
+				slug[out[i].ID] = s
+				changed = true
+			}
+		}
+	}
+
+	// Write recovered slugs back so Group/WholeFlows bucket the joined spans.
+	// Attrs maps are shared with the caller's input, so copy-on-write before
+	// adding the key.
+	for i := range out {
+		s := slug[out[i].ID]
+		if s == "" || out[i].Attr(FlowKey) != "" {
+			continue
+		}
+		m := make(map[string]string, len(out[i].Attrs)+1)
+		for k, v := range out[i].Attrs {
+			m[k] = v
+		}
+		m[FlowKey] = s
+		out[i].Attrs = m
+	}
+	return out
 }

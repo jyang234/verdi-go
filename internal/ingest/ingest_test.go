@@ -221,6 +221,192 @@ func TestWholeFlowsKeepsCrossService(t *testing.T) {
 	}
 }
 
+// brokerFlow builds a two-trace async flow: trace A is the producer side and
+// carries the flow baggage; trace B is the consumer side — a fresh trace with no
+// flow baggage and no parent reaching back to A, joined only by a FOLLOWS_FROM
+// span link from the consumer entry to the producer span it processed.
+func brokerFlow() []capture.Span {
+	return []capture.Span{
+		{TraceID: "A", ID: "s1", Kind: ir.KindServer,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "loansvc", "http.request.method": "POST", "http.route": "/loan"}},
+		{TraceID: "A", ID: "p1", ParentID: "s1", Kind: ir.KindProducer,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "loansvc", "messaging.destination.name": "loan.approved"}},
+		{TraceID: "B", ID: "c1", Kind: ir.KindConsumer,
+			Attrs: map[string]string{serviceKey: "notifier", "messaging.destination.name": "loan.approved"},
+			Links: []capture.SpanLink{{TraceID: "A", SpanID: "p1"}}},
+		{TraceID: "B", ID: "n1", ParentID: "c1", Kind: ir.KindClient,
+			Attrs: map[string]string{serviceKey: "notifier", "http.request.method": "POST", "peer.service": "email", "http.route": "/send"}},
+	}
+}
+
+// TestStitchJoinsConsumerByLink: a consumer trace that never carried the flow
+// baggage (it correctly did not cross the broker) still joins the flow via its
+// span link, and Group gates it as its own per-service fragment.
+func TestStitchJoinsConsumerByLink(t *testing.T) {
+	g := Group(brokerFlow())
+	if len(g) != 2 {
+		t.Fatalf("Group: got %d fragments, want 2 (loansvc, notifier); services=%v", len(g), services(g))
+	}
+	var notifier *FlowCapture
+	for i := range g {
+		if g[i].Service == "notifier" {
+			notifier = &g[i]
+		}
+	}
+	if notifier == nil {
+		t.Fatalf("consumer did not join the flow via link; services=%v", services(g))
+	}
+	if notifier.Slug != "loan" {
+		t.Errorf("recovered fragment slug = %q, want loan", notifier.Slug)
+	}
+	if notifier.Synthesized {
+		t.Errorf("consumer entry span should root the fragment without synthesis")
+	}
+	if notifier.Flow.Trigger != capture.TriggerEvent {
+		t.Errorf("consumer fragment trigger = %q, want event", notifier.Flow.Trigger)
+	}
+}
+
+// TestStitchWholeFlowReparentsAcrossBroker: WholeFlows reparents the link-joined
+// consumer onto the producer, yielding one connected cross-trace tree rather
+// than two roots that would force synthesis.
+func TestStitchWholeFlowReparentsAcrossBroker(t *testing.T) {
+	wf := WholeFlows(brokerFlow())
+	if len(wf) != 1 {
+		t.Fatalf("WholeFlows: got %d, want 1 stitched cross-trace tree", len(wf))
+	}
+	f := wf[0]
+	if f.Service != "loansvc" {
+		t.Errorf("entry service = %q, want loansvc", f.Service)
+	}
+	if f.Synthesized {
+		t.Errorf("link stitch should connect consumer to producer; root must not be synthesized")
+	}
+	if len(f.Flow.Spans) != 4 {
+		t.Errorf("stitched whole flow should keep all 4 spans, got %d", len(f.Flow.Spans))
+	}
+	var consumer *capture.Span
+	for i := range f.Flow.Spans {
+		if f.Flow.Spans[i].Kind == ir.KindConsumer {
+			consumer = &f.Flow.Spans[i]
+		}
+	}
+	if consumer == nil {
+		t.Fatal("consumer span missing from stitched flow")
+	}
+	if consumer.ParentID != skey("A", "p1") {
+		t.Errorf("consumer parent = %q, want producer global id %q", consumer.ParentID, skey("A", "p1"))
+	}
+}
+
+// TestStitchNewRootGateIgnoresMidTraceLink: a span that already has an in-trace
+// parent but also carries a link (a causal reference that is not its parent)
+// keeps its real parent — only genuine new roots follow links.
+func TestStitchNewRootGateIgnoresMidTraceLink(t *testing.T) {
+	spans := []capture.Span{
+		{TraceID: "A", ID: "s1", Kind: ir.KindServer,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "svc", "http.request.method": "POST", "http.route": "/x"}},
+		{TraceID: "A", ID: "m1", ParentID: "s1", Kind: ir.KindInternal,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "svc"},
+			Links: []capture.SpanLink{{TraceID: "A", SpanID: "s1"}}},
+	}
+	for _, s := range stitch(spans) {
+		if s.ID == skey("A", "m1") && s.ParentID != skey("A", "s1") {
+			t.Errorf("mid-trace span reparented by link: parent = %q, want %q", s.ParentID, skey("A", "s1"))
+		}
+	}
+}
+
+// TestStitchPropagatesMembershipMultiHop: slug membership flows across a
+// produce→consume→produce→consume chain of three traces to a fixpoint, so a
+// downstream consumer two hops from the tagged entry still joins the flow.
+func TestStitchPropagatesMembershipMultiHop(t *testing.T) {
+	spans := []capture.Span{
+		// Trace A: tagged entry publishes.
+		{TraceID: "A", ID: "s1", Kind: ir.KindServer,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "svc-a", "http.request.method": "POST", "http.route": "/x"}},
+		{TraceID: "A", ID: "p1", ParentID: "s1", Kind: ir.KindProducer,
+			Attrs: map[string]string{FlowKey: "loan", serviceKey: "svc-a", "messaging.destination.name": "t1"}},
+		// Trace B: consumes t1 (link to p1), republishes to t2.
+		{TraceID: "B", ID: "c1", Kind: ir.KindConsumer,
+			Attrs: map[string]string{serviceKey: "svc-b", "messaging.destination.name": "t1"},
+			Links: []capture.SpanLink{{TraceID: "A", SpanID: "p1"}}},
+		{TraceID: "B", ID: "p2", ParentID: "c1", Kind: ir.KindProducer,
+			Attrs: map[string]string{serviceKey: "svc-b", "messaging.destination.name": "t2"}},
+		// Trace C: consumes t2 (link to p2) — two hops from the tagged entry.
+		{TraceID: "C", ID: "c2", Kind: ir.KindConsumer,
+			Attrs: map[string]string{serviceKey: "svc-c", "messaging.destination.name": "t2"},
+			Links: []capture.SpanLink{{TraceID: "B", SpanID: "p2"}}},
+	}
+	g := Group(spans)
+	if got := services(g); len(got) != 3 {
+		t.Fatalf("multi-hop chain should yield 3 fragments, got %v", got)
+	}
+	for _, fc := range g {
+		if fc.Slug != "loan" {
+			t.Errorf("fragment %q slug = %q, want loan (membership did not propagate)", fc.Service, fc.Slug)
+		}
+	}
+}
+
+// TestIngestAsyncBrokerFixture is the end-to-end async path over a committed
+// two-trace OTLP export: the notifier service consumes loan.approved on its own
+// trace, carrying no flow baggage and only a span link back to the producer.
+// Decoding + grouping must recover its membership from the link and gate it as
+// its own fragment, whose exercised boundary effect is its outbound HTTP call.
+func TestIngestAsyncBrokerFixture(t *testing.T) {
+	spans, err := otlpjson.DecodeFile("../../testdata/otlp/async-broker.otlp.json")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	g := Group(spans)
+	if len(g) != 2 {
+		t.Fatalf("got %d fragments, want 2 (loansvc, notifier); services=%v", len(g), services(g))
+	}
+	var notifier *FlowCapture
+	for i := range g {
+		if g[i].Service == "notifier" {
+			notifier = &g[i]
+		}
+	}
+	if notifier == nil {
+		t.Fatalf("notifier did not join the flow via span link; services=%v", services(g))
+	}
+	if notifier.Slug != "loan-application" {
+		t.Errorf("recovered slug = %q, want loan-application", notifier.Slug)
+	}
+	if notifier.Flow.Trigger != capture.TriggerEvent {
+		t.Errorf("notifier trigger = %q, want event", notifier.Flow.Trigger)
+	}
+	tr, err := canon.Canonicalize(notifier.Flow, nil)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	if got := BoundaryEffects(tr.Root); !equalStrs(got, []string{"CONSUME loan.approved", "HTTP POST email-gw /send"}) {
+		t.Errorf("notifier boundary effects = %v, want [CONSUME loan.approved, HTTP POST email-gw /send]", got)
+	}
+
+	// WholeFlows stitches both traces into one connected tree for rendering.
+	wf := WholeFlows(spans)
+	if len(wf) != 1 {
+		t.Fatalf("WholeFlows: got %d, want 1 stitched tree", len(wf))
+	}
+	if wf[0].Synthesized {
+		t.Errorf("the link should connect the consumer to the producer; root must not be synthesized")
+	}
+	if len(wf[0].Flow.Spans) != 4 {
+		t.Errorf("stitched whole flow should keep all 4 spans, got %d", len(wf[0].Flow.Spans))
+	}
+}
+
+func services(g []FlowCapture) []string {
+	out := make([]string, len(g))
+	for i := range g {
+		out[i] = g[i].Service
+	}
+	return out
+}
+
 // TestWholeFlowsSynthesizedUsesSlug: a multi-entry / publisher-only whole flow
 // synthesizes a root with no service.name; its lifeline must fall back to the
 // flow slug, not "" (which would render an unnamed participant).
