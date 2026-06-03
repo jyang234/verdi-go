@@ -159,6 +159,13 @@ func (d *differ) compareAttrs(old, new *ir.CanonicalSpan) {
 	if old.Kind != new.Kind {
 		d.add(Changed, PriorityLower, op, human(op)+": kind "+string(old.Kind)+"→"+string(new.Kind))
 	}
+	if old.Async != new.Async {
+		// A span flipping between a synchronous call and an async (FOLLOWS_FROM link)
+		// continuation is an edge-semantics change — the renderer draws it as a dashed
+		// hop and canon folds it distinctly — so the diff must surface it rather than
+		// stay silent. Structural, like a concurrency change.
+		d.add(Changed, PriorityStructural, op, human(op)+": "+asyncWord(old.Async)+"→"+asyncWord(new.Async))
+	}
 	for _, k := range changedAttrKeys(old.Attrs, new.Attrs) {
 		d.add(Changed, PriorityLower, op, human(op)+": "+k+" changed")
 	}
@@ -374,6 +381,15 @@ func concurrencyWord(concurrent bool) string {
 		return "concurrent"
 	}
 	return "sequential"
+}
+
+// asyncWord describes whether an op is reached synchronously or as an async
+// (FOLLOWS_FROM link) continuation.
+func asyncWord(async bool) string {
+	if async {
+		return "async"
+	}
+	return "synchronous"
 }
 
 func orUnset(s string) string { return orDefault(s, "unset") }

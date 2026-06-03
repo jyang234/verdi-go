@@ -35,6 +35,26 @@ func TestNoChange(t *testing.T) {
 	}
 }
 
+// TestAsyncFlipSurfaced: a matched op flipping between a synchronous call and an
+// async (FOLLOWS_FROM link) continuation is a structural change the diff must report
+// — the renderer and canon both treat it distinctly, so silence would be asymmetric.
+func TestAsyncFlipSurfaced(t *testing.T) {
+	sync := sp("CONSUME loan.approved", ir.KindConsumer, "Bus")
+	async := sp("CONSUME loan.approved", ir.KindConsumer, "Bus")
+	async.Async = true
+	got := Diff(tr(root(seq(sync))), tr(root(seq(async))))
+	if len(got) != 1 || got[0].Type != Changed || got[0].Priority != PriorityStructural {
+		t.Fatalf("want one structural Changed for the async flip, got %v", lines(got))
+	}
+	if !strings.Contains(got[0].String(), "synchronous→async") {
+		t.Errorf("line = %q, want synchronous→async", got[0].String())
+	}
+	// Identical Async (both false) emits nothing — in-process goldens never set it.
+	if got := Diff(tr(root(seq(sync))), tr(root(seq(sp("CONSUME loan.approved", ir.KindConsumer, "Bus"))))); len(got) != 0 {
+		t.Errorf("equal Async should diff to empty, got %v", lines(got))
+	}
+}
+
 func TestAddedContractPublish(t *testing.T) {
 	a := tr(root(seq(sp("PUBLISH loan.approved", ir.KindProducer, "Bus"))))
 	b := tr(root(
