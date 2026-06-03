@@ -15,6 +15,7 @@ package roots
 
 import (
 	"go/constant"
+	"go/token"
 	"sort"
 
 	"golang.org/x/tools/go/ssa"
@@ -48,13 +49,22 @@ func (r Root) FQN() string { return r.Func.RelString(nil) }
 // Registrar names a framework registration call whose func-value argument is a
 // synthetic root. Arg indices are LOGICAL parameter positions (excluding any
 // receiver); root discovery adds the receiver offset when the registrar is a
-// method, so the same hint shape works for methods and free functions.
+// method (and adds none for an interface-method invoke, whose receiver is not in
+// the arg list), so the same hint shape works for free functions, methods, and
+// interface methods.
 type Registrar struct {
-	PkgPath    string // import path of the registrar's package, e.g. "net/http"
-	Name       string // function/method name, e.g. "HandleFunc" or "Subscribe"
-	Kind       Kind   // the kind of root its handler argument becomes
-	NameArg    int    // logical position of the route/topic string, or -1 if none
-	HandlerArg int    // logical position of the func-value argument
+	PkgPath string // import path of the registrar's package, e.g. "net/http"
+	Name    string // function/method name, e.g. "HandleFunc" or "Get"
+	Kind    Kind   // the kind of root its handler argument becomes
+	// Method, when non-empty, is the HTTP method the registration function
+	// implies by its name — for routers that expose a function per method
+	// (chi's Get/Post/…) rather than encoding the method in the route string.
+	// The route is then NameArg's path only, and the root's Name is
+	// "<Method> <route>", matching the "POST /loan-application" form ServeMux
+	// produces directly.
+	Method     string
+	NameArg    int // logical position of the route/topic string, or -1 if none
+	HandlerArg int // logical position of the func-value argument
 }
 
 // BlindSpot records a registration whose handler could not be resolved to a
@@ -82,13 +92,37 @@ func (r *Result) Funcs() []*ssa.Function {
 	return fns
 }
 
-// HTTPRegistrars are the built-in HTTP registration hints (stdlib's ServeMux).
-// Bus registrars are service-specific and come from the classification hints, so
-// callers append them.
+// HTTPRegistrars are the built-in HTTP registration hints: stdlib's ServeMux
+// (the method is in the route string, e.g. "POST /x"), and go-chi's per-method
+// router functions (the method is the function name, the route is the path) —
+// the latter is how oapi-codegen's chi server registers handlers. Bus registrars
+// are service-specific and come from the classification hints, so callers append
+// them.
 func HTTPRegistrars() []Registrar {
-	return []Registrar{
+	regs := []Registrar{
 		{PkgPath: "net/http", Name: "HandleFunc", Kind: KindHTTP, NameArg: 0, HandlerArg: 1},
 	}
+	return append(regs, chiRegistrars()...)
+}
+
+// chiRegistrars are the go-chi/v5 per-method router functions. chi.Router is an
+// interface, so these are matched as interface-method invokes; the HTTP method
+// comes from the function name and the route is the (possibly base-URL-prefixed)
+// path argument.
+func chiRegistrars() []Registrar {
+	const chi = "github.com/go-chi/chi/v5"
+	methods := []struct{ fn, method string }{
+		{"Get", "GET"}, {"Post", "POST"}, {"Put", "PUT"}, {"Delete", "DELETE"},
+		{"Patch", "PATCH"}, {"Head", "HEAD"}, {"Options", "OPTIONS"},
+		{"Connect", "CONNECT"}, {"Trace", "TRACE"},
+	}
+	regs := make([]Registrar, 0, len(methods))
+	for _, m := range methods {
+		regs = append(regs, Registrar{
+			PkgPath: chi, Name: m.fn, Kind: KindHTTP, Method: m.method, NameArg: 0, HandlerArg: 1,
+		})
+	}
+	return regs
 }
 
 // Discover finds the synthetic roots of prog given the registration hints. When
@@ -126,19 +160,18 @@ func Discover(prog *ssabuild.Program, registrars []Registrar) *Result {
 					continue
 				}
 				cc := call.Common()
-				callee := cc.StaticCallee()
-				if callee == nil {
-					continue
-				}
-				reg, ok := byKey[regKey{pkgPath(callee), callee.Name()}]
+				pkg, fname, recvOffset, ok := calleeKey(cc)
 				if !ok {
 					continue
 				}
-				isMethod := callee.Signature.Recv() != nil
-				handler, name := resolveRegistration(cc, reg, isMethod)
+				reg, ok := byKey[regKey{pkg, fname}]
+				if !ok {
+					continue
+				}
+				handler, name := resolveRegistration(cc, reg, recvOffset)
 				if handler == nil {
 					res.BlindSpots = append(res.BlindSpots, BlindSpot{
-						Registrar: callee.RelString(nil),
+						Registrar: pkg + "." + fname,
 						Pos:       posOf(call),
 						Detail:    "handler argument is not a statically resolvable function",
 					})
@@ -174,15 +207,32 @@ func indexRegistrars(rs []Registrar) map[regKey]Registrar {
 	return m
 }
 
-// resolveRegistration extracts the handler function and the registered name from
-// one registration call. A method call carries its receiver at Args[0], so
-// logical positions shift by one.
-func resolveRegistration(cc *ssa.CallCommon, reg Registrar, isMethod bool) (*ssa.Function, string) {
-	off := 0
-	if isMethod {
-		off = 1
+// calleeKey identifies the called function for registration matching and the
+// offset to add to logical arg positions. A static method call carries its
+// receiver at Args[0] (offset 1); a free function and an interface-method invoke
+// do not (offset 0) — for an invoke the receiver is cc.Value, outside Args.
+func calleeKey(cc *ssa.CallCommon) (pkg, name string, recvOffset int, ok bool) {
+	if callee := cc.StaticCallee(); callee != nil {
+		off := 0
+		if callee.Signature.Recv() != nil {
+			off = 1
+		}
+		return pkgPath(callee), callee.Name(), off, true
 	}
-	handlerIdx := reg.HandlerArg + off
+	if cc.IsInvoke() && cc.Method != nil && cc.Method.Pkg() != nil {
+		return cc.Method.Pkg().Path(), cc.Method.Name(), 0, true
+	}
+	return "", "", 0, false
+}
+
+// resolveRegistration extracts the handler function and the registered name from
+// one registration call. recvOffset shifts logical positions to skip a receiver
+// in the arg list. When the registrar implies an HTTP method by its name (chi's
+// Get/Post/…), the name is "<Method> <route>"; otherwise it is the route string
+// verbatim (ServeMux's "POST /x"). The route is recovered through string
+// concatenation, so an oapi-codegen `baseURL + "/path"` yields "/path".
+func resolveRegistration(cc *ssa.CallCommon, reg Registrar, recvOffset int) (*ssa.Function, string) {
+	handlerIdx := reg.HandlerArg + recvOffset
 	if handlerIdx < 0 || handlerIdx >= len(cc.Args) {
 		return nil, ""
 	}
@@ -190,14 +240,39 @@ func resolveRegistration(cc *ssa.CallCommon, reg Registrar, isMethod bool) (*ssa
 	if handler == nil {
 		return nil, ""
 	}
-	name := ""
+	route := ""
 	if reg.NameArg >= 0 {
-		nameIdx := reg.NameArg + off
+		nameIdx := reg.NameArg + recvOffset
 		if nameIdx >= 0 && nameIdx < len(cc.Args) {
-			name = constString(cc.Args[nameIdx])
+			route = constStringSegments(cc.Args[nameIdx])
+		}
+	}
+	name := route
+	if reg.Method != "" {
+		name = reg.Method
+		if route != "" {
+			name += " " + route
 		}
 	}
 	return handler, name
+}
+
+// constStringSegments recovers the constant parts of a string built by
+// concatenation, eliding non-constant operands. A single string constant is
+// returned verbatim; `baseURL + "/loan-application/{id}"` (a BinOp with a
+// non-constant left operand) yields "/loan-application/{id}". A fully dynamic
+// route yields "" (and is disclosed as a blind spot upstream, like any
+// unresolvable registration).
+func constStringSegments(v ssa.Value) string {
+	switch t := v.(type) {
+	case *ssa.Const:
+		return constString(t)
+	case *ssa.BinOp:
+		if t.Op == token.ADD {
+			return constStringSegments(t.X) + constStringSegments(t.Y)
+		}
+	}
+	return ""
 }
 
 // resolveHandler peels framework wrappers off a func-value argument and returns

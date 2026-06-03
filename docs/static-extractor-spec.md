@@ -21,6 +21,17 @@ RTA/VTA need roots, and the roots that matter aren't only `main`. For an event-d
 
 `roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (libraries) exported funcs`
 
+Registration patterns vary. flowmap recognizes stdlib `(*http.ServeMux).HandleFunc`
+(method in the route string, `"POST /x"`) and **go-chi's per-method router**
+(`r.Post`/`r.Get`, the method implied by the function name) — the latter is how
+**oapi-codegen's chi server** registers handlers. Two wrinkles that pattern adds
+are handled: chi's `Router` is an *interface*, so registration is an
+interface-method *invoke* (no static callee) rather than a direct call; and the
+route is a `baseURL + "/path"` concatenation, so the route template is recovered
+from the constant segments (eliding the non-constant base URL). The handler is
+the generated wrapper method, which reaches the real implementation through the
+`ServerInterface` — connected by RTA like any other interface call.
+
 This **aligns the static graph with the behavioral flows**: the static roots (handlers, consumers, mains) mirror the behavioral triggers (HTTP, event). Organize the graph **per entry point** — the subtree reachable from each handler/consumer — so the static artifact and the per-flow snapshots are about the same units.
 
 ---

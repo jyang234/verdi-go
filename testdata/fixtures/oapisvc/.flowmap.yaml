@@ -1,0 +1,4 @@
+service: oapisvc
+classify:
+  busPublish:
+    - "example.com/oapisvc/bus#Publish"
