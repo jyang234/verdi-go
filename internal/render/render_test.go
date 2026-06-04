@@ -185,6 +185,39 @@ func TestSystemMermaidStitchedClientDonatesRoute(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidStitchedClientKeepsErrorClass: donation carries only the entry's op
+// text, not its status, so a client call that failed (a timeout, while the callee's
+// entry succeeded) still renders the failing client's error class — the donated route
+// must not launder a failed call into a clean success.
+func TestSystemMermaidStitchedClientKeepsErrorClass(t *testing.T) {
+	entry := &ir.CanonicalSpan{Op: "HTTP PUT /v1/publishers/{id}", Kind: ir.KindServer, Service: "event-bus"}
+	cli := &ir.CanonicalSpan{Op: "HTTP PUT event-bus", Kind: ir.KindClient, Peer: "event-bus", Service: "golang_test_app",
+		Status: "error", ErrorType: "timeout",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{entry}}}}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /drive", Kind: ir.KindServer, Service: "golang_test_app",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{cli}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "golang_test_app", Root: root})
+	mustContain(t, out, "golang_test_app->>event_bus: HTTP PUT /v1/publishers/{id} [timeout]")
+}
+
+// TestSystemMermaidProducerOnSameNamedBusNotDonated: a producer publishing to a bus
+// named after its own service satisfies cf == drawTo (Peer == Service), but its PUBLISH
+// is the operation — not a stitched client handoff — so a coincidental same-lifeline
+// server entry must NOT donate its label over the publish. Donation is scoped to client
+// hops only.
+func TestSystemMermaidProducerOnSameNamedBusNotDonated(t *testing.T) {
+	entry := &ir.CanonicalSpan{Op: "HTTP PUT /internal/drain", Kind: ir.KindServer, Service: "event_bus"}
+	prod := &ir.CanonicalSpan{Op: "PUBLISH inbox", Kind: ir.KindProducer, Peer: "event_bus", Service: "event_bus",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{entry}}}}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /x", Kind: ir.KindServer, Service: "gateway",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{prod}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "gateway", Root: root})
+	mustContain(t, out, "gateway->>event_bus: PUBLISH inbox")
+	if strings.Contains(out, "HTTP PUT /internal/drain") {
+		t.Errorf("a producer's PUBLISH must not be donated away to a coincidental server entry:\n%s", out)
+	}
+}
+
 // TestSystemMermaidInternalDBNotDrawn: an ORM-emitted DB op arrives as
 // KindInternal with the db system as its peer and lands on its own service. The
 // system view must NOT draw a hop to the database — that self-landing reach is
@@ -523,6 +556,21 @@ func TestSystemMermaidBrokerMergesOntoSameFoldPeer(t *testing.T) {
 	// Both interactions land on the one merged lifeline.
 	mustContain(t, out, "cgate->>event_bus: HTTP DELETE event-bus")
 	mustContain(t, out, "cgate->>event_bus: PUBLISH inbox")
+}
+
+// TestSystemMermaidBrokerNotMergedOntoDBPeer: the broker fold-merge targets service-like
+// peers only. A database peer (order-db) that merely shares a separator-fold with a
+// broker (order_db) must NOT be a merge target — a queue and a store are never the same
+// lifeline — so the two keep distinct participants instead of collapsing onto the db.
+func TestSystemMermaidBrokerNotMergedOntoDBPeer(t *testing.T) {
+	db := &ir.CanonicalSpan{Op: "DB postgres SELECT t", Kind: ir.KindClient, Peer: "order-db", Service: "svc"}
+	prod := &ir.CanonicalSpan{Op: "PUBLISH q", Kind: ir.KindProducer, Peer: "order_db", Service: "svc"}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /x", Kind: ir.KindServer, Service: "svc",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{db, prod}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "svc", Root: root})
+	// The database and the broker remain two separate lifelines.
+	mustContain(t, out, " as order-db\n")
+	mustContain(t, out, " as order_db\n")
 }
 
 // TestSystemMermaidBrokerMergesOntoServiceParticipant: when a producer's broker peer

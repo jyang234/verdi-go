@@ -388,7 +388,7 @@ func landingOf(s *ir.CanonicalSpan, fallback string) string {
 func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]bool, ownedDB map[string][]string, brokerPeers, peers map[string]bool) {
 	services = map[string]bool{}
 	brokerPeers = map[string]bool{}
-	peers = map[string]bool{} // every counterparty lifeline a span names, for separator-fold unification
+	peers = map[string]bool{} // service-like counterparty lifelines (non-db), for separator-fold unification
 	dbOwners := map[string]map[string]bool{} // db lifeline -> owning services
 	// from is the lifeline an inbound hop into s was drawn from — the same threaded
 	// parent landing the renderer uses (writeSystemSpan), so ownership agrees with the
@@ -405,7 +405,12 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 		case ir.KindServer, ir.KindConsumer, ir.KindInternal:
 			services[landingOf(s, fallback)] = true
 		}
-		if s.Peer != "" {
+		// Collect the service-like counterparty lifelines (HTTP/RPC peers, and the
+		// broker peers handled separately below) as candidates for separator-fold
+		// unification. A database peer is excluded: the bus is never "a store reached
+		// over HTTP", so a stray fold collision between a broker and a db must not merge
+		// them onto one lifeline.
+		if s.Peer != "" && !strings.HasPrefix(s.Op, opkey.DBPrefix) {
 			peers[s.Peer] = true
 		}
 		if (s.Kind == ir.KindProducer || s.Kind == ir.KindConsumer) && s.Peer != "" {
@@ -610,16 +615,25 @@ func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from
 	cf := childFrom(m, fallback)
 	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		text := label(m)
-		// Stitched-pair label donation: a client/RPC hop that hands execution to the
-		// remote service (its children issue from the lifeline it lands on, cf == drawTo)
-		// usually nests that service's own inbound entry there. The entry lands on the
-		// lifeline it was reached from, so it self-suppresses its own hop — but only the
-		// entry carries http.route, while the client key names just the peer, which is
-		// redundant with the arrow's target. Let the suppressed entry donate its richer
-		// key to the drawn hop so the route survives.
-		if cf == drawTo {
+		// Stitched-pair label donation: a client/RPC hop hands execution to the remote
+		// service, so its children issue from the very lifeline it lands on (cf ==
+		// drawTo, definitional for a drawn client) and usually nest that service's own
+		// inbound entry there. The entry lands on the lifeline it was reached from, so it
+		// self-suppresses its own hop — but only the entry carries http.route, while the
+		// client key names just the peer, which is redundant with the arrow's target. Let
+		// the suppressed entry donate its richer key to the drawn hop so the route
+		// survives. Scoped to a client kind: a producer landing on a same-named bus
+		// (Peer == Service) also satisfies cf == drawTo, but its PUBLISH is the operation,
+		// not a stitched handoff to donate away. The client's error class is preserved —
+		// donating only the op text — so a failed call (a timeout) still reads as an error
+		// rather than a clean success.
+		if m.Kind == ir.KindClient {
 			if e := stitchedEntry(m, drawTo, fallback); e != nil {
-				text = label(e)
+				errSrc := e
+				if m.Status == "error" {
+					errSrc = m
+				}
+				text = annotateError(e.Op, errSrc)
 			}
 		}
 		b.WriteString(indent + r.msg(from, drawTo, text))
@@ -738,14 +752,21 @@ func groupLabel(g ir.ChildGroup) string {
 // label is the message text for a span: its canonical op, annotated with the
 // error class when the operation failed.
 func label(s *ir.CanonicalSpan) string {
+	return annotateError(s.Op, s)
+}
+
+// annotateError appends s's error class to an op string when s failed. It is split
+// from label so a donated op (a stitched entry's route) can still carry the failing
+// side's error class rather than the donor's status.
+func annotateError(op string, s *ir.CanonicalSpan) string {
 	if s.Status == "error" {
 		et := s.ErrorType
 		if et == "" {
 			et = "error"
 		}
-		return s.Op + " [" + et + "]"
+		return op + " [" + et + "]"
 	}
-	return s.Op
+	return op
 }
 
 // isSynthRoot reports whether root is the internal stand-in ingest synthesizes when a
