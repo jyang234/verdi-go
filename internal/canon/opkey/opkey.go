@@ -149,8 +149,8 @@ func dbPeer(system string, attrs map[string]string) string {
 // each re-deriving the messaging role. A publish or settle is an outbound broker
 // interaction (KindProducer); a receive/process is inbound (KindConsumer).
 func EffectiveKind(kind ir.Kind, attrs map[string]string) ir.Kind {
-	if _, ok := messaging(kind, attrs, false); !ok {
-		return kind // the id-templating mode does not affect whether a span IS messaging
+	if !isMessaging(kind, attrs) {
+		return kind
 	}
 	if messagingDirection(kind, attrs) == dirConsume {
 		return ir.KindConsumer
@@ -182,22 +182,24 @@ const (
 	dirSettle
 )
 
+// isMessaging reports whether a span is a broker interaction: a non-server span with
+// a messaging destination. An inbound entry (server) is never one, even with a stray
+// messaging.destination — reclassifying it would turn an HTTP/RPC entry into a
+// published event; producer, consumer, client (the AWS-SDK shape), and internal spans
+// can all be broker calls. The destination is required — it is the identity of the
+// interaction. This is the cheap classification EffectiveKind needs, without building
+// or normalizing the op key.
+func isMessaging(kind ir.Kind, attrs map[string]string) bool {
+	return kind != ir.KindServer && destination(attrs) != ""
+}
+
 // messaging returns the canonical op key for a broker interaction, or ok=false
-// when the span carries no messaging destination. The destination is required —
-// it is the identity of the interaction — so a non-messaging span never matches.
+// when the span carries no messaging destination.
 func messaging(kind ir.Kind, attrs map[string]string, shortHexIDs bool) (string, bool) {
-	// An inbound entry (server) is never a broker interaction, even if it carries
-	// a stray messaging.destination: reclassifying it would turn an HTTP/RPC entry
-	// into a published event. Producer, consumer, client (the AWS-SDK shape), and
-	// internal spans can all be broker calls.
-	if kind == ir.KindServer {
+	if !isMessaging(kind, attrs) {
 		return "", false
 	}
-	dest := destination(attrs)
-	if dest == "" {
-		return "", false
-	}
-	dest = normalizeDestination(dest, shortHexIDs)
+	dest := normalizeDestination(destination(attrs), shortHexIDs)
 	switch messagingDirection(kind, attrs) {
 	case dirConsume:
 		return ConsumePrefix + dest, true

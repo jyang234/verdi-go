@@ -413,6 +413,19 @@ func TestSystemMermaidProducerRootChildrenFromService(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidSelfConsumingBusKeepsEntryHop: a consumer root whose broker peer
+// equals its own service (a service consuming a bus named after itself — caller ==
+// entry, now that brokerPeer returns the raw system name) still draws its entry hop;
+// only a synthesized root's slug hop is dropped.
+func TestSystemMermaidSelfConsumingBusKeepsEntryHop(t *testing.T) {
+	tr := &ir.CanonicalTrace{
+		Service: "event_bus",
+		Root:    &ir.CanonicalSpan{Op: "CONSUME inbox", Kind: ir.KindConsumer, Peer: "event_bus", Service: "event_bus"},
+	}
+	out := SystemMermaid(tr)
+	mustContain(t, out, "event_bus->>event_bus: CONSUME inbox")
+}
+
 // TestSystemMermaidSynthRootDrawsFromClient: a flow with no single inbound entry
 // (ingest synthesizes an internal root named after the flow slug) renders its entry
 // points from "Client", not from the slug — the synthetic root is the external caller,
