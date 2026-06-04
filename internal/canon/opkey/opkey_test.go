@@ -89,6 +89,31 @@ func TestClientHTTPKeyParameterizesRawPath(t *testing.T) {
 	}
 }
 
+// TestClientHTTPKeyLegacyNetPeerName: an outbound HTTP client span carrying only the
+// legacy net.peer.name (otelhttp ≤0.57 defaults) still resolves a peer, so the
+// fragment view draws it to that peer instead of a self-edge. http.route is
+// server-only and correctly absent on the client, leaving "HTTP DELETE <peer>".
+func TestClientHTTPKeyLegacyNetPeerName(t *testing.T) {
+	op, peer := Of(ir.KindClient, map[string]string{
+		"http.request.method": "DELETE",
+		"net.peer.name":       "cgate",
+	}, "")
+	if op != "HTTP DELETE cgate" {
+		t.Errorf("op = %q, want \"HTTP DELETE cgate\"", op)
+	}
+	if peer != "cgate" {
+		t.Errorf("peer = %q, want cgate", peer)
+	}
+	// Current semconv wins over the legacy spelling when both are present.
+	if _, p := Of(ir.KindClient, map[string]string{
+		"http.request.method": "GET",
+		"server.address":      "newhost",
+		"net.peer.name":       "legacyhost",
+	}, ""); p != "newhost" {
+		t.Errorf("peer = %q, want server.address to win over net.peer.name", p)
+	}
+}
+
 func TestDBKey(t *testing.T) {
 	op, peer := Of(ir.KindClient, map[string]string{
 		"db.system":    "postgresql",

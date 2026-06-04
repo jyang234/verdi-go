@@ -65,7 +65,11 @@ func Of(kind ir.Kind, attrs map[string]string, name string, options ...Options) 
 		if sys := dbSystem(attrs); sys != "" {
 			return dbKey(sys, attrs), dbPeer(sys, attrs)
 		}
-		p := first(attrs, "peer.service", "server.address")
+		// peer.service (logical) > server.address (current semconv host) > net.peer.name
+		// (legacy semconv host, emitted by otelhttp ≤0.57). Without the legacy spelling a
+		// client span carrying only net.peer.name yields an empty peer and renders as a
+		// self-edge.
+		p := first(attrs, "peer.service", "server.address", "net.peer.name")
 		return httpKey("HTTP", method(attrs), p, route(attrs)), p
 	case ir.KindProducer:
 		return PublishPrefix + normalizeDestination(destination(attrs), o.ShortHexIDs), brokerPeer(attrs)
@@ -307,7 +311,7 @@ func rpcPeer(attrs map[string]string) string {
 			return m[:i]
 		}
 	}
-	return first(attrs, "server.address")
+	return first(attrs, "server.address", "net.peer.name")
 }
 
 func method(attrs map[string]string) string {
