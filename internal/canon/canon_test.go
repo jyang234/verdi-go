@@ -294,6 +294,31 @@ func mustCanon(t *testing.T, cf capture.CapturedFlow) *ir.CanonicalTrace {
 	return tr
 }
 
+// TestMessagingShortHexIDsConfigPlumbsThrough: the canon.MessagingShortHexIDs config
+// reaches op-key derivation — a short-hex destination id stays raw by default and is
+// templated only when the flag is set.
+func TestMessagingShortHexIDsConfigPlumbsThrough(t *testing.T) {
+	flow := func() capture.CapturedFlow {
+		spans := []capture.Span{
+			{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
+				Attrs: map[string]string{"http.request.method": "POST", "http.route": "/x"}},
+			{ID: "pub", ParentID: "root", Kind: ir.KindProducer, Start: ms(0, 1), End: ms(0, 2),
+				Attrs: map[string]string{"messaging.destination.name": "eb-dev-evt-fddd7c99-v1"}},
+		}
+		return capture.CapturedFlow{Flow: "x", Service: "s", Mode: capture.ModePostHoc, Spans: spans, Root: &spans[0], Complete: true}
+	}
+	rawOp := mustCanon(t, flow()).Root.Children[0].Members[0].Op
+	if rawOp != "PUBLISH eb-dev-evt-fddd7c99-v1" {
+		t.Errorf("default op = %q, want the raw short-hex id", rawOp)
+	}
+	cfg := &config.Config{}
+	cfg.Canon.MessagingShortHexIDs = true
+	tplOp := mustCanonCfg(t, flow(), cfg).Root.Children[0].Members[0].Op
+	if tplOp != "PUBLISH eb-dev-evt-{id}-v1" {
+		t.Errorf("opt-in op = %q, want the templated id", tplOp)
+	}
+}
+
 func mustCanonCfg(t *testing.T, cf capture.CapturedFlow, cfg *config.Config) *ir.CanonicalTrace {
 	t.Helper()
 	tr, err := Canonicalize(cf, cfg)

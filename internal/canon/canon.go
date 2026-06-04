@@ -122,7 +122,7 @@ type canonicalizer struct {
 // the op key and peer, projects and normalizes attributes, assigns the tier, and
 // groups the children by happens-before order (recursing into each).
 func (c *canonicalizer) build(s *capture.Span, childrenOf map[string][]*capture.Span) *ir.CanonicalSpan {
-	op, peer := opkey.Of(s.Kind, s.Attrs, s.Name)
+	op, peer := opkey.Of(s.Kind, s.Attrs, s.Name, opkey.Options{ShortHexIDs: c.cfg.Canon.MessagingShortHexIDs})
 	// A managed-broker call (AWS SDK SNS/SQS) arrives as a CLIENT span but is
 	// behaviorally a producer/consumer; normalize to the messaging role so every
 	// kind-keyed consumer (gate, syscontext, render, tiering) classifies it as the
