@@ -11,6 +11,27 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/ingest"
 )
 
+// TestLoadIngestConfigReadsServiceDir: ingest's canon config (e.g. the
+// messagingShortHexIDs opt-in) is read from --service-dir's .flowmap.yaml; with no
+// service dir, defaults apply.
+func TestLoadIngestConfigReadsServiceDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".flowmap.yaml"),
+		[]byte("service: svc\ncanon:\n  messagingShortHexIDs: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadIngestConfig(dir)
+	if err != nil {
+		t.Fatalf("loadIngestConfig: %v", err)
+	}
+	if cfg == nil || !cfg.Canon.MessagingShortHexIDs {
+		t.Errorf("opt-in not loaded from service dir: %+v", cfg)
+	}
+	if cfg, err := loadIngestConfig(""); err != nil || cfg != nil {
+		t.Errorf("no service dir should yield nil defaults, got cfg=%v err=%v", cfg, err)
+	}
+}
+
 // TestParsePermutedAcceptsFlagsEitherSide: the traces positional may appear before
 // or after the flags (Go's flag package alone would stop at the first positional and
 // silently drop trailing flags).

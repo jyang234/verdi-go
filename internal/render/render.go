@@ -84,10 +84,18 @@ type renderer struct {
 	caller string
 	alias  map[string]string // lifeline label -> mermaid-safe id
 	used   map[string]bool   // taken ids, for unique-id assignment
-	// ref records the lifelines an arrow or note actually drew to. The cross-service
-	// renderer declares only these, pruning over-declared participants no edge
-	// touches. The per-service Mermaid renderer declares its fixed caller/self/peer
-	// set up front and draws to each, so it reads nothing from ref.
+	// merge unifies a lifeline label with the canonical one it names: a messaging
+	// broker peer (from messaging.system, e.g. event_bus) onto the service of the
+	// same name under separator spelling (event-bus). It is scoped to broker→service
+	// so a coincidental sanitize collision between unrelated lifelines (two databases,
+	// an external HTTP peer vs a service) is NOT merged — those keep distinct ids via
+	// uniqueID. Empty for the per-service Mermaid renderer.
+	merge map[string]string
+	// ref records the lifelines an arrow or note actually drew to (by canonical
+	// label). The cross-service renderer declares only these, pruning over-declared
+	// participants no edge touches. The per-service Mermaid renderer declares its
+	// fixed caller/self/peer set up front and draws to each, so it reads nothing from
+	// ref.
 	ref map[string]bool
 }
 
@@ -100,10 +108,23 @@ func newRenderer() *renderer {
 	}
 }
 
-// aliasOf returns the Mermaid-safe id for a lifeline, assigning a unique one on
-// first sight. It records nothing about whether the lifeline is drawn — callers
-// that mean "this lifeline is touched by an edge" use id instead.
+// resolve maps a lifeline label to its canonical form (a broker peer onto its
+// service), or returns it unchanged.
+func (r *renderer) resolve(name string) string {
+	if c, ok := r.merge[name]; ok {
+		return c
+	}
+	return name
+}
+
+// aliasOf returns the Mermaid-safe id for a lifeline, assigning a unique one on first
+// sight. Two genuinely-distinct labels that sanitize alike get distinct ids (suffixed)
+// rather than silently collapsing; a broker peer pre-resolved to its service (via
+// merge) shares that service's id, unifying the two. It records nothing about whether
+// the lifeline is drawn — callers that mean "this lifeline is touched by an edge" use
+// id instead.
 func (r *renderer) aliasOf(name string) string {
+	name = r.resolve(name)
 	if id, ok := r.alias[name]; ok {
 		return id
 	}
@@ -196,7 +217,10 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	// the plan is built (so an id is stable); declarations are emitted only for the
 	// lifelines r.ref says an arrow or note touched, so an over-declared peer is
 	// pruned rather than drawn as a bare, dangling line.
-	services, ownedDB := serviceInfra(root, fallback)
+	services, ownedDB, brokerPeers := serviceInfra(root, fallback)
+	// Unify a messaging broker peer with the service of the same name (event_bus ->
+	// event-bus) before any alias is assigned, so both resolve to one participant.
+	r.merge = brokerServiceMerge(services, brokerPeers)
 	plan := newParticipantPlan(r)
 	plan.loose(caller)                  // the ingress/bus, never boxed with a service
 	plan.service(entry, ownedDB[entry]) // the entry service leads, boxed with its dbs
@@ -359,8 +383,9 @@ func landingOf(s *ir.CanonicalSpan, fallback string) string {
 // it originates from one service. A database touched by more than one service, a
 // database that is itself a service, and every non-database peer (the broker,
 // external services) are shared and left unboxed.
-func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]bool, ownedDB map[string][]string) {
+func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]bool, ownedDB map[string][]string, brokerPeers map[string]bool) {
 	services = map[string]bool{}
+	brokerPeers = map[string]bool{}
 	dbOwners := map[string]map[string]bool{} // db lifeline -> owning services
 	// from is the lifeline an inbound hop into s was drawn from — the same threaded
 	// parent landing the renderer uses (writeSystemSpan), so ownership agrees with the
@@ -376,6 +401,9 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 		switch s.Kind {
 		case ir.KindServer, ir.KindConsumer, ir.KindInternal:
 			services[landingOf(s, fallback)] = true
+		}
+		if (s.Kind == ir.KindProducer || s.Kind == ir.KindConsumer) && s.Peer != "" {
+			brokerPeers[s.Peer] = true // a messaging broker lifeline, candidate to unify with a service
 		}
 		// A database lifeline exists only where the DB hop actually lands on the peer
 		// (an outbound client DB call). Attribute it to the lifeline the hop is drawn
@@ -411,7 +439,37 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 	for s := range ownedDB {
 		sort.Strings(ownedDB[s])
 	}
-	return services, ownedDB
+	return services, ownedDB, brokerPeers
+}
+
+// brokerServiceMerge maps each messaging broker peer onto the service that names the
+// same broker under separator spelling (event_bus -> event-bus), so the publish is
+// drawn onto the real service participant instead of a synthetic duplicate. It is
+// deliberately narrow — only a broker peer, only onto a service it matches under the
+// '_'/'-' fold — so an unrelated sanitize collision (two databases, an HTTP peer vs a
+// service) is left to keep its own distinct id. nil when nothing merges.
+func brokerServiceMerge(services, brokerPeers map[string]bool) map[string]string {
+	byFold := make(map[string]string, len(services))
+	for s := range services {
+		byFold[foldSeparators(s)] = s
+	}
+	var merge map[string]string
+	for p := range brokerPeers {
+		if s, ok := byFold[foldSeparators(p)]; ok && s != p {
+			if merge == nil {
+				merge = map[string]string{}
+			}
+			merge[p] = s
+		}
+	}
+	return merge
+}
+
+// foldSeparators canonicalizes the common service-name separator drift ('_' vs '-')
+// so event_bus and event-bus compare equal, without folding other punctuation (a
+// dotted name stays distinct).
+func foldSeparators(s string) string {
+	return strings.ReplaceAll(s, "_", "-")
 }
 
 func (r *renderer) writeSystemGroups(b *strings.Builder, groups []ir.ChildGroup, from, fallback, indent string) {
@@ -603,6 +661,7 @@ func (r *renderer) amsg(from, to, text string) string {
 }
 
 func (r *renderer) id(label string) string {
+	label = r.resolve(label)
 	r.ref[label] = true // this lifeline is touched by the arrow/note being drawn
 	return r.aliasOf(label)
 }

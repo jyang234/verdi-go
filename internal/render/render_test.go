@@ -443,6 +443,41 @@ func TestSystemMermaidSynthRootDrawsFromClient(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidBrokerMergesAcrossSeparatorSpelling: a broker peer from
+// messaging.system (event_bus, snake_case) and the service.name of the same broker
+// (event-bus, hyphen) sanitize to one Mermaid id, so they unify into a single
+// participant (labelled by the service) instead of a suffixed event_bus1 duplicate.
+func TestSystemMermaidBrokerMergesAcrossSeparatorSpelling(t *testing.T) {
+	prod := &ir.CanonicalSpan{Op: "PUBLISH cgate-email", Kind: ir.KindProducer, Peer: "event_bus", Service: "app", Async: true}
+	ebServer := &ir.CanonicalSpan{Op: "HTTP PUT /v1/events/{id}", Kind: ir.KindServer, Service: "event-bus"}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /publish", Kind: ir.KindServer, Service: "app",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{prod, ebServer}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "app", Root: root})
+	mustContain(t, out, "participant event_bus as event-bus")
+	mustContain(t, out, "app--)event_bus: PUBLISH cgate-email")
+	if strings.Contains(out, "event_bus1") {
+		t.Errorf("snake/hyphen broker spelling must unify, not suffix a duplicate:\n%s", out)
+	}
+	if n := strings.Count(out, "participant event_bus"); n != 1 {
+		t.Errorf("want exactly one event_bus participant, got %d:\n%s", n, out)
+	}
+}
+
+// TestSystemMermaidNonBrokerCollisionStaysDistinct: the broker→service merge is
+// scoped, so two genuinely-distinct lifelines that merely sanitize alike — here an
+// outbound HTTP peer "user_svc" and the service "user-svc" — keep distinct ids
+// (suffixed), and the call is drawn between them rather than collapsing into a
+// self-arrow. Only a messaging broker peer unifies with its service.
+func TestSystemMermaidNonBrokerCollisionStaysDistinct(t *testing.T) {
+	cli := &ir.CanonicalSpan{Op: "HTTP GET user_svc /x", Kind: ir.KindClient, Peer: "user_svc", Service: "user-svc"}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /q", Kind: ir.KindServer, Service: "user-svc",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{cli}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "user-svc", Root: root})
+	mustContain(t, out, "participant user_svc as user-svc")
+	mustContain(t, out, "participant user_svc1 as user_svc")
+	mustContain(t, out, "user_svc->>user_svc1: HTTP GET user_svc /x")
+}
+
 // TestSystemMermaidBrokerMergesOntoServiceParticipant: when a producer's broker peer
 // coincides with a real service in the flow (messaging.system canonicalizes to a name
 // equal to a service.name — the clean/symmetric instrumentation case), the publish is

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/canon"
+	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/coverage"
 	"github.com/jyang234/golang-code-graph/internal/diff"
 	"github.com/jyang234/golang-code-graph/internal/golden"
@@ -258,6 +259,14 @@ func cmdIngest(args []string) error {
 		return fmt.Errorf("--choreography/--contracts require --merged")
 	}
 
+	// Load the canon config from --service-dir (the contract/coverage anchor), so an
+	// opt-in declared in the service's .flowmap.yaml — e.g. messagingShortHexIDs —
+	// actually takes effect during ingest. Without a service dir, defaults apply.
+	cfg, err := loadIngestConfig(*serviceDir)
+	if err != nil {
+		return err
+	}
+
 	spans, err := otlpjson.DecodePath(tracesPath)
 	if err != nil {
 		return err
@@ -271,7 +280,7 @@ func cmdIngest(args []string) error {
 	fmt.Printf("ingest: %d flow fragment(s) from %d span(s):\n", len(flows), len(spans))
 	var frags []ingestFragment
 	for _, fc := range flows {
-		tr, err := canon.Canonicalize(fc.Flow, nil)
+		tr, err := canon.Canonicalize(fc.Flow, cfg)
 		if err != nil {
 			fmt.Printf("  - %-24s [%-10s] skipped: %v\n", fc.Slug, fc.Service, err)
 			continue
@@ -289,7 +298,7 @@ func cmdIngest(args []string) error {
 	// the per-flow diagrams, the merged graph, and the --update companion.
 	var whole []wholeFlow
 	if *renderDir != "" || (*update && *flowsDir != "") {
-		whole = canonWholeFlows(spans)
+		whole = canonWholeFlows(spans, cfg)
 	}
 	// The cross-service view is independent of gating: emit it in any mode
 	// (including non-gated stage 1) when a render dir is given.
@@ -447,10 +456,10 @@ type wholeFlow struct {
 // canonWholeFlows assembles and canonicalizes each flow's whole-flow tree once,
 // so the per-flow diagrams, the merged graph, and the --update companion don't
 // repeat the work.
-func canonWholeFlows(spans []capture.Span) []wholeFlow {
+func canonWholeFlows(spans []capture.Span, cfg *config.Config) []wholeFlow {
 	var out []wholeFlow
 	for _, wf := range ingest.WholeFlows(spans) {
-		tr, err := canon.Canonicalize(wf.Flow, nil)
+		tr, err := canon.Canonicalize(wf.Flow, cfg)
 		if err != nil {
 			fmt.Printf("  - %-24s cross-service view skipped: %v\n", wf.Slug, err)
 			continue
@@ -654,6 +663,17 @@ func loadTrace(path string) (*ir.CanonicalTrace, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return t, nil
+}
+
+// loadIngestConfig reads the canon config (.flowmap.yaml) from the service dir — the
+// same anchor the boundary contract and coverage delta use — or returns nil defaults
+// when no service dir is given. This is the only path by which a service's config
+// (e.g. the messagingShortHexIDs opt-in) reaches behavior ingest.
+func loadIngestConfig(serviceDir string) (*config.Config, error) {
+	if serviceDir == "" {
+		return nil, nil
+	}
+	return config.LoadDir(serviceDir)
 }
 
 // parsePermuted parses fs allowing flags and a single positional in any order
