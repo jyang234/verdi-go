@@ -463,6 +463,21 @@ func TestSystemMermaidBrokerMergesAcrossSeparatorSpelling(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidNonBrokerCollisionStaysDistinct: the broker→service merge is
+// scoped, so two genuinely-distinct lifelines that merely sanitize alike — here an
+// outbound HTTP peer "user_svc" and the service "user-svc" — keep distinct ids
+// (suffixed), and the call is drawn between them rather than collapsing into a
+// self-arrow. Only a messaging broker peer unifies with its service.
+func TestSystemMermaidNonBrokerCollisionStaysDistinct(t *testing.T) {
+	cli := &ir.CanonicalSpan{Op: "HTTP GET user_svc /x", Kind: ir.KindClient, Peer: "user_svc", Service: "user-svc"}
+	root := &ir.CanonicalSpan{Op: "HTTP POST /q", Kind: ir.KindServer, Service: "user-svc",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{cli}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "user-svc", Root: root})
+	mustContain(t, out, "participant user_svc as user-svc")
+	mustContain(t, out, "participant user_svc1 as user_svc")
+	mustContain(t, out, "user_svc->>user_svc1: HTTP GET user_svc /x")
+}
+
 // TestSystemMermaidBrokerMergesOntoServiceParticipant: when a producer's broker peer
 // coincides with a real service in the flow (messaging.system canonicalizes to a name
 // equal to a service.name — the clean/symmetric instrumentation case), the publish is
