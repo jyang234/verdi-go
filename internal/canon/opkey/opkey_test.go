@@ -140,8 +140,10 @@ func TestDBPeerFallsBackToServerAddress(t *testing.T) {
 	}
 }
 
-// TestBrokerPeerDefaultsToBus: a span carrying no messaging.system keeps the
-// generic "Bus" lifeline, so existing single-bus diagrams are unchanged.
+// TestBrokerPeerDefaultsToBus: only a span carrying no messaging.system gets the
+// generic "Bus" lifeline. A named first-party system keeps its raw name so it can
+// coincide with a real service participant of the same name (the clean/symmetric
+// instrumentation case), rather than fabricating a synthetic duplicate broker node.
 func TestBrokerPeerDefaultsToBus(t *testing.T) {
 	_, peer := Of(ir.KindProducer, map[string]string{
 		"messaging.destination.name": "loan.approved",
@@ -153,8 +155,48 @@ func TestBrokerPeerDefaultsToBus(t *testing.T) {
 		"messaging.system":           "event_bus",
 		"messaging.destination.name": "cgate-email",
 	}, "")
-	if ebus != "Bus" {
-		t.Errorf("peer = %q, want Bus for the event_bus system", ebus)
+	if ebus != "event_bus" {
+		t.Errorf("peer = %q, want the raw event_bus name so it merges onto the service", ebus)
+	}
+}
+
+// TestNormalizeDestinationConservativeDefault: by default only unambiguous ids — a
+// full UUID, an all-numeric run, a long (16+) hex run — are templated in a messaging
+// destination, shared with route templating (url.IsID). A short hex token, which is
+// ambiguous with a stable name segment, is left raw.
+func TestNormalizeDestinationConservativeDefault(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"cgate-email:fddd7c99-23d8-4a1b-9c2d-0e1f2a3b4c5d", "cgate-email:{id}"}, // full UUID
+		{"orders-12345", "orders-{id}"},                                          // numeric
+		{"events-0123456789abcdef0", "events-{id}"},                              // 16+ hex
+		{"eb-dev-evt-fddd7c99-v1", "eb-dev-evt-fddd7c99-v1"},                     // short hex → raw by default
+		{"loan-events", "loan-events"},
+		{"loan.approved", "loan.approved"},
+		{"deadbeef-topic", "deadbeef-topic"},
+		{"api-v1", "api-v1"},
+	}
+	for _, c := range cases {
+		op, _ := Of(ir.KindProducer, map[string]string{"messaging.destination.name": c.in}, "")
+		if want := PublishPrefix + c.want; op != want {
+			t.Errorf("Of(%q) op = %q, want %q", c.in, op, want)
+		}
+	}
+}
+
+// TestNormalizeDestinationShortHexOptIn: with Options.ShortHexIDs, an 8–15 char hex
+// token containing a digit is also templated (a first-party id shorter than a UUID),
+// while a hex-looking word without a digit stays raw.
+func TestNormalizeDestinationShortHexOptIn(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"eb-dev-evt-fddd7c99-v1", "eb-dev-evt-{id}-v1"},
+		{"deadbeef-topic", "deadbeef-topic"}, // hex word, no digit → still not an id
+		{"loan-events", "loan-events"},
+	}
+	for _, c := range cases {
+		op, _ := Of(ir.KindProducer, map[string]string{"messaging.destination.name": c.in}, "", Options{ShortHexIDs: true})
+		if want := PublishPrefix + c.want; op != want {
+			t.Errorf("Of(%q, ShortHexIDs) op = %q, want %q", c.in, op, want)
+		}
 	}
 }
 

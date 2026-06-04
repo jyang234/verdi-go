@@ -12,6 +12,7 @@
 package opkey
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/canon/sql"
@@ -42,7 +43,8 @@ const (
 // internal operation that carries no boundary attributes. Peer is "Bus" for
 // producer/consumer spans, the peer service or db system for outbound calls, and
 // "" for internal work.
-func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
+func Of(kind ir.Kind, attrs map[string]string, name string, options ...Options) (op, peer string) {
+	o := opts(options)
 	// A broker interaction is recognized from its messaging.* attributes before
 	// the kind switch, because SDK instrumentation for managed brokers (notably
 	// the AWS SDK for SNS/SQS) models the call as a CLIENT-kind RPC span that
@@ -50,7 +52,7 @@ func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
 	// destination + operation are the identity; classifying by kind alone would
 	// render an SNS publish as a bare HTTP/RPC call to "sns" and merge an SQS
 	// receive with its delete.
-	if op, ok := messaging(kind, attrs); ok {
+	if op, ok := messaging(kind, attrs, o.ShortHexIDs); ok {
 		return op, brokerPeer(attrs)
 	}
 	switch kind {
@@ -66,9 +68,9 @@ func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
 		p := first(attrs, "peer.service", "server.address")
 		return httpKey("HTTP", method(attrs), p, route(attrs)), p
 	case ir.KindProducer:
-		return PublishPrefix + destination(attrs), brokerPeer(attrs)
+		return PublishPrefix + normalizeDestination(destination(attrs), o.ShortHexIDs), brokerPeer(attrs)
 	case ir.KindConsumer:
-		return ConsumePrefix + destination(attrs), brokerPeer(attrs)
+		return ConsumePrefix + normalizeDestination(destination(attrs), o.ShortHexIDs), brokerPeer(attrs)
 	default: // internal
 		if sys := dbSystem(attrs); sys != "" {
 			return dbKey(sys, attrs), dbPeer(sys, attrs)
@@ -77,17 +79,36 @@ func Of(kind ir.Kind, attrs map[string]string, name string) (op, peer string) {
 	}
 }
 
+// Options tunes op-key derivation. The zero value is the conservative default.
+type Options struct {
+	// ShortHexIDs additionally templates short (8–15 char) hex id tokens in messaging
+	// destination labels, beyond the always-on UUID / numeric / long-hex templating.
+	// Opt-in because a short hex token is ambiguous with a stable name segment; enable
+	// it for instrumentation whose topic/queue names bake first-party ids shorter than
+	// a UUID (e.g. eb-dev-evt-fddd7c99-v1).
+	ShortHexIDs bool
+}
+
+func opts(o []Options) Options {
+	if len(o) > 0 {
+		return o[0]
+	}
+	return Options{}
+}
+
 // brokerPeer is the counterparty lifeline for a broker interaction, canonicalized
-// from messaging.system so distinct messaging systems do not collapse into one
-// "Bus" lifeline. A span carrying no messaging.system (the common in-process
-// event-bus shape) keeps the generic "Bus", so existing single-bus diagrams are
-// unchanged; a managed system (SNS, SQS, Kafka, …) names its own lifeline, so an
-// SNS publish and an event-bus consume no longer share a participant. An
-// unrecognized system uses its raw name rather than masquerading as the default
-// bus.
+// from messaging.system. Only a span carrying NO messaging.system gets the generic
+// "Bus" — there is nothing to name it after. A named system keeps a stable
+// identifying name: a friendly label for managed infrastructure that is never itself
+// a modeled service (SNS, SQS, Kafka, RabbitMQ), and otherwise the raw system name.
+// Keeping the raw name is deliberate: a first-party event bus that is also a service
+// in the flow (messaging.system == its service.name) then coincides with that service
+// participant by name — the broker is drawn as the real downstream rather than a
+// synthetic node that duplicates it. Distinct managed systems still get distinct
+// lifelines, so an SNS publish and an SQS receive never collapse together.
 func brokerPeer(attrs map[string]string) string {
 	switch strings.ToLower(first(attrs, "messaging.system")) {
-	case "", "event_bus", "eventbus":
+	case "":
 		return "Bus"
 	case "aws_sns", "sns":
 		return "SNS"
@@ -128,7 +149,7 @@ func dbPeer(system string, attrs map[string]string) string {
 // each re-deriving the messaging role. A publish or settle is an outbound broker
 // interaction (KindProducer); a receive/process is inbound (KindConsumer).
 func EffectiveKind(kind ir.Kind, attrs map[string]string) ir.Kind {
-	if _, ok := messaging(kind, attrs); !ok {
+	if !isMessaging(kind, attrs) {
 		return kind
 	}
 	if messagingDirection(kind, attrs) == dirConsume {
@@ -161,21 +182,24 @@ const (
 	dirSettle
 )
 
+// isMessaging reports whether a span is a broker interaction: a non-server span with
+// a messaging destination. An inbound entry (server) is never one, even with a stray
+// messaging.destination — reclassifying it would turn an HTTP/RPC entry into a
+// published event; producer, consumer, client (the AWS-SDK shape), and internal spans
+// can all be broker calls. The destination is required — it is the identity of the
+// interaction. This is the cheap classification EffectiveKind needs, without building
+// or normalizing the op key.
+func isMessaging(kind ir.Kind, attrs map[string]string) bool {
+	return kind != ir.KindServer && destination(attrs) != ""
+}
+
 // messaging returns the canonical op key for a broker interaction, or ok=false
-// when the span carries no messaging destination. The destination is required —
-// it is the identity of the interaction — so a non-messaging span never matches.
-func messaging(kind ir.Kind, attrs map[string]string) (string, bool) {
-	// An inbound entry (server) is never a broker interaction, even if it carries
-	// a stray messaging.destination: reclassifying it would turn an HTTP/RPC entry
-	// into a published event. Producer, consumer, client (the AWS-SDK shape), and
-	// internal spans can all be broker calls.
-	if kind == ir.KindServer {
+// when the span carries no messaging destination.
+func messaging(kind ir.Kind, attrs map[string]string, shortHexIDs bool) (string, bool) {
+	if !isMessaging(kind, attrs) {
 		return "", false
 	}
-	dest := destination(attrs)
-	if dest == "" {
-		return "", false
-	}
+	dest := normalizeDestination(destination(attrs), shortHexIDs)
 	switch messagingDirection(kind, attrs) {
 	case dirConsume:
 		return ConsumePrefix + dest, true
@@ -299,6 +323,80 @@ func route(attrs map[string]string) string {
 
 func destination(attrs map[string]string) string {
 	return first(attrs, "messaging.destination.name", "messaging.destination")
+}
+
+// destUUID matches a canonical UUID, which embeds '-' and so must be collapsed
+// before a destination is split on its delimiters.
+var destUUID = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+// normalizeDestination parameterizes the volatile ids embedded in a messaging
+// destination (topic/queue) name, the same way url.Template does for a route path,
+// so a per-run id baked into the name does not churn the op key (and the gated
+// boundary effect). By default it templates only the unambiguous cases — a full
+// UUID, and each token url.IsID recognizes (all-numeric or a 16+ hex run) — so
+// cgate-email:<uuid> -> cgate-email:{id} while a stable name is untouched. When
+// shortHexIDs is set (an opt-in for instrumentation whose names bake first-party ids
+// shorter than a UUID) it also templates an 8–15 char hex token containing a digit,
+// so eb-dev-evt-fddd7c99-v1 -> eb-dev-evt-{id}-v1.
+func normalizeDestination(d string, shortHexIDs bool) string {
+	if d == "" {
+		return d
+	}
+	d = destUUID.ReplaceAllString(d, "{id}")
+	var b strings.Builder
+	tokStart := 0
+	flush := func(end int) {
+		if end <= tokStart {
+			return
+		}
+		tok := d[tokStart:end]
+		if url.IsID(tok) || (shortHexIDs && isShortHexID(tok)) {
+			b.WriteString("{id}")
+		} else {
+			b.WriteString(tok)
+		}
+	}
+	for i := 0; i < len(d); i++ {
+		if isDestDelim(d[i]) {
+			flush(i)
+			b.WriteByte(d[i])
+			tokStart = i + 1
+		}
+	}
+	flush(len(d))
+	return b.String()
+}
+
+// isDestDelim reports whether c separates the structural parts of a destination name.
+func isDestDelim(c byte) bool {
+	switch c {
+	case '-', '_', '.', ':', '/', '~':
+		return true
+	}
+	return false
+}
+
+// isShortHexID reports whether a token is a short (8–15 char) hex run containing a
+// digit — a first-party id shorter than a UUID (e.g. an event id fddd7c99),
+// distinguished from a hex-looking word like "deadbeef" by requiring a digit. Full
+// UUIDs and 16+ hex runs are already templated by the conservative default, so this
+// covers only the 8–15 range, and only under the opt-in.
+func isShortHexID(s string) bool {
+	if len(s) < 8 || len(s) > 15 {
+		return false
+	}
+	hasDigit := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+			// hex letter
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func dbSystem(attrs map[string]string) string {

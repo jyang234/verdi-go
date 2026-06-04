@@ -29,7 +29,7 @@ func Template(path string) string {
 	lead := strings.HasPrefix(path, "/")
 	segs := strings.Split(strings.Trim(path, "/"), "/")
 	for i, s := range segs {
-		if isParam(s) {
+		if IsID(s) {
 			segs[i] = "{id}"
 		}
 	}
@@ -59,8 +59,11 @@ func stripHostAndQuery(raw string) string {
 	return raw
 }
 
-// isParam reports whether a segment looks like a volatile identifier.
-func isParam(s string) bool {
+// IsID reports whether a token looks like a volatile identifier: all-numeric, a
+// UUID, or a long (16+) hex run. This is the conservative, unambiguous id rule shared
+// by route templating and messaging-destination templating, so the two never diverge.
+// A token already in {brace} form is left untouched.
+func IsID(s string) bool {
 	if s == "" || (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) {
 		return false
 	}

@@ -193,6 +193,16 @@ Out-of-process traces carry nondeterminism the in-process path never sees. A
   resource attributes a post-hoc trace carries are excluded without any
   post-hoc-specific code. Per-value redaction (UUID/id/timestamp placeholders)
   still applies to whatever a service *does* allowlist.
+- **Messaging-label templating** (`opkey.normalizeDestination`). A per-run id baked
+  into a topic/queue name (`PUBLISH eb-dev-evt-<uuid>-v1`, `CONSUME q:<uuid>`) would
+  churn the op key — and so the gated effect — the way a raw path id would, so a
+  destination is templated like a route: the **default** parameterizes only the
+  unambiguous tokens a route would (`url.IsID`: a full UUID, all-numeric, a 16+ hex
+  run) → `{id}`, sharing one detector so routes and destinations never diverge. A
+  **short hex id** (8–15 chars, e.g. `fddd7c99`) is ambiguous with a stable name
+  segment, so collapsing it is an explicit opt-in — `canon.messagingShortHexIDs` —
+  rather than a default that could merge two distinct effects for an adopter whose
+  names happen to carry hex-ish but stable segments.
 - **Ordering — three states, not two** (`canon.go` `groupPostHoc`, driven by
   `cf.Mode == ModePostHoc`). Parent→child nesting survives in OTLP, so tree depth
   (the real happens-before) is kept. For *siblings* the goroutine signal is gone,

@@ -175,6 +175,17 @@ func SystemMermaidRootedAt(t *ir.CanonicalTrace, service string) (string, bool) 
 func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) string {
 	r := newRenderer()
 	entry := landingOf(root, fallback)
+	bodyFrom := childFrom(root, fallback)
+	// A synthesized root (ingest's internal stand-in when a flow has no single
+	// inbound entry — several entry points, or an event-only flow) is not a
+	// participant; it represents the external caller that drove those entries. Draw
+	// its children straight from the caller and drop its meaningless slug root-hop, so
+	// a multi-entry flow reads "Client ->> svc: …" rather than the flow slug calling
+	// into the system.
+	synth := isSynthRoot(root)
+	if synth {
+		entry, bodyFrom = caller, caller
+	}
 
 	// Plan the participant layout family-adjacent: the synthetic caller, then each
 	// service boxed with the databases it exclusively owns (a store reached only from
@@ -206,8 +217,12 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	// to entry for every kind except a producer, and the same seed serviceInfra walks
 	// from, so box ownership and the drawn arrows agree even for a producer root.
 	var body strings.Builder
-	body.WriteString("    " + r.msg(caller, entry, label(root)))
-	r.writeSystemGroups(&body, root.Children, childFrom(root, fallback), fallback, "    ")
+	if !synth { // only a synth root's slug hop is dropped; a real entry hop always draws,
+		// even when it coincides with the caller (a service consuming a bus named after
+		// itself, where the broker peer equals the service — draw the self-arrow, not nothing).
+		body.WriteString("    " + r.msg(caller, entry, label(root)))
+	}
+	r.writeSystemGroups(&body, root.Children, bodyFrom, fallback, "    ")
 
 	// Shared lifelines the body drew to that the plan didn't already place, sorted.
 	rest := make([]string, 0, len(r.ref))
@@ -612,6 +627,17 @@ func label(s *ir.CanonicalSpan) string {
 		return s.Op + " [" + et + "]"
 	}
 	return s.Op
+}
+
+// isSynthRoot reports whether root is the internal stand-in ingest synthesizes when a
+// flow has no single inbound entry span (capture.assembleRoot). Such a root owns the
+// real entry points but is not itself a service. In the whole-flow path this renderer
+// serves, an internal root is always that synthetic node — a real flow enters at a
+// server or consumer span (assembleRoot only ever returns those as natural roots), so
+// inferring it from Kind==Internal && Service=="" is sound here even though Service is
+// also empty for an in-process single-service span (which never reaches this path).
+func isSynthRoot(root *ir.CanonicalSpan) bool {
+	return root != nil && root.Kind == ir.KindInternal && root.Service == ""
 }
 
 // callerLabel is the lifeline that triggered the flow: a generic Client for an

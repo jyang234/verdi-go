@@ -105,6 +105,14 @@ type CanonConfig struct {
 	// unordered rather than over-claiming a sequence. 0 => default (100ms), well
 	// past same-host scheduling jitter; raise it in a high-latency environment.
 	OrderGuardMs int `yaml:"orderGuardMs"`
+	// MessagingShortHexIDs opts into templating short (8–15 char) hex id tokens
+	// embedded in messaging destination labels (eb-dev-evt-fddd7c99-v1 ->
+	// eb-dev-evt-{id}-v1), on top of the always-on UUID / numeric / long-hex
+	// templating. Off by default: a short hex token is ambiguous with a stable name
+	// segment, so this is a deliberate opt-in for instrumentation whose topic/queue
+	// names bake first-party ids shorter than a UUID — keeping the default safe for
+	// adopters whose names happen to contain hex-ish but stable segments.
+	MessagingShortHexIDs bool `yaml:"messagingShortHexIDs"`
 }
 
 // ClassifyHints name the libraries flowmap cannot infer: loggers, the bus client,
