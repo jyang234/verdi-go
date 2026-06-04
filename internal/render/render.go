@@ -83,7 +83,6 @@ type renderer struct {
 	self   string
 	caller string
 	alias  map[string]string // lifeline label -> mermaid-safe id
-	used   map[string]bool   // taken ids, for unique-id assignment
 	// ref records the lifelines an arrow or note actually drew to. The cross-service
 	// renderer declares only these, pruning over-declared participants no edge
 	// touches. The per-service Mermaid renderer declares its fixed caller/self/peer
@@ -95,19 +94,23 @@ type renderer struct {
 func newRenderer() *renderer {
 	return &renderer{
 		alias: map[string]string{},
-		used:  map[string]bool{},
 		ref:   map[string]bool{},
 	}
 }
 
-// aliasOf returns the Mermaid-safe id for a lifeline, assigning a unique one on
-// first sight. It records nothing about whether the lifeline is drawn — callers
-// that mean "this lifeline is touched by an edge" use id instead.
+// aliasOf returns the Mermaid-safe id for a lifeline, assigning one on first sight.
+// Identity is the sanitized id, so lifelines whose names differ only in separators or
+// case — a service.name (event-bus) and the messaging.system that names the same
+// broker (event_bus) — resolve to ONE participant, unifying the broker with its
+// service rather than drawing a suffixed duplicate (the id is also Mermaid's own
+// participant identity, so two names that sanitize alike cannot be distinct lifelines
+// anyway). It records nothing about whether the lifeline is drawn — callers that mean
+// "this lifeline is touched by an edge" use id instead.
 func (r *renderer) aliasOf(name string) string {
 	if id, ok := r.alias[name]; ok {
 		return id
 	}
-	id := uniqueID(sanitize(name), r.used)
+	id := sanitize(name)
 	r.alias[name] = id
 	return id
 }
@@ -298,13 +301,14 @@ func (p *participantPlan) service(svc string, ownedDB []string) {
 // touched by an edge, preserving plan order and boxing. A box collapses to a loose
 // participant when only its service (no owned database) was referenced.
 func (p *participantPlan) declare(b *strings.Builder, ref map[string]bool) {
-	declared := map[string]bool{}
+	declared := map[string]bool{} // by id — two names that sanitize alike are one participant
 	one := func(name string) {
-		if !ref[name] || declared[name] {
+		id := p.r.aliasOf(name)
+		if !ref[name] || declared[id] {
 			return
 		}
-		declared[name] = true
-		b.WriteString("    participant " + p.r.aliasOf(name) + " as " + name + "\n")
+		declared[id] = true
+		b.WriteString("    participant " + id + " as " + name + "\n")
 	}
 	for _, bl := range p.blocks {
 		if bl.box == "" {
@@ -315,7 +319,7 @@ func (p *participantPlan) declare(b *strings.Builder, ref map[string]bool) {
 		}
 		var members []string
 		for _, n := range bl.names {
-			if ref[n] && !declared[n] {
+			if ref[n] && !declared[p.r.aliasOf(n)] {
 				members = append(members, n)
 			}
 		}
