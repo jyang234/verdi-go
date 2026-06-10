@@ -208,5 +208,31 @@ graph index into deterministic findings, each naming the exact edge/symbol:
 CLI: `groundwork fitness <policy> <graph>` (non-zero exit on violation; cautions
 print but do not fail). `make verify` green.
 
-Next: Phase 2 (`review` + `verify-artifact`) — base-vs-branch artifact with the
-three-valued verdict and the recompute-from-source digest.
+**Phase 2 — done.** `internal/groundwork/review` computes the base-vs-branch MR
+artifact as a pure function of (policy, base graph, branch graph):
+- **three-valued verdict** baked in from day one: `NO-STRUCTURAL-SIGNAL` (graphs
+  identical → body-only, the graph abstains and says so), `STRUCTURALLY-CLEAR`
+  (structure changed, no invariant broke), `BLOCK` (a new violation or a breaking
+  contract change). Reports **only newly-introduced** violations (branch findings
+  minus base findings), tested.
+- **shape** (body-only / localized / cross-package / broad) + per-package node
+  `Touches`; **contract movement** (entrypoints + bus/outbound, additive vs
+  breaking; DB excluded as the service's own store); **I/O effects** (incl. DB
+  writes); **reach** (existing entrypoints the change is now live behind).
+- **digest + verify-artifact** — `sha256` over the canonical artifact;
+  `VerifyArtifact` runs the two pressure-test checks: body integrity (→ TAMPERED)
+  and recompute-from-trusted-graphs (→ STALE). The re-signed forgery (edit body
+  *and* re-sign) is caught as STALE by recomputation — the digest is explicitly
+  *not* the anchor.
+
+Headline demo, on the committed fixtures, verified end-to-end: the same
+"add GetUserFast read endpoint" feature renders **STRUCTURALLY-CLEAR** wired
+`handler→app` and **BLOCK** (naming the exact skip edge) wired `handler→store` —
+same description, different *computed* verdict. Branch goldens are derived from
+the real `layeredsvc` base by one documented edge (see `regen.sh`).
+
+CLI: `groundwork review <policy> <base> <branch> [--json]` (BLOCK exits non-zero)
+and `groundwork verify-artifact <artifact> <policy> <base> <branch>`.
+
+Next: Phase 3 (`verify` + `diff`) — pre-flight delta gate and boundary-contract
+diff; then Phase 4 (zero-touch CI: the trusted base+branch graph generation).

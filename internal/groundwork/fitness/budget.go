@@ -23,7 +23,7 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 		cone := append([]string{src}, ix.Reachable(src)...)
 		writes := map[string]bool{}
 		for _, e := range ix.Effects(cone...) {
-			if isWrite(e) {
+			if IsWrite(e) {
 				writes[strings.TrimPrefix(e.To, "boundary:")] = true
 			}
 		}
@@ -38,10 +38,11 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 	}
 }
 
-// isWrite reports whether a boundary effect mutates external state. The effect
+// IsWrite reports whether a boundary effect mutates external state. The effect
 // label is "<system> <op> <target>": db with a mutating SQL verb, bus PUBLISH, or
-// an outbound HTTP call with a mutating method.
-func isWrite(e graph.Edge) bool {
+// an outbound HTTP call with a mutating method. It is shared with the review
+// surface, which classifies the same effects in an MR's I/O-effect section.
+func IsWrite(e graph.Edge) bool {
 	if !e.IsBoundary() {
 		return false
 	}

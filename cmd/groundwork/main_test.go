@@ -15,6 +15,15 @@ func TestRunSmoke(t *testing.T) {
 			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
 		{"fitness", "../../testdata/groundwork/policies/blindsvc.json",
 			"../../testdata/groundwork/goldens/blindsvc.graph.json"},
+		// review of the good branch is STRUCTURALLY-CLEAR (exit 0).
+		{"review", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-good.graph.json"},
+		// the committed skip artifact verifies authentic against its source graphs.
+		{"verify-artifact", "../../testdata/groundwork/goldens/layeredsvc.branch-skip.artifact.json",
+			"../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
 	}
 	for _, args := range cases {
 		if err := run(args); err != nil {
@@ -31,6 +40,12 @@ func TestRunErrors(t *testing.T) {
 		{"policy-check", "/nonexistent/policy.json"},
 		{"fitness", "/nonexistent/policy.json", "../../testdata/groundwork/goldens/layeredsvc.graph.json"},
 		{"fitness", "../../testdata/groundwork/policies/layeredsvc.json", "/nonexistent/graph.json"},
+		// review of the skip branch is BLOCK → non-zero exit.
+		{"review", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
+		{"review", "p", "b"}, // wrong arg count
+		{"verify-artifact", "/nonexistent/artifact.json", "p", "b", "br"},
 	}
 	for _, args := range cases {
 		if err := run(args); err == nil {

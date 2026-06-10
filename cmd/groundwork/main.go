@@ -18,6 +18,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
 )
 
 var version = "dev"
@@ -42,6 +43,10 @@ func run(args []string) error {
 		return cmdReach(args[1:])
 	case "fitness":
 		return cmdFitness(args[1:])
+	case "review":
+		return cmdReview(args[1:])
+	case "verify-artifact":
+		return cmdVerifyArtifact(args[1:])
 	case "policy-check":
 		return cmdPolicyCheck(args[1:])
 	case "help", "-h", "--help":
@@ -58,6 +63,8 @@ func usage() {
 usage:
   groundwork reach <graph.json> <fqn>          reachability + entrypoint cover + effects for a function
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
+  groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
+  groundwork verify-artifact <artifact> <policy> <base> <branch>  prove an artifact is authentic (not tampered/stale)
   groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
 
@@ -182,6 +189,98 @@ func ruleCount(p *policy.Policy) int {
 		n++
 	}
 	return n
+}
+
+// cmdReview computes the base-vs-branch MR review artifact. With --json it emits
+// the canonical artifact (the form a verifier reads); otherwise the human report.
+// A BLOCK verdict exits non-zero so the same command can back a CI gate.
+func cmdReview(args []string) error {
+	asJSON, rest := takeFlag(args, "--json", "-json")
+	if len(rest) != 3 {
+		return fmt.Errorf("usage: groundwork review <policy.json> <base-graph.json> <branch-graph.json> [--json]")
+	}
+	p, base, branch, err := loadReviewInputs(rest[0], rest[1], rest[2])
+	if err != nil {
+		return err
+	}
+	art := review.Review(p, base, branch)
+
+	if asJSON {
+		b, err := art.Marshal()
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stdout.Write(b); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(art.Render())
+	}
+	if art.Verdict == review.Block {
+		return fmt.Errorf("review verdict: BLOCK")
+	}
+	return nil
+}
+
+// cmdVerifyArtifact recomputes an artifact from the source graphs and reports
+// whether it is authentic, tampered, or stale. The graphs must be CI-trusted.
+func cmdVerifyArtifact(args []string) error {
+	fs := flag.NewFlagSet("verify-artifact", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 4 {
+		return fmt.Errorf("usage: groundwork verify-artifact <artifact.json> <policy.json> <base-graph.json> <branch-graph.json>")
+	}
+	art, err := review.LoadArtifact(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	p, base, branch, err := loadReviewInputs(fs.Arg(1), fs.Arg(2), fs.Arg(3))
+	if err != nil {
+		return err
+	}
+	res := review.VerifyArtifact(art, p, base, branch)
+	fmt.Printf("%s — %s\n", res.Status, res.Detail)
+	if !res.OK() {
+		return fmt.Errorf("artifact is %s", res.Status)
+	}
+	return nil
+}
+
+// takeFlag removes any of the given boolean flag spellings from args, reporting
+// whether one was present. It lets a flag appear anywhere, including after the
+// positional arguments (Go's flag package stops at the first positional).
+func takeFlag(args []string, names ...string) (found bool, rest []string) {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	for _, a := range args {
+		if want[a] {
+			found = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return found, rest
+}
+
+// loadReviewInputs loads the policy and the two graphs the review surfaces share.
+func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, *graph.Graph, *graph.Graph, error) {
+	p, err := policy.Load(policyPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	base, err := graph.LoadFile(basePath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	branch, err := graph.LoadFile(branchPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return p, base, branch, nil
 }
 
 // cmdPolicyCheck loads and validates a policy, printing a one-line-per-rule

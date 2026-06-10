@@ -21,3 +21,52 @@ for svc in layeredsvc blindsvc; do
 	flowmap graph "$dir" >"$out"
 	echo "wrote $out"
 done
+
+# Branch goldens for the review demo. groundwork's `review` compares a base graph
+# to a branch graph; in CI both come from flowmap run on the respective code. Here
+# we synthesize the branch graphs by applying one documented feature delta to the
+# real layeredsvc base — "add a GetUserFast read endpoint" — wired two ways:
+#
+#   branch-good: GetUserFast → app.GetProfile   (handler → app: correct)
+#   branch-skip: GetUserFast → store.SelectUser (handler → store: skips the app layer)
+#
+# Same feature, same description; the only difference is one edge. That is exactly
+# what flowmap would emit for the two source variants, and it is what makes the
+# review verdict (STRUCTURALLY-CLEAR vs BLOCK) a property of the code, not the prose.
+python3 - <<'PY'
+import json
+
+base = json.load(open("testdata/groundwork/goldens/layeredsvc.graph.json"))
+H = "(*example.com/layeredsvc/internal/handler.Server)"
+fast = {
+    "fqn": f"{H}.GetUserFast",
+    "sig": "func (*handler.Server).GetUserFast(w http.ResponseWriter, r *http.Request)",
+    "tier": 1,
+}
+
+def branch(target, out):
+    g = json.loads(json.dumps(base))
+    g["nodes"].append(dict(fast))
+    g["nodes"].sort(key=lambda n: n["fqn"])
+    g["edges"].append({"from": f"{H}.GetUserFast", "to": target, "tier": 2})
+    g["edges"].sort(key=lambda e: (e["from"], e["to"], e["tier"]))
+    json.dump(g, open(out, "w"), indent=2)
+    open(out, "a").write("\n")
+    print("wrote", out)
+
+branch("(*example.com/layeredsvc/internal/app.Service).GetProfile",
+       "testdata/groundwork/goldens/layeredsvc.branch-good.graph.json")
+branch("(*example.com/layeredsvc/internal/store.Store).SelectUser",
+       "testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json")
+PY
+
+# A committed review artifact (the canonical JSON form), for the verify-artifact
+# example and CLI test. It carries the digest, so it is regenerated here whenever
+# the artifact shape or digest computation changes.
+go run ./cmd/groundwork review \
+	testdata/groundwork/policies/layeredsvc.json \
+	testdata/groundwork/goldens/layeredsvc.graph.json \
+	testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json \
+	--json >testdata/groundwork/goldens/layeredsvc.branch-skip.artifact.json || true
+echo "wrote testdata/groundwork/goldens/layeredsvc.branch-skip.artifact.json"
+

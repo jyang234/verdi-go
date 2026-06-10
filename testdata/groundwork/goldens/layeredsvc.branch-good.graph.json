@@ -1,0 +1,156 @@
+{
+  "nodes": [
+    {
+      "fqn": "(*example.com/layeredsvc/internal/app.Service).GetProfile",
+      "sig": "func (*app.Service).GetProfile(ctx context.Context, id string) (store.User, error)",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",
+      "sig": "func (*app.Service).UpdateProfile(ctx context.Context, id string, name string) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/handler.Server).GetUser",
+      "sig": "func (*handler.Server).GetUser(w http.ResponseWriter, r *http.Request)",
+      "tier": 1
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/handler.Server).GetUserFast",
+      "sig": "func (*handler.Server).GetUserFast(w http.ResponseWriter, r *http.Request)",
+      "tier": 1
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/handler.Server).UpdateUser",
+      "sig": "func (*handler.Server).UpdateUser(w http.ResponseWriter, r *http.Request)",
+      "tier": 1
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/store.Store).InsertAudit",
+      "sig": "func (*store.Store).InsertAudit(ctx context.Context, id string) error",
+      "tier": 1,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/store.Store).SelectUser",
+      "sig": "func (*store.Store).SelectUser(ctx context.Context, id string, out *store.User) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/layeredsvc/internal/store.Store).UpdateUser",
+      "sig": "func (*store.Store).UpdateUser(ctx context.Context, id string, name string) error",
+      "tier": 1,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/layeredsvc.main",
+      "sig": "func main.main()",
+      "tier": 1
+    },
+    {
+      "fqn": "example.com/layeredsvc.run",
+      "sig": "func main.run() error",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/layeredsvc/internal/app.New",
+      "sig": "func app.New(st *store.Store) *app.Service",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/layeredsvc/internal/handler.New",
+      "sig": "func handler.New(svc *app.Service) *handler.Server",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/layeredsvc/internal/handler.writeJSON",
+      "sig": "func handler.writeJSON(_ context.Context, w http.ResponseWriter, v any)",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/layeredsvc/internal/store.New",
+      "sig": "func store.New(db *sql.DB) *store.Store",
+      "tier": 3
+    }
+  ],
+  "edges": [
+    {
+      "from": "(*example.com/layeredsvc/internal/app.Service).GetProfile",
+      "to": "(*example.com/layeredsvc/internal/store.Store).SelectUser",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",
+      "to": "(*example.com/layeredsvc/internal/store.Store).InsertAudit",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",
+      "to": "(*example.com/layeredsvc/internal/store.Store).UpdateUser",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/handler.Server).GetUser",
+      "to": "(*example.com/layeredsvc/internal/app.Service).GetProfile",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/handler.Server).GetUser",
+      "to": "example.com/layeredsvc/internal/handler.writeJSON",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/handler.Server).GetUserFast",
+      "to": "(*example.com/layeredsvc/internal/app.Service).GetProfile",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/handler.Server).UpdateUser",
+      "to": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",
+      "tier": 2
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/store.Store).InsertAudit",
+      "to": "boundary:db INSERT audit_log",
+      "tier": 1,
+      "boundary": "outbound-sync"
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/store.Store).SelectUser",
+      "to": "boundary:db SELECT users",
+      "tier": 2,
+      "boundary": "outbound-sync"
+    },
+    {
+      "from": "(*example.com/layeredsvc/internal/store.Store).UpdateUser",
+      "to": "boundary:db UPDATE users",
+      "tier": 1,
+      "boundary": "outbound-sync"
+    },
+    {
+      "from": "example.com/layeredsvc.main",
+      "to": "example.com/layeredsvc.run",
+      "tier": 3
+    },
+    {
+      "from": "example.com/layeredsvc.run",
+      "to": "example.com/layeredsvc/internal/app.New",
+      "tier": 3
+    },
+    {
+      "from": "example.com/layeredsvc.run",
+      "to": "example.com/layeredsvc/internal/handler.New",
+      "tier": 3
+    },
+    {
+      "from": "example.com/layeredsvc.run",
+      "to": "example.com/layeredsvc/internal/store.New",
+      "tier": 3
+    }
+  ],
+  "blind_spots": []
+}

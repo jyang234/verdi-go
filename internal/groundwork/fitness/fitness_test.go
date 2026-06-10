@@ -199,8 +199,8 @@ func TestIsWrite(t *testing.T) {
 		"boundary:peer POST /charge/{id}":   true,
 	}
 	for to, want := range cases {
-		if got := isWrite(graph.Edge{To: to, Boundary: "outbound-sync"}); got != want {
-			t.Errorf("isWrite(%q) = %v, want %v", to, got, want)
+		if got := IsWrite(graph.Edge{To: to, Boundary: "outbound-sync"}); got != want {
+			t.Errorf("IsWrite(%q) = %v, want %v", to, got, want)
 		}
 	}
 }
