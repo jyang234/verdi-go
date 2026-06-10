@@ -147,3 +147,43 @@ surface, contract. It does **not** verify logic inside a function (that stays
 tests, types, and the existing Go analyzers). Its single point of failure is the
 integrity of the graph it is handed, which must come from trusted CI (§5.1),
 never from the agent under review.
+
+## 8. Progress
+
+**Phase 0 — done.** Shipped:
+- `internal/groundwork/graph` — decoupled decode of flowmap's graph JSON, plus an
+  `Index` with bidirectional transitive reachability (`Reachable`/`Reaching`),
+  `Sources`/`EntrypointCover`, boundary-`Effects` collection, and blind-spot
+  lookup. Strict decode (`DisallowUnknownFields`) so a flowmap schema change fails
+  loudly.
+- `internal/groundwork/policy` — the CODEOWNERS-gated policy schema (layers,
+  layering allow-list + roots, must-not-reach, I/O budget) with strict load and
+  validation, plus `LayerOf` (longest-prefix wins) / `LayerRank`.
+- `cmd/groundwork` — `reach` and `policy-check` introspection surfaces (no verdict
+  yet; those arrive with `fitness`).
+
+**Both fixtures — done**, added to `go.work`, with committed graph goldens under
+`testdata/groundwork/goldens` (regenerate via `testdata/groundwork/regen.sh`) and
+a sample policy under `testdata/groundwork/policies`:
+- `layeredsvc` — strict `handler → app → store`, **no** handler→store edge on
+  base (verified), so a skip-level edge is genuinely novel; `UpdateProfile` does
+  two DB writes so the I/O budget has material.
+- `blindsvc` — produces a `reflect` and an `unsafe` graph blind spot, a
+  `boundary:bus PUBLISH <dynamic>` edge (the `Publish` route reaches it; the
+  `Create` route reaches only a *named* publish — the clean must-not-reach
+  contrast).
+
+Two facts the build surfaced, worth carrying into Phase 1:
+- **Blind spots live in two places.** The graph JSON's `blind_spots` array carries
+  only the *graph-completeness* subset (reflect / HighFanOut / unsafe / cgo /
+  linkname). The *boundary* blind spots (dynamic publish/dispatch) ride the
+  boundary contract and surface in the graph **as a `<dynamic>` edge target**. So
+  groundwork's `trust: verify` / three-valued reachability must consult the
+  `<dynamic>` edge markers *and* the graph blind-spot manifest (and, in Phase 3,
+  the contract) — not the manifest alone.
+- **Entrypoints aren't labelled in the graph.** `Sources()` derives them
+  structurally as in-degree-0 nodes (mains, dynamically-dispatched handlers,
+  exports). This is the graph-only approximation; the boundary contract can later
+  attach route/topic names.
+
+Next: Phase 1 (`fitness`) — layering, must-not-reach (three-valued), I/O budget.

@@ -1,0 +1,109 @@
+// Package graph loads and indexes the call graph that flowmap emits (`flowmap
+// graph <service>`) and is the substrate every groundwork surface is built on.
+//
+// groundwork deliberately declares its own value types here rather than import
+// flowmap's internal graphio: the graph JSON is the *interface* between the two
+// programs (flowmap produces it, groundwork consumes it), and keeping a separate,
+// explicit decode of that interface is what lets the two sit in different trust
+// domains — flowmap runs in trusted CI, groundwork only ever reads the file it is
+// handed. The shapes are kept in lockstep with graphio by the committed goldens
+// under testdata/groundwork and the regen script beside them.
+package graph
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// boundaryPrefix marks an edge target that is a typed external sink (a DB op, an
+// outbound call, a bus publish/consume) rather than a first-party function. Such
+// targets never appear in Nodes; they are the leaves of the effect surface.
+const boundaryPrefix = "boundary:"
+
+// dynamicMarker is flowmap's token for a boundary effect whose target could not
+// be named statically (e.g. a publish to a topic chosen at runtime). An edge
+// whose target contains it is a known hole in the graph's knowledge — the
+// frontier where reachability stops being sound.
+const dynamicMarker = "<dynamic>"
+
+// Graph is one call-graph view as emitted by `flowmap graph`. It is the whole,
+// unscoped service graph unless Entrypoint is set.
+type Graph struct {
+	Entrypoint string      `json:"entrypoint,omitempty"`
+	Nodes      []Node      `json:"nodes"`
+	Edges      []Edge      `json:"edges"`
+	BlindSpots []BlindSpot `json:"blind_spots"`
+}
+
+// Node is one first-party function.
+type Node struct {
+	FQN      string `json:"fqn"`
+	Sig      string `json:"sig"`
+	Tier     int    `json:"tier"`
+	Fallible bool   `json:"fallible,omitempty"`
+}
+
+// Edge is a call from a first-party function (From, always a Node) to another
+// first-party function or to a typed boundary sink (To). Boundary names the
+// external-effect kind for boundary edges (outbound-sync, outbound-async,
+// inbound); it is empty for internal function-to-function edges.
+type Edge struct {
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Tier       int    `json:"tier"`
+	Boundary   string `json:"boundary,omitempty"`
+	Concurrent bool   `json:"concurrent,omitempty"`
+}
+
+// BlindSpot is one disclosed gap in the graph's knowledge. Site is a first-party
+// FQN (reflect, HighFanOut) or a package path (unsafe, cgo, go:linkname). The
+// graph view carries only the graph-completeness subset; the boundary subset
+// (dynamically-named publish/dispatch) rides the boundary contract instead, and
+// surfaces in the graph as a <dynamic> edge target.
+type BlindSpot struct {
+	Kind   string `json:"kind"`
+	Site   string `json:"site"`
+	Detail string `json:"detail"`
+}
+
+// IsBoundary reports whether the edge targets an external sink rather than a
+// first-party function.
+func (e Edge) IsBoundary() bool { return strings.HasPrefix(e.To, boundaryPrefix) }
+
+// IsDynamic reports whether the edge targets a boundary effect the graph could
+// not name statically — a soundness frontier for any reachability claim through
+// it.
+func (e Edge) IsDynamic() bool { return strings.Contains(e.To, dynamicMarker) }
+
+// Load decodes a graph from JSON. It rejects unknown fields so a flowmap schema
+// change that groundwork has not been taught about fails loudly here rather than
+// being silently dropped.
+func Load(r io.Reader) (*Graph, error) {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	var g Graph
+	if err := dec.Decode(&g); err != nil {
+		return nil, fmt.Errorf("groundwork/graph: decode: %w", err)
+	}
+	if g.Nodes == nil {
+		return nil, fmt.Errorf("groundwork/graph: missing nodes (not a flowmap graph?)")
+	}
+	return &g, nil
+}
+
+// LoadFile reads and decodes a graph from a file path.
+func LoadFile(path string) (*Graph, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	g, err := Load(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return g, nil
+}

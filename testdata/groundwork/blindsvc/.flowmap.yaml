@@ -1,0 +1,12 @@
+version: 1
+service: blindsvc
+
+# blindsvc deliberately exercises the regions where the static graph runs out, so
+# groundwork's three-valued "absence" verdicts (PROVEN-ABSENT vs NO-PATH-FOUND)
+# have something to abstain on:
+#   - a dynamic publish (event name is a parameter) -> a `boundary:bus PUBLISH
+#     <dynamic>` edge plus a NonConstantBoundaryArg boundary blind spot;
+#   - a reflect call -> a `reflect` graph-completeness blind spot (hidden edges);
+#   - a package importing unsafe -> an `unsafe` package disclosure.
+classify:
+  busPublish: ["example.com/blindsvc/internal/bus#Publish"]

@@ -1,0 +1,17 @@
+{
+  "service": "layeredsvc",
+  "version": 1,
+  "layers": [
+    {"name": "handler", "packages": ["example.com/layeredsvc/internal/handler"]},
+    {"name": "app", "packages": ["example.com/layeredsvc/internal/app"]},
+    {"name": "store", "packages": ["example.com/layeredsvc/internal/store"]}
+  ],
+  "layering": {
+    "roots": ["example.com/layeredsvc"],
+    "allow": []
+  },
+  "must_not_reach": [],
+  "io_budget": {
+    "max_writes_per_route": 2
+  }
+}
