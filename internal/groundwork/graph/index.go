@@ -1,22 +1,31 @@
 package graph
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+)
 
 // Index is a queryable view of a Graph: node lookup, forward/reverse adjacency
 // over the first-party function subgraph, the boundary-effect surface, and the
 // blind-spot frontier. It is built once and is read-only thereafter, so it is
 // safe to share across the surfaces that consume it.
 //
+// Adjacency is precomputed into sorted, de-duplicated callee/caller lists at
+// construction, so the repeated reachability walks (one per source for the budget,
+// one per from-set for must-not-reach, one per changed site for review reach)
+// never re-sort a node's neighbours.
+//
 // Reachability is computed over function-to-function edges only. Boundary edges
 // (DB/bus/outbound) are sinks: they are not traversed, but they are recorded so a
 // caller can ask "what external effects does X reach" in one pass.
 type Index struct {
-	g     *Graph
-	nodes map[string]Node
-	out   map[string][]Edge // function-to-function edges, keyed by caller FQN
-	in    map[string][]Edge // function-to-function edges, keyed by callee FQN
-	effOf map[string][]Edge // boundary edges, keyed by the first-party FQN that makes them
-	blind map[string][]BlindSpot
+	g       *Graph
+	nodes   map[string]Node
+	callees map[string][]string // sorted, deduped first-party callees, by caller FQN
+	callers map[string][]string // sorted, deduped first-party callers, by callee FQN
+	effOf   map[string][]Edge   // boundary edges, keyed by the first-party FQN that makes them
+	blind   map[string][]BlindSpot
 }
 
 // NewIndex builds an Index over g. The graph is retained by reference; callers
@@ -25,21 +34,22 @@ func NewIndex(g *Graph) *Index {
 	ix := &Index{
 		g:     g,
 		nodes: make(map[string]Node, len(g.Nodes)),
-		out:   make(map[string][]Edge),
-		in:    make(map[string][]Edge),
 		effOf: make(map[string][]Edge),
 		blind: make(map[string][]BlindSpot),
 	}
 	for _, n := range g.Nodes {
 		ix.nodes[n.FQN] = n
 	}
+
+	calleeSet := map[string]map[string]bool{}
+	callerSet := map[string]map[string]bool{}
 	for _, e := range g.Edges {
 		switch {
 		case e.IsBoundary():
 			ix.effOf[e.From] = append(ix.effOf[e.From], e)
 		case ix.isNode(e.To):
-			ix.out[e.From] = append(ix.out[e.From], e)
-			ix.in[e.To] = append(ix.in[e.To], e)
+			addAdj(calleeSet, e.From, e.To)
+			addAdj(callerSet, e.To, e.From)
 		default:
 			// An edge to a non-boundary target that is not a known node: a call
 			// into something outside the emitted scope. flowmap does not normally
@@ -47,10 +57,28 @@ func NewIndex(g *Graph) *Index {
 			// reachability — they are neither a traversable function nor an effect.
 		}
 	}
+	ix.callees = freezeAdj(calleeSet)
+	ix.callers = freezeAdj(callerSet)
+
 	for _, b := range g.BlindSpots {
 		ix.blind[b.Site] = append(ix.blind[b.Site], b)
 	}
 	return ix
+}
+
+func addAdj(m map[string]map[string]bool, k, v string) {
+	if m[k] == nil {
+		m[k] = map[string]bool{}
+	}
+	m[k][v] = true
+}
+
+func freezeAdj(m map[string]map[string]bool) map[string][]string {
+	out := make(map[string][]string, len(m))
+	for k, vs := range m {
+		out[k] = setutil.SortedKeys(vs)
+	}
+	return out
 }
 
 func (ix *Index) isNode(fqn string) bool { _, ok := ix.nodes[fqn]; return ok }
@@ -62,38 +90,29 @@ func (ix *Index) Has(fqn string) bool { return ix.isNode(fqn) }
 func (ix *Index) Node(fqn string) (Node, bool) { n, ok := ix.nodes[fqn]; return n, ok }
 
 // Nodes returns every function FQN, sorted.
-func (ix *Index) Nodes() []string {
-	out := make([]string, 0, len(ix.nodes))
-	for fqn := range ix.nodes {
-		out = append(out, fqn)
-	}
-	sort.Strings(out)
-	return out
-}
+func (ix *Index) Nodes() []string { return setutil.SortedKeys(ix.nodes) }
 
 // Callees returns the direct first-party callees of fqn, sorted and de-duplicated.
-func (ix *Index) Callees(fqn string) []string {
-	return targets(ix.out[fqn], func(e Edge) string { return e.To })
-}
+// The returned slice is precomputed and must be treated as read-only.
+func (ix *Index) Callees(fqn string) []string { return ix.callees[fqn] }
 
 // Callers returns the direct first-party callers of fqn, sorted and de-duplicated.
-func (ix *Index) Callers(fqn string) []string {
-	return targets(ix.in[fqn], func(e Edge) string { return e.From })
-}
+// The returned slice is precomputed and must be treated as read-only.
+func (ix *Index) Callers(fqn string) []string { return ix.callers[fqn] }
 
 // Reachable returns every function transitively reachable from any seed by
 // following call edges forward (the seeds' downstream / dependency cone),
 // excluding the seeds themselves unless a seed is reachable from another. The
 // result is sorted.
 func (ix *Index) Reachable(seeds ...string) []string {
-	return ix.walk(seeds, func(fqn string) []string { return ix.Callees(fqn) })
+	return ix.walk(seeds, func(fqn string) []string { return ix.callees[fqn] })
 }
 
 // Reaching returns every function that can transitively reach any seed by
 // following call edges backward (who breaks if a seed changes). The result is
 // sorted, excluding the seeds themselves unless one reaches another.
 func (ix *Index) Reaching(seeds ...string) []string {
-	return ix.walk(seeds, func(fqn string) []string { return ix.Callers(fqn) })
+	return ix.walk(seeds, func(fqn string) []string { return ix.callers[fqn] })
 }
 
 // walk is the shared transitive-closure BFS for Reachable/Reaching. Seeds are
@@ -102,7 +121,7 @@ func (ix *Index) Reaching(seeds ...string) []string {
 func (ix *Index) walk(seeds []string, next func(string) []string) []string {
 	seen := make(map[string]bool)
 	var queue []string
-	for _, s := range seeds {
+	enqueue := func(s string) {
 		for _, t := range next(s) {
 			if !seen[t] {
 				seen[t] = true
@@ -110,22 +129,15 @@ func (ix *Index) walk(seeds []string, next func(string) []string) []string {
 			}
 		}
 	}
+	for _, s := range seeds {
+		enqueue(s)
+	}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, t := range next(cur) {
-			if !seen[t] {
-				seen[t] = true
-				queue = append(queue, t)
-			}
-		}
+		enqueue(cur)
 	}
-	out := make([]string, 0, len(seen))
-	for fqn := range seen {
-		out = append(out, fqn)
-	}
-	sort.Strings(out)
-	return out
+	return setutil.SortedKeys(seen)
 }
 
 // Sources returns the function nodes with no first-party caller — the structural
@@ -136,7 +148,7 @@ func (ix *Index) walk(seeds []string, next func(string) []string) []string {
 func (ix *Index) Sources() []string {
 	out := make([]string, 0)
 	for fqn := range ix.nodes {
-		if len(ix.in[fqn]) == 0 {
+		if len(ix.callers[fqn]) == 0 {
 			out = append(out, fqn)
 		}
 	}
@@ -147,10 +159,7 @@ func (ix *Index) Sources() []string {
 // EntrypointCover returns the Sources from which fqn is transitively reachable —
 // the entry points the function is live behind. The result is sorted.
 func (ix *Index) EntrypointCover(fqn string) []string {
-	reaching := make(map[string]bool)
-	for _, r := range ix.Reaching(fqn) {
-		reaching[r] = true
-	}
+	reaching := setutil.StringSet(ix.Reaching(fqn))
 	var out []string
 	for _, s := range ix.Sources() {
 		if s == fqn || reaching[s] {
@@ -178,18 +187,3 @@ func (ix *Index) BlindSpotsAt(site string) []BlindSpot { return ix.blind[site] }
 
 // BlindSpots returns the whole graph-completeness blind-spot manifest.
 func (ix *Index) BlindSpots() []BlindSpot { return ix.g.BlindSpots }
-
-// targets projects edges through pick, de-duplicates, and sorts.
-func targets(edges []Edge, pick func(Edge) string) []string {
-	seen := make(map[string]bool, len(edges))
-	out := make([]string, 0, len(edges))
-	for _, e := range edges {
-		t := pick(e)
-		if !seen[t] {
-			seen[t] = true
-			out = append(out, t)
-		}
-	}
-	sort.Strings(out)
-	return out
-}

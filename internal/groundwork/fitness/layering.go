@@ -6,6 +6,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // checkLayering enforces the declared layering: a call may stay within a layer or
@@ -85,7 +86,7 @@ func effectiveLayeredCallees(p *policy.Policy, ix *graph.Index, from string) []s
 		}
 		stack = append(stack, ix.Callees(n)...) // unassigned helper: keep descending
 	}
-	return sortedKeys(landed)
+	return setutil.SortedKeys(landed)
 }
 
 // layeringSummary describes the broken relationship in layer terms.

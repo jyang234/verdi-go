@@ -6,6 +6,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // graphDelta is the set-based difference between two graphs: which nodes, internal
@@ -90,7 +91,7 @@ func (d graphDelta) touchedPackages() []string {
 	for _, e := range append(append([]graph.Edge{}, d.effectsAdded...), d.effectsRemoved...) {
 		mark(e.From)
 	}
-	return sortedKeys(set)
+	return setutil.SortedKeys(set)
 }
 
 // shape classifies the reach of the change by how many packages it touches.
@@ -117,11 +118,17 @@ func (d graphDelta) pkgDeltas() []PkgDelta {
 		}
 		return m[pkg]
 	}
+	// Guard against an unparseable FQN (PkgOf == "") so the Touches line never
+	// shows a nameless "(+1)", matching touchedPackages's filtering.
 	for _, n := range d.nodesAdded {
-		get(fitness.PkgOf(n)).NodesAdded++
+		if pkg := fitness.PkgOf(n); pkg != "" {
+			get(pkg).NodesAdded++
+		}
 	}
 	for _, n := range d.nodesRemoved {
-		get(fitness.PkgOf(n)).NodesRemoved++
+		if pkg := fitness.PkgOf(n); pkg != "" {
+			get(pkg).NodesRemoved++
+		}
 	}
 	out := make([]PkgDelta, 0, len(m))
 	for _, pd := range m {
@@ -175,15 +182,6 @@ func diffStringSets(a, b map[string]bool) (onlyA, onlyB []string) {
 		}
 	}
 	return onlyA, onlyB
-}
-
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func sortEdges(es [][2]string) {

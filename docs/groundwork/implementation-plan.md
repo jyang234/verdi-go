@@ -248,5 +248,13 @@ and `groundwork verify-artifact <artifact> <policy> <base> <branch>`.
   fail closed: when the frontier is blind, the default is a non-blocking caution,
   but a `require_proof` rule escalates that unprovability to a Violation.
 
+Follow-up cleanup (review findings #4–#8): a boundary-label *contract test*
+(`review`) pins flowmap's effect-label format that `IsWrite`/`classifyContract`
+parse (with a committed `loansvc` graph golden for full vocabulary coverage);
+`graph.Index` now precomputes sorted/deduped adjacency once instead of re-sorting
+on every reachability walk; a shared `setutil` package replaces the duplicated
+set helpers; `pkgDeltas` gained the empty-package guard; and `policy.Load` decodes
+bytes directly.
+
 Next: Phase 3 (`verify` + `diff`) — pre-flight delta gate and boundary-contract
 diff; then Phase 4 (zero-touch CI: the trusted base+branch graph generation).

@@ -22,6 +22,14 @@ for svc in layeredsvc blindsvc; do
 	echo "wrote $out"
 done
 
+# loansvc is flowmap's richer fixture; we keep a copy of its graph as a groundwork
+# golden purely so the effect-label contract test (review) sees the full label
+# vocabulary the classifiers depend on — db read/write, bus publish/consume, and
+# outbound GET/POST. If flowmap's label format ever changes, regenerating this is
+# what makes the contract test fail instead of silently misclassifying effects.
+flowmap graph testdata/fixtures/loansvc >testdata/groundwork/goldens/loansvc.graph.json
+echo "wrote testdata/groundwork/goldens/loansvc.graph.json"
+
 # Branch goldens for the review demo. groundwork's `review` compares a base graph
 # to a branch graph; in CI both come from flowmap run on the respective code. Here
 # we synthesize the branch graphs by applying one documented feature delta to the

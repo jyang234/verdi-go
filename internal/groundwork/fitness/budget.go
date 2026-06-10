@@ -2,11 +2,11 @@ package fitness
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // checkIOBudget caps the external *write* effects reachable from a single route
@@ -38,7 +38,7 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 			r.add(Finding{
 				Rule:     "io_budget",
 				Severity: Violation,
-				Summary:  fmt.Sprintf("%s reaches %d write(s) over a budget of %d: %s", ShortName(src), len(writes), max, strings.Join(sortedKeys(writes), ", ")),
+				Summary:  fmt.Sprintf("%s reaches %d write(s) over a budget of %d: %s", ShortName(src), len(writes), max, strings.Join(setutil.SortedKeys(writes), ", ")),
 				From:     src,
 			})
 		}
@@ -76,13 +76,4 @@ func IsWrite(e graph.Edge) bool {
 			return false
 		}
 	}
-}
-
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

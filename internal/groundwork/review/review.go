@@ -7,6 +7,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // Review computes the MR review artifact from the base and branch graphs under a
@@ -88,13 +89,13 @@ func findingKey(f fitness.Finding) string {
 func contractChanges(d graphDelta, baseIx, branchIx *graph.Index) []ContractChange {
 	var out []ContractChange
 
-	baseSrc := stringSet(baseIx.Sources())
+	baseSrc := setutil.StringSet(baseIx.Sources())
 	for _, s := range branchIx.Sources() {
 		if !baseSrc[s] {
 			out = append(out, ContractChange{Op: "+", Surface: "entrypoint", Name: fitness.ShortName(s)})
 		}
 	}
-	branchSrc := stringSet(branchIx.Sources())
+	branchSrc := setutil.StringSet(branchIx.Sources())
 	for _, s := range baseIx.Sources() {
 		if !branchSrc[s] {
 			out = append(out, ContractChange{Op: "-", Surface: "entrypoint", Name: fitness.ShortName(s), Breaking: true})
@@ -171,7 +172,7 @@ func ioEffects(d graphDelta) []EffectChange {
 // entrypoints introduced by the MR are reported in the contract section, not
 // here; this is specifically "what that already exists is affected".
 func reachExisting(d graphDelta, baseIx, branchIx *graph.Index) []string {
-	existing := stringSet(baseIx.Sources())
+	existing := setutil.StringSet(baseIx.Sources())
 
 	sites := map[string]bool{}
 	for _, n := range d.nodesAdded {
@@ -192,13 +193,5 @@ func reachExisting(d graphDelta, baseIx, branchIx *graph.Index) []string {
 			}
 		}
 	}
-	return sortedKeys(hit)
-}
-
-func stringSet(ss []string) map[string]bool {
-	m := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
+	return setutil.SortedKeys(hit)
 }

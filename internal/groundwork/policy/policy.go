@@ -10,6 +10,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -85,7 +86,7 @@ func Load(path string) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var p Policy
 	if err := dec.Decode(&p); err != nil {
