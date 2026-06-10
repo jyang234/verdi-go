@@ -48,6 +48,18 @@ service (instrument with OTel → commit the boundary contract → write a flow 
 → check coverage → wire CI/CODEOWNERS). The `testdata/fixtures/loansvc` fixture
 is a complete worked example.
 
+## groundwork — verification over the graph
+
+`groundwork` is a companion tool that *consumes* flowmap's graph and boundary
+contract to compute deterministic, fail-closed checks: architectural fitness
+functions (layering, must-not-reach, I/O budget), a pre-flight `verify` gate
+(new violations, scope creep, breaking contract), computed MR `review` artifacts
+with an unfakeable digest, and a boundary-contract `diff`. No AI in the verdict —
+every output is a pure function of `(policy, graph, delta)`.
+
+See **`docs/groundwork/usage.md`** for the commands and a worked example, and
+`docs/groundwork/README.md` for the full design record. CLI: `cmd/groundwork`.
+
 ## The two gates (and how to keep them green)
 
 flowmap has **two distinct gate mechanisms**, unified only by CODEOWNERS routing
