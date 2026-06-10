@@ -186,4 +186,27 @@ Two facts the build surfaced, worth carrying into Phase 1:
   exports). This is the graph-only approximation; the boundary contract can later
   attach route/topic names.
 
-Next: Phase 1 (`fitness`) — layering, must-not-reach (three-valued), I/O budget.
+**Phase 1 — done.** `internal/groundwork/fitness` evaluates a policy against a
+graph index into deterministic findings, each naming the exact edge/symbol:
+- **layering** — a call may stay within a layer or descend one; skip-level and
+  upward calls are violations, except out of a declared root package or an
+  allow-listed edge. Only edges with *both* endpoints in declared layers are
+  judged. Verified: passes on `layeredsvc` base, fails naming
+  `handler → store skips 1 layer(s)` when a skip edge is introduced.
+- **must_not_reach** — three-valued, exactly as the pressure test demanded:
+  `PROVEN-ABSENT` (no path, frontier fully resolved → silent pass),
+  `NO-PATH-FOUND` (no path but a blind frontier → a **caution**, exit 0, naming
+  where the graph went blind), `REACHABLE` (a path → violation). All three are
+  demonstrated on the committed fixtures (`layeredsvc` proves a read route stays
+  read-only; `blindsvc`'s create route raises the caution at `reflect at
+  encode.Marshal`; its publish route is a reachable violation through the
+  `<dynamic>` edge).
+- **io_budget** — caps reachable *writes* per entrypoint (DB mutations, bus
+  PUBLISH, outbound non-GET); reads do not count. Verified: budget 2 passes on
+  `layeredsvc`, budget 1 fails naming the UpdateUser route's two writes.
+
+CLI: `groundwork fitness <policy> <graph>` (non-zero exit on violation; cautions
+print but do not fail). `make verify` green.
+
+Next: Phase 2 (`review` + `verify-artifact`) — base-vs-branch artifact with the
+three-valued verdict and the recompute-from-source digest.

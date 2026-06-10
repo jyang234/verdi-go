@@ -1,0 +1,11 @@
+{
+  "service": "blindsvc",
+  "version": 1,
+  "must_not_reach": [
+    {
+      "name": "create-route-no-dynamic-publish",
+      "from": ["(*example.com/blindsvc/internal/handler.Server).Create"],
+      "to": ["boundary:bus PUBLISH <dynamic>"]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
@@ -39,6 +40,8 @@ func run(args []string) error {
 		return nil
 	case "reach":
 		return cmdReach(args[1:])
+	case "fitness":
+		return cmdFitness(args[1:])
 	case "policy-check":
 		return cmdPolicyCheck(args[1:])
 	case "help", "-h", "--help":
@@ -53,8 +56,9 @@ func usage() {
 	fmt.Print(`groundwork — deterministic verification over flowmap's call graph
 
 usage:
-  groundwork reach <graph.json> <fqn>     reachability + entrypoint cover + effects for a function
-  groundwork policy-check <policy.json>   load and validate a policy
+  groundwork reach <graph.json> <fqn>          reachability + entrypoint cover + effects for a function
+  groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
+  groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
 
 The graph must be produced by trusted CI (flowmap graph <service>); groundwork
@@ -116,6 +120,68 @@ func cmdReach(args []string) error {
 		}
 	}
 	return nil
+}
+
+// cmdFitness evaluates a policy's invariants against a graph. It prints every
+// finding — violations (which fail the gate) and cautions (the graph abstaining
+// where it cannot prove a negative) — and returns an error so CI exits non-zero
+// when any invariant is broken.
+func cmdFitness(args []string) error {
+	fs := flag.NewFlagSet("fitness", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: groundwork fitness <policy.json> <graph.json>")
+	}
+	p, err := policy.Load(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	g, err := graph.LoadFile(fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	res := fitness.Check(p, graph.NewIndex(g))
+
+	violations, cautions := res.Violations(), res.Cautions()
+	for _, f := range violations {
+		fmt.Printf("⛔ [%s] %s\n", f.Rule, f.Summary)
+		if f.From != "" {
+			fmt.Printf("     %s\n", edgeLine(f))
+		}
+	}
+	for _, f := range cautions {
+		fmt.Printf("⚠️  [%s] %s\n", f.Rule, f.Summary)
+		if f.From != "" {
+			fmt.Printf("     %s\n", edgeLine(f))
+		}
+	}
+	if !res.OK() {
+		return fmt.Errorf("%d invariant violation(s)", len(violations))
+	}
+	fmt.Printf("fitness OK — %d invariant(s) hold, %d caution(s)\n", ruleCount(p), len(cautions))
+	return nil
+}
+
+// edgeLine renders a finding's exact edge or symbol.
+func edgeLine(f fitness.Finding) string {
+	if f.To != "" {
+		return f.From + " → " + f.To
+	}
+	return f.From
+}
+
+// ruleCount is a rough tally of configured invariants, for the OK summary.
+func ruleCount(p *policy.Policy) int {
+	n := len(p.MustNotReach)
+	if p.Layering != nil {
+		n++
+	}
+	if p.IOBudget != nil {
+		n++
+	}
+	return n
 }
 
 // cmdPolicyCheck loads and validates a policy, printing a one-line-per-rule

@@ -10,7 +10,13 @@
     "roots": ["example.com/layeredsvc"],
     "allow": []
   },
-  "must_not_reach": [],
+  "must_not_reach": [
+    {
+      "name": "read-route-stays-read-only",
+      "from": ["(*example.com/layeredsvc/internal/handler.Server).GetUser"],
+      "to": ["boundary:db INSERT", "boundary:db UPDATE", "boundary:db DELETE"]
+    }
+  ],
   "io_budget": {
     "max_writes_per_route": 2
   }
