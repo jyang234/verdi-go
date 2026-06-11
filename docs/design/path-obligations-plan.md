@@ -16,6 +16,9 @@ Scope decisions made when this plan was cut:
   CODEOWNERS-gated document as the classify hints. groundwork never sees rules,
   only findings.
 - **D-OB3 — sequencing**: this lands before the incident-triage work.
+  *Amended by D-GX1* ([`guardrail-extensions-plan.md` §7](guardrail-extensions-plan.md)):
+  the zero-dependency GX-2/GX-1 checks ship first; this track follows
+  immediately after and still precedes incident triage.
 - **D-OB5 — the `obligations` section is the generic findings envelope.** Its
   shape `{rule, kind, fn, site, status, detail}` carries *any* future
   flowmap-side (SSA/CFG-level) check: `kind` is an open registry, not an enum
@@ -106,8 +109,14 @@ state, no interprocedural reasoning in slice 1.
 
 **Site discovery.** For each function in the call graph, scan call instructions
 for acquire / release / require / before targets (matching the rule FQNs the
-same way the classify-hint matcher does). Functions with no relevant site
-produce nothing — the common case, so cost is near zero on rule-free services.
+same way the classify-hint matcher does). **Rule FQNs match both concrete and
+interface-method call targets**: an invoke-mode call through an interface whose
+method FQN matches counts as a site, and a rule anchored on the interface
+method matches the concrete implementations' call sites resolved by the call
+graph. Acquiring through an interface is idiomatic Go — without this, the
+guardrail silently misses the common case; a unit-test row covers each
+direction. Functions with no relevant site produce nothing — the common case,
+so cost is near zero on rule-free services.
 
 **Dead-rule disclosure.** A rule whose anchor (`acquire` / `before`) matches
 **zero call sites** across the whole service emits a single
@@ -137,9 +146,16 @@ Otherwise `VIOLATED`, naming the undominated B site.
 - `recover` is present (control rejoins invisibly);
 - the CFG is irreducible.
 
-**Determinism.** Findings sorted by (rule, fn FQN, site position); positions are
-`file.go:line` from the SSA instruction, stable across runs — same property the
-rest of the pipeline already guarantees, so the artifact digest stays stable.
+**Determinism.** Findings sorted by (rule, fn FQN, site position). Positions
+are `file.go:line` from the SSA instruction's FileSet — and this is the **first
+time source positions enter graph.json**, so they carry a normalization
+requirement the rest of the schema never needed: the FileSet returns
+*absolute* paths, which differ between CI and local checkouts and would break
+byte-identical output across machines. Sites are emitted **module-relative
+with forward slashes**, verified by a test that runs the pipeline from two
+different parent directories and asserts identical bytes. With that, the
+artifact digest stays stable — same property the rest of the pipeline already
+guarantees.
 
 ## 5. graph.json: the `obligations` section
 

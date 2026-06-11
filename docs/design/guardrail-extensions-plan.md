@@ -54,20 +54,35 @@ intraprocedural obligations (function-granular) both miss.
 ```json
 "must_pass_through": [
   {"name": "auth-guards-db",
-   "from": ["entrypoint:http"],
+   "from": ["entrypoint:*"],
    "to": ["boundary:db"],
    "through": ["example.com/svc/internal/authz.Check"],
    "require_proof": true,
-   "allow": [{"from": "...healthz", "to": "boundary:db SELECT health", "reason": "unauthenticated probe"}]}
+   "allow": [{"from": "example.com/svc.main", "reason": "composition root"},
+             {"from": "...Healthz", "to": "boundary:db SELECT health", "reason": "unauthenticated probe"}]}
 ]
 ```
 
+**Selector semantics (v1).** graph.json carries no entrypoint-kind tag, so
+`entrypoint:*` is defined as **all graph sources** (nodes with no first-party
+callers — `Index.Sources`). This is deliberate: an FQN-glob `from` (e.g. "the
+handler package") would let a *new handler package* silently escape the rule —
+the exact agent failure mode this check exists to catch. Sources auto-cover
+new packages; `main` / health probes are exempted via the allow-list.
+Sub-classifying entrypoints by kind (http vs consumer) would require the
+boundary contract as a second fitness input — deferred until a rule actually
+needs the distinction. Plain FQN globs remain valid `from` selectors for
+narrower rules.
+
 **Algorithm.** Remove the `through`-matching nodes from the index; BFS from the
 `from`-matching sources; if a `to`-matching target is still reachable, a bypass
-path exists → `Violation` naming the (source, target) witness pair. Blind
-spots / `<dynamic>` edges on the traversed frontier → `Caution` ("cannot prove
-every path is guarded"), escalated by `require_proof` — exactly
-`must_not_reach`'s discipline.
+path exists → `Violation` naming the (source, target) witness pair, with **one
+shortest bypass path in the finding's detail** (deterministic: BFS over the
+already-sorted adjacency) — the reviewer sees *how* the guard is skipped, not
+just that it is. Per D-OB6 the path is presentation only, never part of the
+finding key. Blind spots / `<dynamic>` edges on the traversed frontier →
+`Caution` ("cannot prove every path is guarded"), escalated by
+`require_proof` — exactly `must_not_reach`'s discipline.
 
 **Build.** New `checkMustPassThrough` in fitness + policy schema + fixture
 route in `layeredsvc` (one guarded route SATISFIED, one bypass VIOLATED, one
@@ -93,7 +108,9 @@ artifact schema + digest change). Gate behavior is policy-controlled:
 Absent from policy → reported in the artifact, non-gating (observe first, the
 post-hoc-ingestion discipline). `gate: true` → a new unallowed blind spot is a
 `Violation` in `verify`. Tiny diff over already-emitted data; no flowmap
-change.
+change. Note: the additive artifact field changes the review digest — harmless
+because `verify-artifact` recomputes from source rather than trusting stored
+digests, but the artifact goldens regenerate in the same commit.
 
 ## 4. GX-3 — concurrency-shape invariants
 
@@ -175,7 +192,10 @@ GX-5 basic card: anytime  │  full card: after OB-2 + GX-1  │  MCP: with IT-4
 ```
 
 The two parallel tracks share no files until `fitness.Check` (one new
-`check*` line each — trivial merges). Recommended order if serialized:
-**GX-2 → GX-1 → OB-0..3 → IT-0..2 → GX-3 → GX-4 → GX-5/IT-3/IT-4** — the
-ratchet and the auth-path guard are the highest guardrail-value-per-line in
-the whole portfolio and have zero dependencies.
+`check*` line each — trivial merges).
+
+**D-GX1 — decided start order (supersedes D-OB3's "obligations first"):
+GX-2 → GX-1 → OB-0..3 → IT-0..2 → GX-3 → GX-4 → GX-5/IT-3/IT-4.** The ratchet
+and the auth-path guard are the highest guardrail-value-per-line in the whole
+portfolio, have zero dependencies, and require no schema lockstep — they ship
+while the SSA track is still in its first phase.
