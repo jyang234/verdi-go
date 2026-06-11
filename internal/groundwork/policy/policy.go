@@ -19,12 +19,15 @@ import (
 
 // Policy is the whole declared architecture of one service.
 type Policy struct {
-	Service      string      `json:"service"`
-	Version      int         `json:"version"`
-	Layers       []Layer     `json:"layers,omitempty"`
-	Layering     *Layering   `json:"layering,omitempty"`
-	MustNotReach []ReachRule `json:"must_not_reach,omitempty"`
-	IOBudget     *IOBudget   `json:"io_budget,omitempty"`
+	Service           string            `json:"service"`
+	Version           int               `json:"version"`
+	Layers            []Layer           `json:"layers,omitempty"`
+	Layering          *Layering         `json:"layering,omitempty"`
+	MustNotReach      []ReachRule       `json:"must_not_reach,omitempty"`
+	MustPassThrough   []PassRule        `json:"must_pass_through,omitempty"`
+	NoConcurrentReach []ConcurrentRule  `json:"no_concurrent_reach,omitempty"`
+	IOBudget          *IOBudget         `json:"io_budget,omitempty"`
+	BlindSpotRatchet  *BlindSpotRatchet `json:"blind_spot_ratchet,omitempty"`
 }
 
 // Layer names an architectural tier and the import-path prefixes that belong to
@@ -72,11 +75,110 @@ type ReachRule struct {
 	RequireProof bool     `json:"require_proof,omitempty"`
 }
 
+// PassRule is a waypoint invariant: every path from a function matching a From
+// pattern to a target matching a To pattern must pass through a function
+// matching a Through pattern — "every entrypoint-to-DB path goes through the
+// auth check". It is the interprocedural sibling of an intraprocedural
+// must-precede obligation, needing only the call graph: remove the Through
+// nodes and any From→To path that remains is a bypass.
+//
+// From supports the special selector "entrypoint:*", which matches every graph
+// source (node with no first-party caller). This is deliberate: naming the
+// handler package instead would let a brand-new handler package silently escape
+// the rule — the exact failure mode the rule exists to catch. Exempt the
+// composition root and probes via Allow, not by narrowing From.
+//
+// RequireProof has must_not_reach's discipline: when no bypass is found but the
+// walked frontier is blind, the default verdict is a caution ("cannot prove
+// every path is guarded"); require_proof turns that into a Violation.
+type PassRule struct {
+	Name         string      `json:"name"`
+	From         []string    `json:"from"`
+	To           []string    `json:"to"`
+	Through      []string    `json:"through"`
+	RequireProof bool        `json:"require_proof,omitempty"`
+	Allow        []Exception `json:"allow,omitempty"`
+}
+
+// ConcurrentRule forbids reaching a target along a path entered via a
+// concurrent edge (a go/defer call site): "no DB writes from goroutines".
+// Catches the agent pattern of "make it async" introducing unsupervised
+// writes. v1 limitation, disclosed: the graph's concurrent flag conflates
+// `go` and `defer` sites; if defer noise appears in practice, the flag is
+// split in flowmap first (a small lockstep change planned then, not now).
+type ConcurrentRule struct {
+	Name         string   `json:"name"`
+	To           []string `json:"to"`
+	RequireProof bool     `json:"require_proof,omitempty"`
+}
+
+// EntrypointSelector is the From selector that expands to every graph source.
+const EntrypointSelector = "entrypoint:*"
+
+// Allowed reports whether a (source, target) bypass pair is covered by the
+// rule's allow-list. An exception side matches exactly or by prefix; an empty
+// side matches anything (an entry must declare at least one side — validated on
+// load).
+func (r *PassRule) Allowed(source, target string) bool {
+	match := func(s, pat string) bool {
+		return pat == "" || s == pat || strings.HasPrefix(s, pat)
+	}
+	for _, a := range r.Allow {
+		if match(source, a.From) && match(target, a.To) {
+			return true
+		}
+	}
+	return false
+}
+
 // IOBudget caps the external write effects reachable from a single entrypoint —
 // the side-effect blowout guard. Writes are boundary edges with an
 // outbound-sync/outbound-async kind; reads do not count.
 type IOBudget struct {
 	MaxWritesPerRoute int `json:"max_writes_per_route"`
+}
+
+// BlindSpotRatchet is the drift ratchet on the graph's own soundness: no new
+// blind spots base→branch without a reviewed allow-list entry. Every other
+// check is only as good as the substrate; unchecked growth in dynamic dispatch
+// erodes them all silently. Review always reports new (unallowed) blind spots;
+// Gate makes them merge-blocking only when Gate is true, so adopters observe
+// first and gate once the baseline is clean.
+type BlindSpotRatchet struct {
+	Gate  bool                 `json:"gate,omitempty"`
+	Allow []BlindSpotException `json:"allow,omitempty"`
+}
+
+// BlindSpotException is one reviewed-and-accepted blind spot. Site matches the
+// blind spot's site exactly or by prefix (the same convention as a layering
+// Exception); an empty Kind matches any kind.
+type BlindSpotException struct {
+	Kind   string `json:"kind,omitempty"`
+	Site   string `json:"site"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Allows reports whether a blind spot with this kind and site is covered by an
+// allow-list entry. A nil ratchet allows nothing (every new blind spot is
+// reported — just never gated).
+func (r *BlindSpotRatchet) Allows(kind, site string) bool {
+	if r == nil {
+		return false
+	}
+	for _, a := range r.Allow {
+		if a.Kind != "" && a.Kind != kind {
+			continue
+		}
+		if site == a.Site || hasPrefix(site, a.Site) {
+			return true
+		}
+	}
+	return false
+}
+
+// GatesBlindSpots reports whether new blind spots block the pre-flight gate.
+func (p *Policy) GatesBlindSpots() bool {
+	return p.BlindSpotRatchet != nil && p.BlindSpotRatchet.Gate
 }
 
 // Load decodes and validates a policy from JSON. Unknown fields are rejected so a
@@ -132,9 +234,56 @@ func (p *Policy) Validate() error {
 		if len(r.From) == 0 || len(r.To) == 0 {
 			return fmt.Errorf("must_not_reach[%d] (%s): from and to are both required", i, r.Name)
 		}
+		if err := noSelector("must_not_reach", r.Name, "to", r.To); err != nil {
+			return err
+		}
+	}
+	for i, r := range p.NoConcurrentReach {
+		if strings.TrimSpace(r.Name) == "" {
+			return fmt.Errorf("no_concurrent_reach[%d]: name is required", i)
+		}
+		if len(r.To) == 0 {
+			return fmt.Errorf("no_concurrent_reach[%d] (%s): to is required", i, r.Name)
+		}
+		if err := noSelector("no_concurrent_reach", r.Name, "to", r.To); err != nil {
+			return err
+		}
+	}
+	passNames := make(map[string]bool, len(p.MustPassThrough))
+	for i, r := range p.MustPassThrough {
+		if strings.TrimSpace(r.Name) == "" {
+			return fmt.Errorf("must_pass_through[%d]: name is required", i)
+		}
+		// Names are identity: findings carry them, and the exceptions audit
+		// attributes suppressed findings to entries by rule name.
+		if passNames[r.Name] {
+			return fmt.Errorf("must_pass_through[%d]: duplicate name %q", i, r.Name)
+		}
+		passNames[r.Name] = true
+		if len(r.From) == 0 || len(r.To) == 0 || len(r.Through) == 0 {
+			return fmt.Errorf("must_pass_through[%d] (%s): from, to and through are all required", i, r.Name)
+		}
+		for j, a := range r.Allow {
+			if a.From == "" && a.To == "" {
+				return fmt.Errorf("must_pass_through[%d] (%s): allow[%d] must declare from and/or to", i, r.Name, j)
+			}
+		}
+		if err := noSelector("must_pass_through", r.Name, "to", r.To); err != nil {
+			return err
+		}
+		if err := noSelector("must_pass_through", r.Name, "through", r.Through); err != nil {
+			return err
+		}
 	}
 	if p.IOBudget != nil && p.IOBudget.MaxWritesPerRoute < 0 {
 		return fmt.Errorf("io_budget.max_writes_per_route must be non-negative")
+	}
+	if p.BlindSpotRatchet != nil {
+		for i, a := range p.BlindSpotRatchet.Allow {
+			if strings.TrimSpace(a.Site) == "" {
+				return fmt.Errorf("blind_spot_ratchet.allow[%d]: site is required", i)
+			}
+		}
 	}
 	return nil
 }
@@ -186,3 +335,17 @@ func (p *Policy) LayerNames() []string {
 }
 
 func hasPrefix(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+
+// noSelector rejects the entrypoint:* selector in a position where it has no
+// defined meaning. Selectors are only valid where a rule kind explicitly
+// expands them (From positions); accepting one anywhere else would make the
+// pattern match nothing — a rule that silently binds nothing, the inert-
+// guardrail failure mode. Fail at load, not at match time.
+func noSelector(kind, rule, field string, patterns []string) error {
+	for _, p := range patterns {
+		if p == EntrypointSelector {
+			return fmt.Errorf("%s (%s): %q is not valid in %s — selectors are only defined for from", kind, rule, EntrypointSelector, field)
+		}
+	}
+	return nil
+}

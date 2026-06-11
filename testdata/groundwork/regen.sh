@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../.."
 
 flowmap() { go run ./cmd/flowmap "$@"; }
 
-for svc in layeredsvc blindsvc; do
+for svc in layeredsvc blindsvc obligsvc; do
 	dir="testdata/groundwork/$svc"
 	out="testdata/groundwork/goldens/$svc.graph.json"
 	flowmap graph "$dir" >"$out"

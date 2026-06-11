@@ -1,0 +1,142 @@
+package ground
+
+import (
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+)
+
+const goldensDir = "../../../testdata/groundwork/goldens"
+
+func index(t *testing.T, name string) *graph.Index {
+	t.Helper()
+	g, err := graph.LoadFile(filepath.Join(goldensDir, name))
+	if err != nil {
+		t.Fatalf("load %s: %v", name, err)
+	}
+	return graph.NewIndex(g)
+}
+
+// GX-5 landed criterion: the binding-rules section names exactly the rules
+// that demonstrably fire on the function — cross-checked by seeding a
+// violation at the function and asserting the named rule catches it.
+func TestBindingRulesActuallyBind(t *testing.T) {
+	ix := index(t, "layeredsvc.graph.json")
+	const sSelectUser = "(*example.com/layeredsvc/internal/store.Store).SelectUser"
+	const hGetUserFast = "(*example.com/layeredsvc/internal/handler.Server).GetUserFast"
+	p := &policy.Policy{
+		Service: "layeredsvc", Version: 1,
+		Layers: []policy.Layer{
+			{Name: "handler", Packages: []string{"example.com/layeredsvc/internal/handler"}},
+			{Name: "app", Packages: []string{"example.com/layeredsvc/internal/app"}},
+			{Name: "store", Packages: []string{"example.com/layeredsvc/internal/store"}},
+		},
+		Layering: &policy.Layering{Roots: []string{"example.com/layeredsvc"}},
+		MustPassThrough: []policy.PassRule{{
+			Name: "app-guards-db", From: []string{policy.EntrypointSelector},
+			To: []string{"boundary:db"}, Through: []string{"(*example.com/layeredsvc/internal/app.Service)"},
+		}},
+	}
+
+	card, err := For(ix, p, sSelectUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.Layer != "store" {
+		t.Errorf("layer = %q, want store", card.Layer)
+	}
+	var namesLayering bool
+	for _, r := range card.Binding {
+		if strings.Contains(r, "layering") {
+			namesLayering = true
+		}
+	}
+	if !namesLayering {
+		t.Fatalf("binding rules %v omit layering", card.Binding)
+	}
+	// Cross-check: seed the violation the card warns about; the same rule fires.
+	g, _ := graph.LoadFile(filepath.Join(goldensDir, "layeredsvc.graph.json"))
+	g.Nodes = append(g.Nodes, graph.Node{FQN: hGetUserFast, Sig: "func()", Tier: 1})
+	g.Edges = append(g.Edges, graph.Edge{From: hGetUserFast, To: sSelectUser, Tier: 2})
+	res := fitness.Check(p, graph.NewIndex(g))
+	var fired []string
+	for _, f := range res.Violations() {
+		fired = append(fired, f.Rule)
+	}
+	for _, want := range []string{"layering", "must_pass_through"} {
+		found := false
+		for _, r := range fired {
+			if r == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("seeded violation did not fire %s (fired: %v)", want, fired)
+		}
+	}
+
+	// The waypoint card names the must_pass_through rule it implements.
+	wcard, err := For(ix, p, "(*example.com/layeredsvc/internal/app.Service).GetProfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waypoint bool
+	for _, r := range wcard.Binding {
+		if strings.Contains(r, "app-guards-db") && strings.Contains(r, "waypoint") {
+			waypoint = true
+		}
+	}
+	if !waypoint {
+		t.Errorf("waypoint binding missing: %v", wcard.Binding)
+	}
+}
+
+// Graph-borne facts bind with no policy at all: obligations and partial-effect
+// facts ride the graph.
+func TestGraphBorneBindingWithoutPolicy(t *testing.T) {
+	ix := index(t, "obligsvc.graph.json")
+	card, err := For(ix, nil, "example.com/obligsvc/internal/app.Transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oblig bool
+	for _, r := range card.Binding {
+		if strings.Contains(r, "tx-must-close") && strings.Contains(r, "VIOLATED") {
+			oblig = true
+		}
+	}
+	if !oblig {
+		t.Fatalf("graph-borne obligation missing from %v", card.Binding)
+	}
+
+	dcard, err := For(ix, nil, "example.com/obligsvc/internal/app.DisburseAndCharge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var partial bool
+	for _, r := range dcard.Binding {
+		if strings.Contains(r, "partial-effect") && strings.Contains(r, "always precedes") {
+			partial = true
+		}
+	}
+	if !partial {
+		t.Fatalf("partial-effect fact missing from %v", dcard.Binding)
+	}
+}
+
+func TestCardDeterministicAndUnknownFQN(t *testing.T) {
+	ix := index(t, "obligsvc.graph.json")
+	a, _ := For(ix, nil, "example.com/obligsvc/internal/app.Transfer")
+	b, _ := For(ix, nil, "example.com/obligsvc/internal/app.Transfer")
+	if !reflect.DeepEqual(a, b) {
+		t.Fatal("non-deterministic card")
+	}
+	if _, err := For(ix, nil, "example.com/nope.Missing"); err == nil {
+		t.Fatal("unknown FQN must error, not return an empty card")
+	}
+}

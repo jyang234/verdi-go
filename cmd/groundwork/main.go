@@ -15,9 +15,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/ground"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
 )
@@ -42,6 +45,12 @@ func run(args []string) error {
 		return nil
 	case "reach":
 		return cmdReach(args[1:])
+	case "triage":
+		return cmdTriage(args[1:])
+	case "ground":
+		return cmdGround(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
 	case "fitness":
 		return cmdFitness(args[1:])
 	case "review":
@@ -52,6 +61,8 @@ func run(args []string) error {
 		return cmdDiff(args[1:])
 	case "verify-artifact":
 		return cmdVerifyArtifact(args[1:])
+	case "exceptions":
+		return cmdExceptions(args[1:])
 	case "policy-check":
 		return cmdPolicyCheck(args[1:])
 	case "help", "-h", "--help":
@@ -67,17 +78,131 @@ func usage() {
 
 usage:
   groundwork reach <graph.json> <fqn>          reachability + entrypoint cover + effects for a function
+  groundwork triage (--frame|--table|--event|--peer) <v> [--fail] [--json] <graph.json>  incident triage card from a symptom
+  groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]  pre-edit grounding card: what binds this function
+  groundwork mcp <graph.json> [--policy <policy.json>]  serve triage/reach/ground/exceptions as MCP tools over stdio
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork verify-artifact <artifact> <policy> <base> <branch>  prove an artifact is authentic (not tampered/stale)
+  groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
   groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
 
 The graph must be produced by trusted CI (flowmap graph <service>); groundwork
 only ever reads it.
 `)
+}
+
+// cmdTriage resolves an incident symptom (stack frame, DB table, bus event, or
+// outbound peer) to suspect functions and prints the triage card: implicated
+// entrypoints, upstream callers, reachable boundary effects, and the blind
+// spots past which the card's claims are unsound. Read-only and exploratory:
+// exit 0 unless the symptom resolves to nothing at all.
+func cmdTriage(args []string) error {
+	frame, hasFrame, args := takeValueFlag(args, "--frame", "-frame")
+	table, hasTable, args := takeValueFlag(args, "--table", "-table")
+	event, hasEvent, args := takeValueFlag(args, "--event", "-event")
+	peer, hasPeer, args := takeValueFlag(args, "--peer", "-peer")
+	fail, args := takeFlag(args, "--fail", "-fail")
+	asJSON, args := takeFlag(args, "--json", "-json")
+	if len(args) != 1 {
+		return fmt.Errorf("usage: groundwork triage (--frame|--table|--event|--peer) <value> [--fail] [--json] <graph.json>")
+	}
+	set := 0
+	for _, has := range []bool{hasFrame, hasTable, hasEvent, hasPeer} {
+		if has {
+			set++
+		}
+	}
+	if set != 1 {
+		// A symptom silently ignored mis-scopes an incident hunt; demand one.
+		return fmt.Errorf("triage: exactly one of --frame, --table, --event, --peer is required (got %d)", set)
+	}
+	g, err := graph.LoadFile(args[0])
+	if err != nil {
+		return err
+	}
+	ix := graph.NewIndex(g)
+
+	var res impact.Resolution
+	switch {
+	case hasFrame:
+		res = impact.ResolveFrame(ix, frame)
+	case hasTable:
+		res = impact.ResolveTable(ix, table)
+	case hasEvent:
+		res = impact.ResolveEvent(ix, event)
+	case hasPeer:
+		res = impact.ResolvePeer(ix, peer)
+	}
+	if len(res.Matches) == 0 && len(res.Possible) == 0 {
+		return fmt.Errorf("triage: symptom resolved to nothing in this graph")
+	}
+
+	suspects := append(append([]string{}, res.Matches...), res.Possible...)
+	card := impact.ForNodes(ix, suspects)
+	if fail {
+		card = impact.ForFault(ix, suspects)
+	}
+	if asJSON {
+		b, err := canonjson.Marshal(struct {
+			Resolution impact.Resolution `json:"resolution"`
+			Card       impact.Card       `json:"card"`
+		}{res, card})
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	if res.Ambiguous {
+		fmt.Printf("symptom is ambiguous — %d candidates, all included:\n\n", len(res.Matches))
+	}
+	if len(res.Possible) > 0 {
+		fmt.Printf("⚠️  %d possible match(es) via <dynamic> boundary effects, included and flagged\n\n", len(res.Possible))
+	}
+	fmt.Print(card.Render())
+	return nil
+}
+
+// cmdGround prints the pre-edit grounding card for one function: identity,
+// neighborhood, reachable effects, the rules that demonstrably bind it, and
+// the blind spots touching those claims. The same rules that gate the merge,
+// surfaced BEFORE the edit — ground → edit → verify, one rule set at both
+// ends. The policy is optional; without it the card carries the graph-borne
+// facts only.
+func cmdGround(args []string) error {
+	policyPath, hasPolicy, args := takeValueFlag(args, "--policy", "-policy")
+	asJSON, args := takeFlag(args, "--json", "-json")
+	if len(args) != 2 {
+		return fmt.Errorf("usage: groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]")
+	}
+	g, err := graph.LoadFile(args[0])
+	if err != nil {
+		return err
+	}
+	var p *policy.Policy
+	if hasPolicy {
+		if p, err = policy.Load(policyPath); err != nil {
+			return err
+		}
+	}
+	card, err := ground.For(graph.NewIndex(g), p, args[1])
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		b, err := canonjson.Marshal(card)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	fmt.Print(card.Render())
+	return nil
 }
 
 // cmdReach reports the bidirectional reachability of one function: who breaks if
@@ -160,21 +285,22 @@ func cmdFitness(args []string) error {
 
 	violations, cautions := res.Violations(), res.Cautions()
 	for _, f := range violations {
-		fmt.Printf("⛔ [%s] %s\n", f.Rule, f.Summary)
-		if f.From != "" {
-			fmt.Printf("     %s\n", edgeLine(f))
-		}
+		printFinding("⛔", f)
 	}
 	for _, f := range cautions {
-		fmt.Printf("⚠️  [%s] %s\n", f.Rule, f.Summary)
-		if f.From != "" {
-			fmt.Printf("     %s\n", edgeLine(f))
-		}
+		printFinding("⚠️ ", f)
 	}
 	if !res.OK() {
 		return fmt.Errorf("%d invariant violation(s)", len(violations))
 	}
-	fmt.Printf("fitness OK — %d invariant(s) hold, %d caution(s)\n", ruleCount(p), len(cautions))
+	// The summary reports what Check actually evaluated: policy rules PLUS the
+	// graph-carried obligation verdicts. "0 invariant(s)" while obligations
+	// were judged would misreport the gate's coverage.
+	summary := fmt.Sprintf("fitness OK — %d invariant(s) hold", ruleCount(p))
+	if n := len(g.Obligations); n > 0 {
+		summary += fmt.Sprintf(", %d obligation verdict(s) judged", n)
+	}
+	fmt.Printf("%s, %d caution(s)\n", summary, len(cautions))
 	return nil
 }
 
@@ -186,9 +312,21 @@ func edgeLine(f fitness.Finding) string {
 	return f.From
 }
 
+// printFinding renders one finding, Detail included — a caution's witness is
+// as load-bearing as a violation's.
+func printFinding(prefix string, f fitness.Finding) {
+	fmt.Printf("%s [%s] %s\n", prefix, f.Rule, f.Summary)
+	if f.From != "" {
+		fmt.Printf("     %s\n", edgeLine(f))
+	}
+	if f.Detail != "" {
+		fmt.Printf("     via %s\n", f.Detail)
+	}
+}
+
 // ruleCount is a rough tally of configured invariants, for the OK summary.
 func ruleCount(p *policy.Policy) int {
-	n := len(p.MustNotReach)
+	n := len(p.MustNotReach) + len(p.MustPassThrough) + len(p.NoConcurrentReach)
 	if p.Layering != nil {
 		n++
 	}
@@ -348,6 +486,32 @@ func cmdVerifyArtifact(args []string) error {
 	return nil
 }
 
+// takeValueFlag removes a value flag ("--name v" or "--name=v") from args in
+// any position, returning its value. One mechanism for every subcommand —
+// stdlib flag.Parse stops at the first positional, so each hand-rolled parser
+// is a usage string waiting to disagree with reality.
+func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		matched := false
+		for _, n := range names {
+			if a == n && i+1 < len(args) {
+				value, found, matched = args[i+1], true, true
+				i++
+				break
+			}
+			if strings.HasPrefix(a, n+"=") {
+				value, found, matched = strings.TrimPrefix(a, n+"="), true, true
+				break
+			}
+		}
+		if !matched {
+			rest = append(rest, a)
+		}
+	}
+	return value, found, rest
+}
+
 // takeFlag removes any of the given boolean flag spellings from args, reporting
 // whether one was present. It lets a flag appear anywhere, including after the
 // positional arguments (Go's flag package stops at the first positional).
@@ -383,6 +547,50 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 	return p, base, branch, nil
 }
 
+// cmdExceptions audits the policy's allow-lists against a graph: every active
+// suppression is listed with its reason, and entries that no longer suppress
+// anything are flagged DEAD — stale excuses that should be deleted before they
+// silently excuse something new. Read-only, exit 0: it informs review.
+func cmdExceptions(args []string) error {
+	asJSON, rest := takeFlag(args, "--json", "-json")
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: groundwork exceptions <policy.json> <graph.json> [--json]")
+	}
+	p, err := policy.Load(rest[0])
+	if err != nil {
+		return err
+	}
+	g, err := graph.LoadFile(rest[1])
+	if err != nil {
+		return err
+	}
+	xs := fitness.Exceptions(p, graph.NewIndex(g))
+	if xs == nil {
+		xs = []fitness.ExceptionStatus{} // canonical [] rather than null
+	}
+	if asJSON {
+		b, err := canonjson.Marshal(xs)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	if len(xs) == 0 {
+		fmt.Println("no allow-list entries configured")
+		return nil
+	}
+	for _, x := range xs {
+		fmt.Println(x)
+	}
+	if dead := fitness.DeadCount(xs); dead > 0 {
+		fmt.Printf("\n%d dead exception(s) — delete them: a stale excuse can silently cover a future violation\n", dead)
+	} else {
+		fmt.Printf("\nall %d exception(s) live and justified\n", len(xs))
+	}
+	return nil
+}
+
 // cmdPolicyCheck loads and validates a policy, printing a one-line-per-rule
 // summary. It is the lint surface for the CODEOWNERS-gated policy file.
 func cmdPolicyCheck(args []string) error {
@@ -407,8 +615,21 @@ func cmdPolicyCheck(args []string) error {
 	if n := len(p.MustNotReach); n > 0 {
 		fmt.Printf("  must_not_reach: %d rule(s)\n", n)
 	}
+	if n := len(p.MustPassThrough); n > 0 {
+		fmt.Printf("  must_pass_through: %d rule(s)\n", n)
+	}
+	if n := len(p.NoConcurrentReach); n > 0 {
+		fmt.Printf("  no_concurrent_reach: %d rule(s)\n", n)
+	}
 	if p.IOBudget != nil {
 		fmt.Printf("  io_budget: max %d write(s) per route\n", p.IOBudget.MaxWritesPerRoute)
+	}
+	if r := p.BlindSpotRatchet; r != nil {
+		mode := "observe-only"
+		if r.Gate {
+			mode = "gating"
+		}
+		fmt.Printf("  blind_spot_ratchet: %s, %d allow-listed exception(s)\n", mode, len(r.Allow))
 	}
 	return nil
 }

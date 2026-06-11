@@ -7,7 +7,9 @@
 package graphio
 
 import (
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 	cg "github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
+	"github.com/jyang234/golang-code-graph/internal/static/obligations"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
 )
 
@@ -28,6 +31,20 @@ type Graph struct {
 	Nodes      []Node                 `json:"nodes"`
 	Edges      []Edge                 `json:"edges"`
 	BlindSpots []blindspots.BlindSpot `json:"blind_spots"`
+
+	// Obligations is the path-obligation disclosure section: per-site verdicts
+	// for the .flowmap.yaml obligation rules, FQN-keyed and separate from the
+	// call-graph edges (a narrow level-2 slice). Omitted entirely when no rules
+	// are configured, so rule-free services emit byte-identical graphs.
+	Obligations []obligations.Finding `json:"obligations,omitempty"`
+
+	// EffectOrder is the partial-effect disclosure (incident-triage plan IT-3):
+	// for each function holding both a committed external effect (bus publish,
+	// DB mutation) and a fallible call, whether the effect can — or always
+	// does — execute before that call. Triage reads it to answer "if this call
+	// faults, what may already be committed?". Like Obligations it rides
+	// unscoped builds only and is omitted when empty.
+	EffectOrder []obligations.EffectOrder `json:"effect_order,omitempty"`
 }
 
 // Node is one first-party function.
@@ -68,6 +85,14 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		g.BlindSpots = gs
 	}
 	rootFns := rootFuncSet(res)
+	base := ""
+	if entry == "" {
+		abs, err := filepath.Abs(res.Dir)
+		if err != nil {
+			return nil, err
+		}
+		base = abs
+	}
 
 	for _, n := range res.Graph.Nodes {
 		fn := n.Func
@@ -76,10 +101,20 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		}
 		// The node's outgoing edges are computed first because they decide the
 		// node's tier: a function is as salient as the most consequential boundary
-		// it directly reaches.
+		// it directly reaches. Committed-effect sites (publish, DB mutation) are
+		// collected in the same pass — this is the one place where the boundary
+		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
+		var effectSites []obligations.EffectSite
 		for _, e := range n.Out {
-			nodeEdges = append(nodeEdges, edgeOf(ext, hints, e, scope)...)
+			edges := edgeOf(ext, hints, e, scope)
+			nodeEdges = append(nodeEdges, edges...)
+			if entry == "" && e.Site != nil && len(edges) == 1 && committedEffect(edges[0].To) {
+				effectSites = append(effectSites, obligations.EffectSite{Label: edges[0].To, Site: e.Site})
+			}
+		}
+		if entry == "" {
+			g.EffectOrder = append(g.EffectOrder, obligations.OrderFacts(fn, effectSites, base)...)
 		}
 		g.Nodes = append(g.Nodes, Node{
 			FQN:      fn.RelString(nil),
@@ -88,6 +123,21 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 			Fallible: fallible(fn),
 		})
 		g.Edges = append(g.Edges, nodeEdges...)
+	}
+
+	// Obligations are a whole-service disclosure (a level-2 slice of the FULL
+	// graph). An entry-scoped view evaluates only the entry's cone, where a
+	// rule anchored elsewhere would read UNMATCHED ("inert") and out-of-cone
+	// verdicts would vanish — scoping artifacts presented as rule deadness. So
+	// the section rides unscoped builds only.
+	if rules := res.Config.Obligations; len(rules) > 0 && entry == "" {
+		var fns []*ssa.Function
+		for _, n := range res.Graph.Nodes {
+			if scope[n.Func] {
+				fns = append(fns, n.Func)
+			}
+		}
+		g.Obligations = obligations.Check(rules, fns, base)
 	}
 
 	sortGraph(g)
@@ -126,6 +176,20 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	default:
 		return nil // a call into unhinted stdlib/third-party code; not part of the view
 	}
+}
+
+// committedEffect reports whether a boundary label is a committed external
+// effect for partial-effect purposes: a bus publish or a DB mutation. Reads
+// and outbound queries are not "committed" — re-running them is safe.
+func committedEffect(label string) bool {
+	if strings.HasPrefix(label, "boundary:bus PUBLISH") {
+		return true
+	}
+	if strings.HasPrefix(label, "boundary:db ") {
+		op := strings.Fields(strings.TrimPrefix(label, "boundary:db "))
+		return len(op) > 0 && (op[0] == "INSERT" || op[0] == "UPDATE" || op[0] == "DELETE")
+	}
+	return false
 }
 
 // nodeTier ranks a function by what it does, not by what it is. A root is its

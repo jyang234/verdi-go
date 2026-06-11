@@ -10,4 +10,5 @@ use (
 	./testdata/fixtures/oapisvc
 	./testdata/groundwork/blindsvc
 	./testdata/groundwork/layeredsvc
+	./testdata/groundwork/obligsvc
 )

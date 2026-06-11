@@ -13,6 +13,13 @@ func TestRunSmoke(t *testing.T) {
 		// caution that does not fail the gate).
 		{"fitness", "../../testdata/groundwork/policies/layeredsvc.json",
 			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
+		// the documented invocation forms, flags trailing the positionals.
+		{"exceptions", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json", "--json"},
+		{"triage", "--table", "users",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
+		{"triage", "../../testdata/groundwork/goldens/loansvc.graph.json",
+			"--fail", "--peer", "credit-bureau"},
 		{"fitness", "../../testdata/groundwork/policies/blindsvc.json",
 			"../../testdata/groundwork/goldens/blindsvc.graph.json"},
 		// review of the good branch is STRUCTURALLY-CLEAR (exit 0).
@@ -51,6 +58,13 @@ func TestRunErrors(t *testing.T) {
 			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
 		{"review", "p", "b"}, // wrong arg count
 		{"verify-artifact", "/nonexistent/artifact.json", "p", "b", "br"},
+		// triage demands exactly one symptom flag: a silently-ignored second
+		// symptom would mis-scope an incident hunt.
+		{"triage", "--frame", "GetUser", "--table", "users",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
+		// a symptom that resolves to nothing is an error, not an empty card.
+		{"triage", "--table", "no_such_table",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
 		// verify blocks on the skip branch (new violation).
 		{"verify", "../../testdata/groundwork/policies/layeredsvc.json",
 			"../../testdata/groundwork/goldens/layeredsvc.graph.json",

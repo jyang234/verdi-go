@@ -27,6 +27,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 	contract := contractChanges(d, baseIx, branchIx)
 	effects := ioEffects(d)
 	reach := reachExisting(d, baseIx, branchIx)
+	blindSpots := newBlindSpots(p, base, branch)
 
 	a := Artifact{
 		Service:       p.Service,
@@ -37,22 +38,61 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		Effects:       effects,
 		Reach:         reach,
 		NewCautions:   newCautions,
+		NewBlindSpots: blindSpots,
 	}
-	a.Verdict = verdict(d, newViolations, contract)
+	a.Verdict = verdict(p, d, newViolations, contract, newCautions, blindSpots)
 	a.Digest = digestOf(a)
 	return a
 }
 
-// verdict applies the three-valued rule: an empty delta abstains; a new violation
-// or a breaking contract change blocks; otherwise the structure is clear.
-func verdict(d graphDelta, violations []Violation, contract []ContractChange) Verdict {
-	if d.empty() {
-		return NoStructuralSignal
-	}
+// verdict applies the three-valued rule: a new violation, a breaking contract
+// change, or (when the policy gates the blind-spot ratchet) a new blind spot
+// blocks; otherwise the artifact abstains only when it carries NO signal at
+// all. Abstention is a statement about the whole artifact, not the node/edge
+// delta: graph sections beyond structure (obligations, blind spots) change on
+// body-only edits, and NO-STRUCTURAL-SIGNAL's render says "the graph has
+// nothing to say" — which must never hide a new caution or disclosure. Any
+// future finding source is covered automatically by the hasSignal form.
+func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, cautions []Violation, blindSpots []BlindSpotDelta) Verdict {
 	if len(violations) > 0 || anyBreaking(contract) {
 		return Block
 	}
+	if p.GatesBlindSpots() && len(blindSpots) > 0 {
+		return Block
+	}
+	hasSignal := !d.empty() || len(cautions) > 0 || len(blindSpots) > 0
+	if !hasSignal {
+		return NoStructuralSignal
+	}
 	return StructurallyClear
+}
+
+// newBlindSpots returns the branch's blind spots absent from the base and not
+// covered by the policy's allow-list — the blind-spot ratchet's drift. Identity
+// is (kind, site); Detail is carried for display but never keys the diff.
+func newBlindSpots(p *policy.Policy, base, branch *graph.Graph) []BlindSpotDelta {
+	key := func(kind, site string) string { return kind + "\x00" + site }
+	baseKeys := map[string]bool{}
+	for _, s := range base.BlindSpots {
+		baseKeys[key(s.Kind, s.Site)] = true
+	}
+	seen := map[string]bool{}
+	var out []BlindSpotDelta
+	for _, s := range branch.BlindSpots {
+		k := key(s.Kind, s.Site)
+		if baseKeys[k] || seen[k] || p.BlindSpotRatchet.Allows(s.Kind, s.Site) {
+			continue
+		}
+		seen[k] = true
+		out = append(out, BlindSpotDelta{Kind: s.Kind, Site: s.Site, Detail: s.Detail})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Site < out[j].Site
+	})
+	return out
 }
 
 // newFindings runs fitness on both graphs and returns the findings present on the
@@ -63,13 +103,13 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 
 	baseKeys := map[string]bool{}
 	for _, f := range baseRes.Findings {
-		baseKeys[findingKey(f)] = true
+		baseKeys[f.Key()] = true
 	}
 	for _, f := range branchRes.Findings {
-		if baseKeys[findingKey(f)] {
+		if baseKeys[f.Key()] {
 			continue
 		}
-		v := Violation{Rule: f.Rule, Summary: f.Summary, From: f.From, To: f.To}
+		v := Violation{Rule: f.Rule, Summary: f.Summary, From: f.From, To: f.To, Detail: f.Detail}
 		if f.Severity == fitness.Violation {
 			violations = append(violations, v)
 		} else {
@@ -77,10 +117,6 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 		}
 	}
 	return violations, cautions
-}
-
-func findingKey(f fitness.Finding) string {
-	return strings.Join([]string{f.Rule, f.From, f.To, f.Summary}, "\x00")
 }
 
 // contractChanges reports inter-service surface movement: entrypoints (Sources)
@@ -185,12 +221,17 @@ func reachExisting(d graphDelta, baseIx, branchIx *graph.Index) []string {
 		sites[e.From] = true
 	}
 
-	hit := map[string]bool{}
+	// One multi-seed reverse BFS over all changed sites, then one Sources
+	// scan: identical to unioning per-site EntrypointCover (a source covers a
+	// site iff it reaches one or is one), without a full BFS per site.
+	reach := setutil.StringSet(branchIx.Reaching(setutil.SortedKeys(sites)...))
 	for site := range sites {
-		for _, ep := range branchIx.EntrypointCover(site) {
-			if existing[ep] {
-				hit[ep] = true
-			}
+		reach[site] = true
+	}
+	hit := map[string]bool{}
+	for _, src := range branchIx.Sources() {
+		if existing[src] && reach[src] {
+			hit[src] = true
 		}
 	}
 	return setutil.SortedKeys(hit)

@@ -1,7 +1,8 @@
 # Idea: path-obligation checks — augmenting the intraprocedural ("buy") leg
 
-**Status:** exploratory idea, not built. This distills a design discussion; it is
-a proposal to weigh, not a committed plan.
+**Status:** refined into a plan-of-record — see
+[`../path-obligations-plan.md`](../path-obligations-plan.md). This document is
+the original design discussion, kept for the reasoning.
 
 Related reading: the build-vs-buy and "enhance the graph vs build a different
 one" arguments in [`../../groundwork/distilled-learnings.md`](../../groundwork/distilled-learnings.md);

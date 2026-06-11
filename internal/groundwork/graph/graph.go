@@ -32,10 +32,45 @@ const dynamicMarker = "<dynamic>"
 // Graph is one call-graph view as emitted by `flowmap graph`. It is the whole,
 // unscoped service graph unless Entrypoint is set.
 type Graph struct {
-	Entrypoint string      `json:"entrypoint,omitempty"`
-	Nodes      []Node      `json:"nodes"`
-	Edges      []Edge      `json:"edges"`
-	BlindSpots []BlindSpot `json:"blind_spots"`
+	Entrypoint  string            `json:"entrypoint,omitempty"`
+	Nodes       []Node            `json:"nodes"`
+	Edges       []Edge            `json:"edges"`
+	BlindSpots  []BlindSpot       `json:"blind_spots"`
+	Obligations []Obligation      `json:"obligations,omitempty"`
+	EffectOrder []EffectOrderFact `json:"effect_order,omitempty"`
+}
+
+// EffectOrderFact is one partial-effect order fact flowmap computed from a
+// function's CFG: the named committed effect can execute before the named
+// fallible call on some path (Always: on every path reaching it). Triage reads
+// these to answer "if this call faults, what may already be committed?" —
+// possibly-committed when Always is false, certainly-committed when true.
+type EffectOrderFact struct {
+	Fn         string `json:"fn"`
+	Effect     string `json:"effect"`
+	EffectSite string `json:"effect_site"`
+	Callee     string `json:"callee"`
+	CalleeSite string `json:"callee_site"`
+	Always     bool   `json:"always,omitempty"`
+}
+
+// Obligation is one path-obligation verdict flowmap computed from a function's
+// SSA CFG against a .flowmap.yaml rule. groundwork only judges it: VIOLATED is
+// a gate-failing finding, CANT-PROVE and UNMATCHED are disclosed abstentions,
+// SATISFIED is the proof and produces no finding. Identity is (rule, fn, site);
+// detail is presentation only.
+//
+// Status is an open vocabulary across the trust boundary: flowmap and
+// groundwork decode this section independently and on purpose, so the judge
+// MUST fail closed on a status it does not recognize (surface a caution,
+// never fall through) — the convention for every graph-carried enum.
+type Obligation struct {
+	Rule   string `json:"rule"`
+	Kind   string `json:"kind"`
+	Fn     string `json:"fn,omitempty"`
+	Site   string `json:"site,omitempty"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Node is one first-party function.

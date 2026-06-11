@@ -1,98 +1,169 @@
-# flowmap
+# flowmap + groundwork
 
-A dual-pipeline PR-verification system for Go microservices. A human (via
-CODEOWNERS) is the oracle — there is no AI in the verdict path.
+**Deterministic guardrails for AI-speed Go development.**
 
-- **Static pipeline** — from a service's source, build a call graph
-  (`go/packages` → `go/ssa` → `go/callgraph`) and derive a *gated* inter-service
-  **boundary contract** (published/consumed events, external HTTP/RPC
-  dependencies, entry points) plus a **blind-spot manifest**. The full call graph
-  + signatures are a *generated, non-gated* view. Gate = currency (regenerate,
-  `git diff --exit-code`).
-- **Behavioral pipeline** — service authors write in-process flow tests against
-  flowmap; it captures OTel traces, canonicalizes them into a deterministic IR,
-  commits **golden snapshots**, and gates via snapshot-assertion (`-update` to
-  rebase).
+When code is written faster than humans can carefully read it — by coding
+agents, or simply by a team moving quickly — the reviewer's question stops
+being "is every line right?" and becomes "*what am I actually being handed,
+and what still holds?*" This repo answers that question with **computed,
+reproducible evidence instead of prose**: no AI sits in any verdict, every
+output is a pure function of its inputs, and anything the tools cannot prove
+is *disclosed* rather than silently passed.
 
-Both pipelines share a **tier-map classifier** (features → tier 1–4) and a strict
-**determinism discipline** (sort everything; canonical JSON). A **structural
-diff** turns IR changes into a prioritized change set, and a **coverage-delta**
-surfaces boundary effects no test exercises.
+Two cooperating tools, one interface between them:
 
-## Status
+```
+   source code ──► flowmap ──►  graph.json            ─┐
+   (a service)     (producer)   boundary-contract.json │──► groundwork ──► verdicts,
+                                golden flow snapshots  │    (the judge)    cards, gates
+                  policy.json (human-authored) ────────┘
+```
 
-Under construction, phase by phase. See:
+- **flowmap** *produces* facts from a service: its static call graph with
+  typed boundary effects (`go/packages → go/ssa → go/callgraph`), a gated
+  inter-service **boundary contract**, per-function **path-obligation
+  verdicts** and **partial-effect facts** computed from each function's
+  control-flow graph, and **behavioral golden snapshots** captured from real
+  OpenTelemetry traces.
+- **groundwork** *judges* those facts against a human-authored policy:
+  architectural fitness gates, computed MR review artifacts with an
+  unfakeable digest, incident-triage cards, pre-edit grounding cards, and an
+  MCP server that puts all of it in an agent's hands.
 
-- `docs/` — the seven component specifications (the source of truth).
-- `docs/design/implementation_plan.md` — the phased plan, with per-phase
-  verification.
-- `testdata/fixtures/loansvc` — a complete worked-example service, with its
-  committed boundary contract and golden snapshots.
+A human (via CODEOWNERS) is always the oracle. The tools never guess: every
+claim is either **proven**, **violated with a witness**, or **abstained-with-
+a-reason** — silence is never a silent pass.
+
+## Why you want this
+
+**If you review code (or merge an agent's code):** `groundwork review` hands
+you a verdict computed *from the code's structure* — BLOCK, STRUCTURALLY-CLEAR,
+or NO-STRUCTURAL-SIGNAL — with the exact new violations, contract changes, and
+I/O effects the change introduces. The author cannot embellish it: the
+artifact carries a digest any verifier recomputes from the trusted graphs.
+The three-valued verdict is the point — "the graph has nothing to say" is
+stated outright, never dressed up as "looks fine."
+
+**If you own architecture:** the policy turns the rules in your head into
+fail-closed CI checks — layering, "an unauthenticated path must never reach
+the charge API" (`must_not_reach`), "every entrypoint-to-DB path goes through
+the auth check" (`must_pass_through`, with a selector that automatically binds
+brand-new handler packages), "no DB writes from goroutines"
+(`no_concurrent_reach`), per-route write budgets, and a **blind-spot ratchet**
+that stops dynamic dispatch from quietly eroding the graph everything else
+depends on. Exceptions are first-class and *audited*: `groundwork exceptions`
+flags allow-list entries that no longer excuse anything.
+
+**If you own domain invariants no generic linter can know:** path obligations
+prove lifecycle shapes over *every* CFG path — "after `BeginTx`, every path
+commits or rolls back", "the audit write precedes the publish". A SATISFIED
+verdict is a universal proof no test suite can produce; a VIOLATED names the
+leaking exit; a CANT-PROVE tells you exactly why the claim would be unsound.
+`staticcheck` knows `*sql.Rows`; only you know your event bus — these rules
+are keyed to *your* named functions.
+
+**If you carry a pager:** `groundwork triage` is the incident front door.
+Hand it a symptom — a stack frame, a corrupted table, a missing event, a slow
+peer — and get the bounded suspect set, the implicated routes, and (with
+`--fail`) the partial-effect answer responders are desperate for: *"if the
+charge call faulted, `loan.approved` was already published — you may have
+approved-but-uncharged loans."* Then `flowmap behavior ingest` takes the
+incident's own OTel trace and pinpoints where it diverged from known-good.
+The graph narrows; the telemetry locates. No test cases authored, ever.
+
+**If you build with coding agents:** `groundwork mcp` serves all of it as MCP
+tools, and `ground` closes the loop *before* the edit: the grounding card
+tells the agent (or you) exactly which rules bind the function it is about to
+touch — derived with the same matchers the gates use, so the card never
+promises a guardrail that doesn't bind. The edit loop becomes
+**ground → edit → verify**, one rule set at both ends; deterministic
+prevention is cheaper than deterministic rejection.
+
+## Five-minute tour
+
+```console
+# Produce the facts (flowmap, the trusted side):
+$ flowmap graph svc/ > graph.json          # call graph + boundary effects + obligations
+$ flowmap boundary svc/                    # gated inter-service contract
+
+# Explore and gate (groundwork, the judge):
+$ groundwork reach graph.json '(*svc/internal/store.Store).Tx'   # blast radius of one function
+$ groundwork fitness policy.json graph.json                      # do the invariants hold?
+$ groundwork verify policy.json base.json branch.json            # fail-closed pre-merge gate
+$ groundwork review policy.json base.json branch.json            # the reviewer's computed artifact
+
+# During an incident:
+$ groundwork triage --table users graph.json                     # who touches it, what's implicated
+$ groundwork triage --fail --peer credit-bureau graph.json       # what-if: peer down
+
+# Before an edit (human or agent):
+$ groundwork ground graph.json '<fqn>' --policy policy.json      # what binds this function
+$ groundwork mcp graph.json --policy policy.json                 # the same lenses, as MCP tools
+```
+
+Every command is read-only over CI-generated artifacts, byte-deterministic,
+and honest about its limits — see the blind-spot and `<dynamic>` disclosures
+threaded through every output.
+
+## What's where
+
+| You want to… | Read |
+|---|---|
+| Understand the concepts and every groundwork surface | [`docs/groundwork/usage.md`](docs/groundwork/usage.md) — the practical guide, primer included |
+| Wire flowmap into a service (OTel → contract → flow tests → CI) | [`docs/adopting-flowmap.md`](docs/adopting-flowmap.md) |
+| Understand *why* it is built this way (thesis, failure modes, pressure tests) | [`docs/groundwork/README.md`](docs/groundwork/README.md) and [`docs/groundwork/distilled-learnings.md`](docs/groundwork/distilled-learnings.md) |
+| See the component specifications (the source of truth) | `docs/*.md` (tier map, static extractor, canonicalization, capture harness, golden diff) |
+| Follow the feature plans and their validation criteria | `docs/design/*-plan.md` |
+| A complete worked example service | `testdata/fixtures/loansvc` (and `testdata/groundwork/{layeredsvc,blindsvc,obligsvc}`) |
 
 ## Layout
 
 ```
-cmd/flowmap/   CLI: boundary [--check] | graph [--entry] | diff a b | coverage [--flows D] | version
-harness/       PUBLIC: in-process capture harness for flow tests
-capture/       PUBLIC: the raw-trace model — the harness's output and canon's input
-flow/          PUBLIC: the flow test DSL
-ir/            PUBLIC: the authoritative canonical IR (golden file shape)
-internal/      the analysis engine (config, canonjson, glob, model, tiermap, static/, canon/, diff/, coverage/, …)
-testdata/      hermetic fixture service (its own module) + committed goldens
+cmd/flowmap/     CLI: boundary [--check] | graph [--entry] | diff | coverage | behavior ingest | version
+cmd/groundwork/  CLI: reach | triage | ground | fitness | review | verify | diff | verify-artifact
+                      | exceptions | policy-check | mcp | version
+harness/ capture/ flow/ ir/   PUBLIC: in-process flow-test capture + the canonical IR
+internal/        the engines (static/, canon/, groundwork/, …)
+testdata/        hermetic fixture services (own modules) + committed goldens
 ```
 
-## Adopting flowmap
+## The gates (and how to keep them green)
 
-`docs/adopting-flowmap.md` is the end-to-end recipe for wiring flowmap into a
-service (instrument with OTel → commit the boundary contract → write a flow test
-→ check coverage → wire CI/CODEOWNERS). The `testdata/fixtures/loansvc` fixture
-is a complete worked example.
-
-## groundwork — verification over the graph
-
-`groundwork` is a companion tool that *consumes* flowmap's graph and boundary
-contract to compute deterministic, fail-closed checks: architectural fitness
-functions (layering, must-not-reach, I/O budget), a pre-flight `verify` gate
-(new violations, scope creep, breaking contract), computed MR `review` artifacts
-with an unfakeable digest, and a boundary-contract `diff`. No AI in the verdict —
-every output is a pure function of `(policy, graph, delta)`.
-
-See **`docs/groundwork/usage.md`** for the commands and a worked example, and
-`docs/groundwork/README.md` for the full design record. CLI: `cmd/groundwork`.
-
-## The two gates (and how to keep them green)
-
-flowmap has **two distinct gate mechanisms**, unified only by CODEOWNERS routing
-and the human-as-oracle:
+Distinct gate mechanisms, unified by CODEOWNERS routing and the
+human-as-oracle:
 
 - **Currency gate (static).** The boundary contract is a pure function of the
   code, so CI regenerates it and fails on drift:
-  `flowmap boundary --check <service-dir>`. Author workflow: after a boundary
-  change, run `flowmap boundary <service-dir>` and commit the updated
-  `.flowmap/boundary-contract.json` alongside the code.
-- **Snapshot-assertion gate (behavioral).** The goldens are a function of
-  *running* the code, so they ride `go test`; a stale golden fails the suite.
-  Author workflow: after an intended behavior change, re-run the flow test with
-  `-update` to rebase `*.golden.json` + `*.flow.md`, and commit them.
+  `flowmap boundary --check <service-dir>`. After a boundary change, rerun
+  `flowmap boundary` and commit the updated contract alongside the code.
+- **Snapshot-assertion gate (behavioral).** Golden flow snapshots ride
+  `go test`; after an intended behavior change, rebase with `-update` and
+  commit.
+- **Structural gate (groundwork).** CI regenerates base and branch graphs from
+  checked-out source and runs `groundwork verify` — new violations, scope
+  creep, and breaking contract changes fail closed. The graphs MUST come from
+  trusted CI, never from the author under review; that is the load-bearing
+  trust boundary (see [`docs/groundwork/usage.md`](docs/groundwork/usage.md)).
 
-CODEOWNERS routes both gated artifacts, `.flowmap.yaml`, and the per-flow test
-files to a human reviewer — a golden/contract change is unbypassable.
+CODEOWNERS routes the gated artifacts, `.flowmap.yaml`, and `policy.json` to a
+human reviewer — a contract, golden, rule, or allow-list change is
+unbypassable.
 
 ## Coverage
 
 `flowmap coverage --flows <goldens-dir> <service-dir>` reports the boundary
-effects (published/consumed events, external dependencies) that no committed
-flow exercises — the delta between the static boundary (all reachable effects)
-and the union of behavioral snapshots (tested effects). It is informational, not
-a gate: a gap means "write a flow for this," not "fail the build."
+effects no committed flow exercises — the delta between what the code *can*
+do and what the tests *prove* it does. Informational, not a gate: a gap means
+"write a flow for this."
 
 ## Schema versioning & regeneration
 
-Gated artifacts carry a schema version (e.g. the boundary contract's
-`flowmap.boundary/v1`). When flowmap changes a canonical form, it bumps the
-version and **all adopting services must regenerate** the affected artifacts
-(`flowmap boundary` for contracts, `go test -update` for goldens) in a
-coordinated change — the real blast radius, made explicit rather than silent.
+Gated artifacts carry a schema version (e.g. `flowmap.boundary/v1`). When a
+canonical form changes, the version bumps and all adopting services regenerate
+the affected artifacts in a coordinated change — the real blast radius, made
+explicit rather than silent. The graph JSON is decoded strictly on the
+groundwork side (unknown fields fail loudly), so producer and judge are
+deployed in lockstep by design.
 
 ## Develop
 

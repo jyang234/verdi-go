@@ -15,6 +15,54 @@ adversarial pressure-testing behind the design), see the
 
 ---
 
+## The concepts in five minutes
+
+If you are new to the toolset, these seven ideas are everything the rest of
+this page builds on.
+
+**The call graph.** flowmap compiles your service the same way the Go
+toolchain does, then records *which function can call which* — every node is
+one of your functions, every edge one possible call. This is the map of what
+your code **can** do, computed from the code itself, with no tests run and no
+instrumentation added.
+
+**Boundary effects.** Where your code touches the outside world, the edge is
+typed: `boundary:db UPDATE users`, `boundary:bus PUBLISH loan.approved`,
+`boundary:credit-bureau GET /score/{id}`. Reachability plus boundary effects
+is what turns "this function changed" into "these routes can now write that
+table" — the question a reviewer actually has.
+
+**Entrypoints and reachability.** Functions nobody calls are where requests
+enter: HTTP handlers, bus consumers, `main`. Walking edges *backward* from a
+function tells you which entrypoints it is live behind (its blast radius);
+walking *forward* tells you everything it can touch. Most groundwork surfaces
+are compositions of these two walks.
+
+**Tiers.** Every node and edge carries a salience tier (1 = most consequential
+— publishes, writes, inbound routes; 4 = noise). Tiers keep cards and
+snapshots focused on what matters.
+
+**Blind spots, disclosed.** Static analysis has limits — reflection, `unsafe`,
+dynamically-named topics, high-fan-out dispatch. flowmap *records* every such
+limit in the graph (`blind_spots[]`, `<dynamic>` markers), and every
+groundwork claim that crosses one says so. This is the honesty discipline:
+you always know where the map stops being trustworthy.
+
+**Three-valued verdicts.** Nothing here answers only pass/fail. Checks answer
+**proven** / **violated (with a witness)** / **cannot-prove (with the
+reason)**, and reviews answer BLOCK / STRUCTURALLY-CLEAR /
+NO-STRUCTURAL-SIGNAL. The third value is the load-bearing one: a tool that
+cannot prove something *says so* instead of passing silently — so green means
+proven, never just "nothing noticed."
+
+**Determinism.** Every output is a pure function of its inputs — same graph,
+same policy, same answer, byte-for-byte, on any machine. That is what makes a
+digest meaningful, a gate reproducible, and a disagreement debuggable. It is
+also the acceptance bar for every feature in this toolset: anything heuristic
+or sampled lives outside the verdict path, by design.
+
+---
+
 ## How groundwork and flowmap fit together
 
 flowmap and groundwork are **two separate programs with one interface** — the
@@ -69,11 +117,22 @@ own homework — so it is declarative and validated strictly on load.
      "from": ["(*example.com/layeredsvc/internal/handler.Server).GetUser"],
      "to":   ["boundary:db INSERT", "boundary:db UPDATE", "boundary:db DELETE"]}
   ],
-  "io_budget": {"max_writes_per_route": 2}
+  "must_pass_through": [
+    {"name": "app-guards-db",
+     "from": ["entrypoint:*"],
+     "to":   ["boundary:db"],
+     "through": ["(*example.com/layeredsvc/internal/app.Service)"],
+     "allow": [{"from": "example.com/layeredsvc.main", "reason": "composition root"}]}
+  ],
+  "io_budget": {"max_writes_per_route": 2},
+  "blind_spot_ratchet": {
+    "gate": false,
+    "allow": [{"kind": "reflect", "site": "example.com/layeredsvc/internal/codec", "reason": "audited decoder"}]
+  }
 }
 ```
 
-It declares three invariant families:
+It declares six invariant families:
 
 - **`layers`** — ordered top→bottom; a call may stay within a layer or descend
   one, never skip a layer or call upward. `roots` exempts the composition root
@@ -84,9 +143,32 @@ It declares three invariant families:
 - **`must_not_reach`** — negative reachability invariants (the all-paths safety
   class). Add `"require_proof": true` to a high-stakes rule to make it fail closed
   when the graph cannot prove absence.
+- **`must_pass_through`** — waypoint invariants: every path from a `from`
+  source to a `to` target must pass through a `through` function ("every
+  entrypoint-to-DB path goes through the auth check"). `from` supports
+  `entrypoint:*`, which matches every graph source — deliberately, so a
+  brand-new handler package cannot silently escape the rule; exempt the
+  composition root via `allow`, not by narrowing `from`. A violation names the
+  bypassing (source, target) pair and shows one shortest bypass path; every
+  bypassing pair is reported, so a second bypass added on a branch surfaces as
+  a *new* violation. Three-valued like `must_not_reach`: "no bypass over a
+  blind frontier" is a caution, escalated by `require_proof`.
+- **`no_concurrent_reach`** — no target matching `to` may be reached along a
+  path entered via a concurrent edge (a go/defer call site): "no DB writes
+  from goroutines" — the agent pattern of "make it async" introducing
+  unsupervised effects. Same three-valued discipline and `require_proof`
+  escalation. Disclosed v1 limit: the concurrent flag conflates `go` and
+  `defer` sites.
 - **`io_budget`** — caps external *writes* reachable from a route (the
   side-effect-blowout guard); reads don't count, and the composition root is
   exempt.
+- **`blind_spot_ratchet`** — the drift ratchet on the graph's *own* soundness:
+  no new blind spots base→branch without a reviewed `allow` entry. Every other
+  check is only as good as the substrate, so unchecked growth in dynamic
+  dispatch erodes them all silently. `review` always reports new blind spots
+  (even with no ratchet configured); `gate: true` additionally makes them
+  block `verify` — observe first, gate once the baseline is clean. The ratchet
+  is one-directional: pre-existing and removed blind spots never fire it.
 
 Validate one with `policy-check`:
 
@@ -96,7 +178,9 @@ policy for "layeredsvc" (v1) — valid
   layers (top→bottom): handler → app → store
   layering: 0 allow-listed exception(s), 1 root package(s)
   must_not_reach: 1 rule(s)
+  must_pass_through: 1 rule(s)
   io_budget: max 2 write(s) per route
+  blind_spot_ratchet: observe-only, 1 allow-listed exception(s)
 ```
 
 ---
@@ -105,6 +189,10 @@ policy for "layeredsvc" (v1) — valid
 
 ```
 groundwork reach <graph> <fqn>                          explore one function's blast radius
+groundwork triage (--frame|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
+groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding card: what binds this function
+groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
+groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
 groundwork fitness <policy> <graph>                     evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
 groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
@@ -297,3 +385,210 @@ cannot tell, because it faithfully judges whatever graph it is handed.
 See [`pressure-test.md`](pressure-test.md) for the adversarial analysis that
 established this, and [`implementation-plan.md`](implementation-plan.md) for the
 phased build and current status.
+
+---
+
+## Path obligations (rules live in `.flowmap.yaml`, not the policy)
+
+Domain lifecycle rules — "our transaction must commit or roll back on every
+path", "the audit write must precede the publish" — are evaluated by flowmap,
+because only flowmap holds each function's SSA control-flow graph. The rules
+ride the service's CODEOWNERS-gated `.flowmap.yaml`:
+
+```yaml
+obligations:
+  - name: tx-must-close
+    acquire: "example.com/svc/internal/store#BeginTx"
+    release:
+      - "example.com/svc/internal/store#Commit"
+      - "example.com/svc/internal/store#Rollback"
+  - name: audit-before-publish
+    require: "example.com/svc/internal/audit#Write"
+    before: "example.com/svc/internal/eventbus#Publish"
+```
+
+`flowmap graph` emits per-site verdicts into graph.json's `obligations`
+section; groundwork judges them like any other finding:
+
+- `VIOLATED` → gate-failing violation, with the leaking exit as witness.
+- `SATISFIED` → silent: the universal proof ("no modeled path leaks") a test
+  suite cannot produce. A later SATISFIED→VIOLATED flip surfaces in
+  `review`/`verify` as a *new* violation — the drift ratchet at branch
+  granularity.
+- `CANT-PROVE` → caution: the shape claim would be unsound (resource ownership
+  leaves the function, or `recover` is present), disclosed rather than passed.
+- `UNMATCHED` → caution: the rule's anchor matches no call site — an inert
+  guardrail you must not mistake for protection.
+
+The check is value-blind: it proves the *shape* of the lifecycle, not that the
+right value was released. A release performed inside an unlisted helper
+reports VIOLATED; the fix is naming the helper as a release ref.
+
+---
+
+## Incident triage (`triage`)
+
+The incident front door: resolve a symptom to suspect functions and read the
+blast radius off the graph — throwaway interrogation, no test authoring.
+
+```console
+$ groundwork triage --table users graph.json          # corrupted table
+$ groundwork triage --frame 'pkg.(*T).Method' graph.json   # panic frame
+$ groundwork triage --fail --peer credit-bureau graph.json # what-if: peer down
+$ groundwork triage --fail --event loan.approved graph.json
+```
+
+The card lists the suspects, the implicated entrypoints (their cover), the
+upstream callers, the reachable boundary effects, and every blind spot on a
+traversed path — the card says where its own claims stop being sound. An
+ambiguous symptom returns all candidates (never a guess); an effect the graph
+could not name statically (`<dynamic>`) is offered as a flagged *possible*
+match. The card is the map (what the suspects could touch), not the route
+taken: with an OTel trace of the failing request, `flowmap behavior ingest`
+locates the actual divergence inside the suspect set. Triage interrogates the
+graph of the *deployed* commit — a stale map mis-triages.
+
+---
+
+## Suppression audit (`exceptions`)
+
+Allow-lists accumulate. `groundwork exceptions <policy> <graph>` lists every
+active suppression (layering, `must_pass_through`, `blind_spot_ratchet`) with
+its reason, and flags **DEAD** entries — ones that no longer suppress anything
+in the current graph. Delete them: a stale excuse can silently cover a future
+violation. Read-only, exit 0; the measurable target is a dead count of zero.
+
+---
+
+## Pre-edit grounding (`ground`) and the MCP surface (`mcp`)
+
+Deterministic prevention is cheaper than deterministic rejection. The ground
+card surfaces, *before* an edit, the same rules that will gate the merge after
+it:
+
+```console
+$ groundwork ground graph.json '(*example.com/svc/internal/store.Store).Tx' --policy policy.json
+```
+
+The card carries the function's identity (signature, tier, policy layer), its
+one-hop neighborhood and entrypoint cover, the boundary effects it can reach,
+the **binding rules** — layering membership, `must_not_reach` sources,
+`must_pass_through` waypoints, `no_concurrent_reach` targets, plus the
+graph-borne obligation verdicts and partial-effect facts that bind with no
+policy at all — and every blind spot touching those claims. Binding rules are
+derived with the exact matchers the checks use, so the card never promises a
+guardrail that does not bind.
+
+`groundwork mcp <graph.json> [--policy <policy.json>]` serves four tools over
+MCP stdio (newline-delimited JSON-RPC, protocol 2024-11-05, no third-party
+dependencies): `ground`, `reach`, `triage` (with the `fail` what-if framing,
+including effects possibly committed before the fault), and `exceptions`. The
+agent's edit loop becomes ground → edit → verify with one rule set at both
+ends; the incident loop becomes triage → narrow → `flowmap behavior ingest`.
+The server only ever reads the CI-generated graph it was started with — the
+same trust posture as every other groundwork surface.
+
+---
+
+## Integration guide
+
+How to wire the toolset in, end to end. The short version: flowmap runs where
+you trust the code checkout (CI), groundwork runs wherever someone needs an
+answer, and the only state between them is canonical JSON.
+
+### CI: the structural gate
+
+```yaml
+# In the PR pipeline. The graphs MUST be generated here, from checked-out
+# source — never accepted from the branch author (see "The trust boundary").
+- name: structural gate
+  run: |
+    git fetch origin "$BASE_REF"
+    git worktree add /tmp/base "origin/$BASE_REF"
+    flowmap graph /tmp/base/services/payments  > base.json
+    flowmap graph       services/payments      > branch.json
+    groundwork verify policy.json base.json branch.json   # exits non-zero on BLOCK
+    groundwork review policy.json base.json branch.json --json > review-artifact.json
+```
+
+Post `groundwork review`'s text form as the PR comment; archive the `--json`
+artifact so any later verifier can run
+`groundwork verify-artifact <artifact> <policy> <base> <branch>` and prove it
+authentic. Keep `policy.json`, `.flowmap.yaml`, and the gated artifacts under
+CODEOWNERS — the rules are reviewed exactly like code, and an agent under
+review can never author its own guardrails.
+
+Recommended cadence for adopting checks: start every new rule **observe-only**
+(`blind_spot_ratchet.gate: false`, cautions instead of `require_proof`), watch
+a week of PRs, then tighten. A gate the team trusts is worth ten gates they
+route around.
+
+### Exit codes and outputs
+
+| Command | Exit non-zero when | Machine output |
+|---|---|---|
+| `fitness` | any Violation finding | text findings (cautions never fail it) |
+| `verify` | new violation, scope escape, breaking contract, gated blind spot | `--json` GateResult with digest |
+| `review` | verdict is BLOCK | `--json` canonical artifact with digest |
+| `diff` | breaking contract change | text |
+| `verify-artifact` | artifact tampered or stale | text status |
+| `reach`/`triage`/`ground`/`exceptions` | only on bad input | `--json` canonical cards |
+
+Everything `--json` is canonical (sorted keys, stable bytes) and safe to diff,
+cache, or hash.
+
+### Incident runbook hook
+
+Archive `graph.json` per deployed commit (it is small, canonical, and
+digest-bearing — the same CI job that gates can upload it). The first three
+commands of an incident:
+
+```console
+$ groundwork triage --frame "$(head -1 panic.txt)"  graph-$DEPLOYED_SHA.json
+$ groundwork triage --fail --peer credit-bureau     graph-$DEPLOYED_SHA.json
+$ flowmap behavior ingest --flows-dir flows/ incident-trace.otlp.json
+```
+
+Triage interrogates the *deployed* commit's graph — a stale map mis-triages,
+which is why the per-deploy archive matters.
+
+### Agents: the MCP server
+
+Serve the lenses to a coding agent (Claude Code shown; any MCP client works):
+
+```json
+// .mcp.json in the repo the agent works on
+{
+  "mcpServers": {
+    "groundwork": {
+      "command": "groundwork",
+      "args": ["mcp", "ci-artifacts/graph.json", "--policy", "policy.json"]
+    }
+  }
+}
+```
+
+The agent gets four tools: `ground` (call before editing — what binds this
+function), `reach` (blast radius), `triage` (incident card, with `fail` for
+the what-if framing and partial-effect answers), and `exceptions` (allow-list
+audit). The intended loop is **ground → edit → verify**: the same rule set
+that will gate the merge, surfaced before the edit is made. Tool failures
+come back as readable tool results the agent can correct from, never protocol
+errors.
+
+### Consuming graph.json directly
+
+The graph is a stable, versioned interface — you can build your own lenses on
+it. Top-level sections:
+
+| Section | What it is | Notes |
+|---|---|---|
+| `nodes[]` | `{fqn, sig, tier, fallible}` per first-party function | sorted by fqn |
+| `edges[]` | `{from, to, tier, boundary?, concurrent?}`; `to` is an FQN or a `boundary:` label | `<dynamic>` in a label = unresolvable target, disclosed |
+| `blind_spots[]` | `{kind, site, detail}` — where the graph's knowledge stops | the soundness frontier |
+| `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
+| `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |
+
+Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
+have not been taught about should fail loudly, not drop fields silently.
+Producer and judge deploy in lockstep — that is a feature.
