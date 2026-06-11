@@ -224,3 +224,45 @@ func mkdirAll(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 }
+
+func TestLoadObligations(t *testing.T) {
+	c, err := Load([]byte(`
+obligations:
+  - name: tx-must-close
+    acquire: "example.com/svc/internal/store#BeginTx"
+    release: ["example.com/svc/internal/store#Commit", "example.com/svc/internal/store#Rollback"]
+  - name: audit-before-publish
+    require: "example.com/svc/internal/audit#Write"
+    before: "example.com/svc/internal/eventbus#Publish"
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Obligations) != 2 {
+		t.Fatalf("obligations = %d, want 2", len(c.Obligations))
+	}
+	if k := c.Obligations[0].Kind(); k != KindMustRelease {
+		t.Errorf("rule 0 kind = %s, want must-release", k)
+	}
+	if k := c.Obligations[1].Kind(); k != KindMustPrecede {
+		t.Errorf("rule 1 kind = %s, want must-precede", k)
+	}
+}
+
+func TestLoadRejectsBadObligations(t *testing.T) {
+	cases := map[string]string{
+		"no name":        "obligations:\n  - acquire: \"p#A\"\n    release: [\"p#R\"]\n",
+		"duplicate name": "obligations:\n  - name: r\n    acquire: \"p#A\"\n    release: [\"p#R\"]\n  - name: r\n    require: \"p#A\"\n    before: \"p#B\"\n",
+		"mixed kinds":    "obligations:\n  - name: r\n    acquire: \"p#A\"\n    release: [\"p#R\"]\n    before: \"p#B\"\n",
+		"neither kind":   "obligations:\n  - name: r\n",
+		"empty release":  "obligations:\n  - name: r\n    acquire: \"p#A\"\n",
+		"no before":      "obligations:\n  - name: r\n    require: \"p#A\"\n",
+		"bare package":   "obligations:\n  - name: r\n    acquire: \"example.com/p\"\n    release: [\"p#R\"]\n",
+		"empty symbol":   "obligations:\n  - name: r\n    acquire: \"p#\"\n    release: [\"p#R\"]\n",
+	}
+	for name, doc := range cases {
+		if _, err := Load([]byte(doc)); err == nil {
+			t.Errorf("%s: Load() = nil, want error", name)
+		}
+	}
+}

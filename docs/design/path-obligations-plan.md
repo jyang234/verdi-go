@@ -138,13 +138,29 @@ uncovered exit's position as the witness. Implicit runtime panics are ignored
 site dominates it (A in a dominating block, or earlier in the same block).
 Otherwise `VIOLATED`, naming the undominated B site.
 
-**Abstention (`CANT-PROVE`) triggers — disclosed, never silent:**
+**Abstention (`CANT-PROVE`) triggers — disclosed, never silent (refined during
+implementation):**
 
-- the acquired value escapes the function: returned, stored to a heap object,
-  or passed to a first-party callee (release-in-callee is the interprocedural
-  case slice 1 does not attempt);
-- `recover` is present (control rejoins invisibly);
-- the CFG is irreducible.
+- the acquired value's **ownership leaves the function**: returned, stored,
+  captured by a closure, or handed to a goroutine. Plain argument passing is
+  deliberately NOT an escape — the original draft abstained on it, but that
+  contradicts the worked example (`debit(tx, …)` must still yield VIOLATED)
+  and would abstain on essentially every real transaction. The check is
+  value-blind: a release performed inside an unlisted helper reports VIOLATED,
+  and the fix is naming the helper as a release ref — the rule vocabulary is
+  the mechanism.
+- `recover` is present in the function or a deferred closure (control rejoins
+  invisibly).
+- ~~the CFG is irreducible~~ — dropped: the forward walk does not rely on
+  reducibility, and SSA's dominator tree is defined for any CFG, so
+  irreducibility needs no abstention.
+
+Two further refinements the implementation fixed in place: the acquire's own
+failure branch (`if err != nil { return err }` testing the acquire's error
+result) is pruned — a failed acquire holds nothing, so that return is not a
+leak; and the resource being tracked is the acquire's non-error result
+components only, so `return err` on the failure path is not "the resource
+escaping".
 
 **Determinism.** Findings sorted by (rule, fn FQN, site position). Positions
 are `file.go:line` from the SSA instruction's FileSet — and this is the **first
@@ -203,7 +219,7 @@ It exercises one case per verdict per kind:
 |---|---|---|
 | `Transfer` | acquire, error-return path with no release | must-release `VIOLATED` |
 | `TransferDefer` | acquire + `defer Rollback()` | must-release `SATISFIED` |
-| `TransferEscape` | acquire, tx passed to helper | must-release `CANT-PROVE` |
+| `TransferOwn` | acquire, the open tx is returned | must-release `CANT-PROVE` |
 | `Disburse` | audit dominates publish | must-precede `SATISFIED` |
 | `DisburseRacy` | publish on a branch with no audit | must-precede `VIOLATED` |
 | *(config)* | rule anchored on a renamed-away FQN | `UNMATCHED` |

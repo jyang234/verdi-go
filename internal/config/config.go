@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,47 @@ type Config struct {
 
 	// Static-analysis layer (static-extractor spec).
 	Static StaticConfig `yaml:"static"`
+
+	// Obligation layer (path-obligations plan): domain lifecycle rules evaluated
+	// over each function's SSA control-flow graph.
+	Obligations []ObligationRule `yaml:"obligations"`
+}
+
+// ObligationRule declares one path obligation, keyed to our named functions —
+// the domain-specific lifecycle no off-the-shelf analyzer can know. The kind is
+// inferred from which field set is present (exactly one is required):
+//
+//   - must-release (acquire/release): after a call to Acquire, every path to
+//     function exit must hit a call to one of Release (tx commit/rollback,
+//     custom resource close). Plain `defer` of a release counts.
+//   - must-precede (require/before): every call to Before must be dominated by
+//     a call to Require (audit-write before publish, auth before privileged
+//     call).
+//
+// Every reference uses the classify-hint "import/path#Symbol" form, but unlike
+// a hint the symbol is required: an obligation anchors on a specific function.
+// The symbol matches by name within the package (receiver-agnostic), on both
+// concrete call targets and interface-method (invoke) call sites.
+type ObligationRule struct {
+	Name    string   `yaml:"name"`
+	Acquire string   `yaml:"acquire,omitempty"`
+	Release []string `yaml:"release,omitempty"`
+	Require string   `yaml:"require,omitempty"`
+	Before  string   `yaml:"before,omitempty"`
+}
+
+// Obligation kinds, inferred from a rule's populated field set.
+const (
+	KindMustRelease = "must-release"
+	KindMustPrecede = "must-precede"
+)
+
+// Kind returns the rule's obligation kind. Only meaningful on a validated rule.
+func (r *ObligationRule) Kind() string {
+	if r.Acquire != "" || len(r.Release) > 0 {
+		return KindMustRelease
+	}
+	return KindMustPrecede
 }
 
 // StaticConfig holds knobs for the static pipeline.
@@ -238,6 +280,40 @@ func (c *Config) validate() error {
 	if _, ok := salienceTiers[c.Canon.SalienceTier]; c.Canon.SalienceTier != "" && !ok {
 		return fmt.Errorf("flowmap config: canon.salienceTier %q not one of warn|info|debug|all", c.Canon.SalienceTier)
 	}
+	names := make(map[string]bool, len(c.Obligations))
+	for i, r := range c.Obligations {
+		if r.Name == "" {
+			return fmt.Errorf("flowmap config: obligations[%d]: name is required", i)
+		}
+		if names[r.Name] {
+			return fmt.Errorf("flowmap config: obligations[%d]: duplicate name %q", i, r.Name)
+		}
+		names[r.Name] = true
+		release := r.Acquire != "" || len(r.Release) > 0
+		precede := r.Require != "" || r.Before != ""
+		if release == precede {
+			return fmt.Errorf("flowmap config: obligations[%d] (%s): exactly one of acquire/release or require/before is required", i, r.Name)
+		}
+		if release {
+			if r.Acquire == "" || len(r.Release) == 0 {
+				return fmt.Errorf("flowmap config: obligations[%d] (%s): acquire and at least one release are both required", i, r.Name)
+			}
+			for _, ref := range append([]string{r.Acquire}, r.Release...) {
+				if err := validRef(ref); err != nil {
+					return fmt.Errorf("flowmap config: obligations[%d] (%s): %w", i, r.Name, err)
+				}
+			}
+		} else {
+			if r.Require == "" || r.Before == "" {
+				return fmt.Errorf("flowmap config: obligations[%d] (%s): require and before are both required", i, r.Name)
+			}
+			for _, ref := range []string{r.Require, r.Before} {
+				if err := validRef(ref); err != nil {
+					return fmt.Errorf("flowmap config: obligations[%d] (%s): %w", i, r.Name, err)
+				}
+			}
+		}
+	}
 	for i, r := range c.Static.Routers {
 		if r.Package == "" {
 			return fmt.Errorf("flowmap config: static.routers[%d].package is required", i)
@@ -251,6 +327,17 @@ func (c *Config) validate() error {
 		if r.HandlerArg != nil && *r.HandlerArg < 0 {
 			return fmt.Errorf("flowmap config: static.routers[%d].handlerArg %d must be >= 0", i, *r.HandlerArg)
 		}
+	}
+	return nil
+}
+
+// validRef checks an obligation function reference: "import/path#Symbol" with
+// both halves non-empty. Unlike a classify hint, a bare package is rejected —
+// an obligation anchors on a specific function.
+func validRef(s string) error {
+	i := strings.IndexByte(s, '#')
+	if i <= 0 || i == len(s)-1 {
+		return fmt.Errorf("reference %q must have the form import/path#Symbol", s)
 	}
 	return nil
 }
