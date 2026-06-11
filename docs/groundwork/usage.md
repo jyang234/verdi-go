@@ -15,6 +15,54 @@ adversarial pressure-testing behind the design), see the
 
 ---
 
+## The concepts in five minutes
+
+If you are new to the toolset, these seven ideas are everything the rest of
+this page builds on.
+
+**The call graph.** flowmap compiles your service the same way the Go
+toolchain does, then records *which function can call which* — every node is
+one of your functions, every edge one possible call. This is the map of what
+your code **can** do, computed from the code itself, with no tests run and no
+instrumentation added.
+
+**Boundary effects.** Where your code touches the outside world, the edge is
+typed: `boundary:db UPDATE users`, `boundary:bus PUBLISH loan.approved`,
+`boundary:credit-bureau GET /score/{id}`. Reachability plus boundary effects
+is what turns "this function changed" into "these routes can now write that
+table" — the question a reviewer actually has.
+
+**Entrypoints and reachability.** Functions nobody calls are where requests
+enter: HTTP handlers, bus consumers, `main`. Walking edges *backward* from a
+function tells you which entrypoints it is live behind (its blast radius);
+walking *forward* tells you everything it can touch. Most groundwork surfaces
+are compositions of these two walks.
+
+**Tiers.** Every node and edge carries a salience tier (1 = most consequential
+— publishes, writes, inbound routes; 4 = noise). Tiers keep cards and
+snapshots focused on what matters.
+
+**Blind spots, disclosed.** Static analysis has limits — reflection, `unsafe`,
+dynamically-named topics, high-fan-out dispatch. flowmap *records* every such
+limit in the graph (`blind_spots[]`, `<dynamic>` markers), and every
+groundwork claim that crosses one says so. This is the honesty discipline:
+you always know where the map stops being trustworthy.
+
+**Three-valued verdicts.** Nothing here answers only pass/fail. Checks answer
+**proven** / **violated (with a witness)** / **cannot-prove (with the
+reason)**, and reviews answer BLOCK / STRUCTURALLY-CLEAR /
+NO-STRUCTURAL-SIGNAL. The third value is the load-bearing one: a tool that
+cannot prove something *says so* instead of passing silently — so green means
+proven, never just "nothing noticed."
+
+**Determinism.** Every output is a pure function of its inputs — same graph,
+same policy, same answer, byte-for-byte, on any machine. That is what makes a
+digest meaningful, a gate reproducible, and a disagreement debuggable. It is
+also the acceptance bar for every feature in this toolset: anything heuristic
+or sampled lives outside the verdict path, by design.
+
+---
+
 ## How groundwork and flowmap fit together
 
 flowmap and groundwork are **two separate programs with one interface** — the
@@ -439,3 +487,108 @@ agent's edit loop becomes ground → edit → verify with one rule set at both
 ends; the incident loop becomes triage → narrow → `flowmap behavior ingest`.
 The server only ever reads the CI-generated graph it was started with — the
 same trust posture as every other groundwork surface.
+
+---
+
+## Integration guide
+
+How to wire the toolset in, end to end. The short version: flowmap runs where
+you trust the code checkout (CI), groundwork runs wherever someone needs an
+answer, and the only state between them is canonical JSON.
+
+### CI: the structural gate
+
+```yaml
+# In the PR pipeline. The graphs MUST be generated here, from checked-out
+# source — never accepted from the branch author (see "The trust boundary").
+- name: structural gate
+  run: |
+    git fetch origin "$BASE_REF"
+    git worktree add /tmp/base "origin/$BASE_REF"
+    flowmap graph /tmp/base/services/payments  > base.json
+    flowmap graph       services/payments      > branch.json
+    groundwork verify policy.json base.json branch.json   # exits non-zero on BLOCK
+    groundwork review policy.json base.json branch.json --json > review-artifact.json
+```
+
+Post `groundwork review`'s text form as the PR comment; archive the `--json`
+artifact so any later verifier can run
+`groundwork verify-artifact <artifact> <policy> <base> <branch>` and prove it
+authentic. Keep `policy.json`, `.flowmap.yaml`, and the gated artifacts under
+CODEOWNERS — the rules are reviewed exactly like code, and an agent under
+review can never author its own guardrails.
+
+Recommended cadence for adopting checks: start every new rule **observe-only**
+(`blind_spot_ratchet.gate: false`, cautions instead of `require_proof`), watch
+a week of PRs, then tighten. A gate the team trusts is worth ten gates they
+route around.
+
+### Exit codes and outputs
+
+| Command | Exit non-zero when | Machine output |
+|---|---|---|
+| `fitness` | any Violation finding | text findings (cautions never fail it) |
+| `verify` | new violation, scope escape, breaking contract, gated blind spot | `--json` GateResult with digest |
+| `review` | verdict is BLOCK | `--json` canonical artifact with digest |
+| `diff` | breaking contract change | text |
+| `verify-artifact` | artifact tampered or stale | text status |
+| `reach`/`triage`/`ground`/`exceptions` | only on bad input | `--json` canonical cards |
+
+Everything `--json` is canonical (sorted keys, stable bytes) and safe to diff,
+cache, or hash.
+
+### Incident runbook hook
+
+Archive `graph.json` per deployed commit (it is small, canonical, and
+digest-bearing — the same CI job that gates can upload it). The first three
+commands of an incident:
+
+```console
+$ groundwork triage --frame "$(head -1 panic.txt)"  graph-$DEPLOYED_SHA.json
+$ groundwork triage --fail --peer credit-bureau     graph-$DEPLOYED_SHA.json
+$ flowmap behavior ingest --flows-dir flows/ incident-trace.otlp.json
+```
+
+Triage interrogates the *deployed* commit's graph — a stale map mis-triages,
+which is why the per-deploy archive matters.
+
+### Agents: the MCP server
+
+Serve the lenses to a coding agent (Claude Code shown; any MCP client works):
+
+```json
+// .mcp.json in the repo the agent works on
+{
+  "mcpServers": {
+    "groundwork": {
+      "command": "groundwork",
+      "args": ["mcp", "ci-artifacts/graph.json", "--policy", "policy.json"]
+    }
+  }
+}
+```
+
+The agent gets four tools: `ground` (call before editing — what binds this
+function), `reach` (blast radius), `triage` (incident card, with `fail` for
+the what-if framing and partial-effect answers), and `exceptions` (allow-list
+audit). The intended loop is **ground → edit → verify**: the same rule set
+that will gate the merge, surfaced before the edit is made. Tool failures
+come back as readable tool results the agent can correct from, never protocol
+errors.
+
+### Consuming graph.json directly
+
+The graph is a stable, versioned interface — you can build your own lenses on
+it. Top-level sections:
+
+| Section | What it is | Notes |
+|---|---|---|
+| `nodes[]` | `{fqn, sig, tier, fallible}` per first-party function | sorted by fqn |
+| `edges[]` | `{from, to, tier, boundary?, concurrent?}`; `to` is an FQN or a `boundary:` label | `<dynamic>` in a label = unresolvable target, disclosed |
+| `blind_spots[]` | `{kind, site, detail}` — where the graph's knowledge stops | the soundness frontier |
+| `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
+| `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |
+
+Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
+have not been taught about should fail loudly, not drop fields silently.
+Producer and judge deploy in lockstep — that is a feature.
