@@ -105,6 +105,12 @@ It declares five invariant families:
   bypassing pair is reported, so a second bypass added on a branch surfaces as
   a *new* violation. Three-valued like `must_not_reach`: "no bypass over a
   blind frontier" is a caution, escalated by `require_proof`.
+- **`no_concurrent_reach`** — no target matching `to` may be reached along a
+  path entered via a concurrent edge (a go/defer call site): "no DB writes
+  from goroutines" — the agent pattern of "make it async" introducing
+  unsupervised effects. Same three-valued discipline and `require_proof`
+  escalation. Disclosed v1 limit: the concurrent flag conflates `go` and
+  `defer` sites.
 - **`io_budget`** — caps external *writes* reachable from a route (the
   side-effect-blowout guard); reads don't count, and the composition root is
   exempt.
@@ -135,6 +141,8 @@ policy for "layeredsvc" (v1) — valid
 
 ```
 groundwork reach <graph> <fqn>                          explore one function's blast radius
+groundwork triage (--frame|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
+groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
 groundwork fitness <policy> <graph>                     evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
 groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
@@ -327,3 +335,75 @@ cannot tell, because it faithfully judges whatever graph it is handed.
 See [`pressure-test.md`](pressure-test.md) for the adversarial analysis that
 established this, and [`implementation-plan.md`](implementation-plan.md) for the
 phased build and current status.
+
+---
+
+## Path obligations (rules live in `.flowmap.yaml`, not the policy)
+
+Domain lifecycle rules — "our transaction must commit or roll back on every
+path", "the audit write must precede the publish" — are evaluated by flowmap,
+because only flowmap holds each function's SSA control-flow graph. The rules
+ride the service's CODEOWNERS-gated `.flowmap.yaml`:
+
+```yaml
+obligations:
+  - name: tx-must-close
+    acquire: "example.com/svc/internal/store#BeginTx"
+    release:
+      - "example.com/svc/internal/store#Commit"
+      - "example.com/svc/internal/store#Rollback"
+  - name: audit-before-publish
+    require: "example.com/svc/internal/audit#Write"
+    before: "example.com/svc/internal/eventbus#Publish"
+```
+
+`flowmap graph` emits per-site verdicts into graph.json's `obligations`
+section; groundwork judges them like any other finding:
+
+- `VIOLATED` → gate-failing violation, with the leaking exit as witness.
+- `SATISFIED` → silent: the universal proof ("no modeled path leaks") a test
+  suite cannot produce. A later SATISFIED→VIOLATED flip surfaces in
+  `review`/`verify` as a *new* violation — the drift ratchet at branch
+  granularity.
+- `CANT-PROVE` → caution: the shape claim would be unsound (resource ownership
+  leaves the function, or `recover` is present), disclosed rather than passed.
+- `UNMATCHED` → caution: the rule's anchor matches no call site — an inert
+  guardrail you must not mistake for protection.
+
+The check is value-blind: it proves the *shape* of the lifecycle, not that the
+right value was released. A release performed inside an unlisted helper
+reports VIOLATED; the fix is naming the helper as a release ref.
+
+---
+
+## Incident triage (`triage`)
+
+The incident front door: resolve a symptom to suspect functions and read the
+blast radius off the graph — throwaway interrogation, no test authoring.
+
+```console
+$ groundwork triage --table users graph.json          # corrupted table
+$ groundwork triage --frame 'pkg.(*T).Method' graph.json   # panic frame
+$ groundwork triage --fail --peer credit-bureau graph.json # what-if: peer down
+$ groundwork triage --fail --event loan.approved graph.json
+```
+
+The card lists the suspects, the implicated entrypoints (their cover), the
+upstream callers, the reachable boundary effects, and every blind spot on a
+traversed path — the card says where its own claims stop being sound. An
+ambiguous symptom returns all candidates (never a guess); an effect the graph
+could not name statically (`<dynamic>`) is offered as a flagged *possible*
+match. The card is the map (what the suspects could touch), not the route
+taken: with an OTel trace of the failing request, `flowmap behavior ingest`
+locates the actual divergence inside the suspect set. Triage interrogates the
+graph of the *deployed* commit — a stale map mis-triages.
+
+---
+
+## Suppression audit (`exceptions`)
+
+Allow-lists accumulate. `groundwork exceptions <policy> <graph>` lists every
+active suppression (layering, `must_pass_through`, `blind_spot_ratchet`) with
+its reason, and flags **DEAD** entries — ones that no longer suppress anything
+in the current graph. Delete them: a stale excuse can silently cover a future
+violation. Read-only, exit 0; the measurable target is a dead count of zero.
