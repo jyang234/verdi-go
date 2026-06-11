@@ -130,9 +130,10 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "triage",
-			"description": "Incident triage card from a symptom. Provide exactly one of frame/table/event/peer; set fail=true for the what-if fault framing (includes effects possibly committed before the fault).",
+			"description": "Incident triage card from a symptom. Provide exactly one of frame/route/table/event/peer; set fail=true for the what-if fault framing (includes effects possibly committed before the fault).",
 			"inputSchema": obj(map[string]any{
 				"frame": str("stack frame: FQN, runtime frame form, or token-bounded suffix"),
+				"route": str("HTTP route, e.g. 'POST /api/v1/loans/{id}' — segment-matched, method optional"),
 				"table": str("DB table name"),
 				"event": str("bus event name"),
 				"peer":  str("outbound peer name"),
@@ -155,6 +156,7 @@ func callTool(params json.RawMessage, ix *graph.Index, p *policy.Policy) map[str
 		Arguments struct {
 			FQN   string `json:"fqn"`
 			Frame string `json:"frame"`
+			Route string `json:"route"`
 			Table string `json:"table"`
 			Event string `json:"event"`
 			Peer  string `json:"peer"`
@@ -184,6 +186,9 @@ func callTool(params json.RawMessage, ix *graph.Index, p *policy.Policy) map[str
 		case a.Frame != "":
 			res, set = impact.ResolveFrame(ix, a.Frame), set+1
 		}
+		if a.Route != "" {
+			res, set = impact.ResolveRoute(ix, a.Route), set+1
+		}
 		if a.Table != "" {
 			res, set = impact.ResolveTable(ix, a.Table), set+1
 		}
@@ -194,7 +199,7 @@ func callTool(params json.RawMessage, ix *graph.Index, p *policy.Policy) map[str
 			res, set = impact.ResolvePeer(ix, a.Peer), set+1
 		}
 		if set != 1 {
-			return toolError(fmt.Sprintf("exactly one of frame/table/event/peer is required (got %d)", set))
+			return toolError(fmt.Sprintf("exactly one of frame/route/table/event/peer is required (got %d)", set))
 		}
 		if len(res.Matches) == 0 && len(res.Possible) == 0 {
 			return toolError("symptom resolved to nothing in this graph")

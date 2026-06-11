@@ -43,6 +43,17 @@ type Graph struct {
 	BlindSpots  []BlindSpot       `json:"blind_spots"`
 	Obligations []Obligation      `json:"obligations,omitempty"`
 	EffectOrder []EffectOrderFact `json:"effect_order,omitempty"`
+	Entrypoints []Entrypoint      `json:"entrypoints,omitempty"`
+}
+
+// Entrypoint is one named root flowmap discovered: an HTTP route or a consumed
+// topic, joined to its handler function. Names are registration-site literals
+// (a stdlib root may lack a method; a mounted route carries only its leaf
+// pattern), so consumers match them segment-wise, never exactly-or-nothing.
+type Entrypoint struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Fn   string `json:"fn"`
 }
 
 // EffectOrderFact is one partial-effect order fact flowmap computed from a

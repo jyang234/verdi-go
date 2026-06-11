@@ -189,7 +189,7 @@ policy for "layeredsvc" (v1) — valid
 
 ```
 groundwork reach <graph> <fqn>                          explore one function's blast radius
-groundwork triage (--frame|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
+groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
 groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding card: what binds this function
 groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
 groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
@@ -432,11 +432,19 @@ The incident front door: resolve a symptom to suspect functions and read the
 blast radius off the graph — throwaway interrogation, no test authoring.
 
 ```console
+$ groundwork triage --route "POST /api/v1/loans/{id}" graph.json  # failing endpoint
 $ groundwork triage --table users graph.json          # corrupted table
 $ groundwork triage --frame 'pkg.(*T).Method' graph.json   # panic frame
 $ groundwork triage --fail --peer credit-bureau graph.json # what-if: peer down
 $ groundwork triage --fail --event loan.approved graph.json
 ```
+
+Routes are matched segment-wise against the graph's `entrypoints` join, never
+exactly-or-nothing: path params on either side are wildcards, a method-less
+registration (stdlib `HandleFunc`) matches any queried method, and a mount
+prefix on the alert's URL is tolerated (the registration site only ever saw
+the leaf pattern). Routers outside root discovery's coverage are absent from
+the join — a loud no-match, never a guess.
 
 The card lists the suspects, the implicated entrypoints (their cover), the
 upstream callers, the reachable boundary effects, and every blind spot on a

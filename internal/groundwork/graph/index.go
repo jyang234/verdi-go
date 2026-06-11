@@ -197,3 +197,6 @@ func (ix *Index) Obligations() []Obligation { return ix.g.Obligations }
 
 // EffectOrder returns the graph's partial-effect order facts.
 func (ix *Index) EffectOrder() []EffectOrderFact { return ix.g.EffectOrder }
+
+// Entrypoints returns the graph's named roots (routes, topics) with handlers.
+func (ix *Index) Entrypoints() []Entrypoint { return ix.g.Entrypoints }

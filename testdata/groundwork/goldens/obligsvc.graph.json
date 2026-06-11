@@ -602,6 +602,13 @@
       "status": "SATISFIED"
     }
   ],
+  "entrypoints": [
+    {
+      "kind": "http",
+      "name": "/transfer",
+      "fn": "example.com/obligsvc.main$1"
+    }
+  ],
   "effect_order": [
     {
       "fn": "example.com/obligsvc/internal/app.DisburseAndCharge",

@@ -107,6 +107,63 @@ func TestResolvers(t *testing.T) {
 	}
 }
 
+// Route resolution is segment-aware and never guesses: param wildcards on
+// either side, method-optional roots (stdlib HandleFunc), mount-prefix
+// tolerance, ambiguity flagged, and uncovered routers absent → loud no-match.
+func TestResolveRoute(t *testing.T) {
+	loans := index(t, "loansvc.graph.json")
+	const create = "(*example.com/loansvc/internal/handler.App).Create"
+	const status = "(*example.com/loansvc/internal/handler.App).Status"
+
+	if r := ResolveRoute(loans, "POST /loan-application"); !reflect.DeepEqual(r.Matches, []string{create}) {
+		t.Errorf("exact route resolved to %v", r.Matches)
+	}
+	// Mount prefix + concrete path-param: the alert's URL, not the registration literal.
+	if r := ResolveRoute(loans, "GET /api/v1/loan-application/8842/status"); !reflect.DeepEqual(r.Matches, []string{status}) {
+		t.Errorf("prefixed concrete route resolved to %v", r.Matches)
+	}
+	// Wrong method must not match a method-bearing root.
+	if r := ResolveRoute(loans, "DELETE /loan-application"); len(r.Matches) != 0 {
+		t.Errorf("DELETE matched %v", r.Matches)
+	}
+	if r := ResolveRoute(loans, "GET /no/such/route"); len(r.Matches) != 0 {
+		t.Errorf("unknown route resolved to %v", r.Matches)
+	}
+
+	// A method-less stdlib root matches any queried method.
+	oblig := index(t, "obligsvc.graph.json")
+	r := ResolveRoute(oblig, "POST /transfer")
+	if len(r.Matches) != 1 {
+		t.Errorf("method-less root did not match a method-ful query: %v", r.Matches)
+	}
+
+	// Two handlers behind one path (different methods), queried without a
+	// method: all candidates, flagged — never a guess.
+	g, _ := graph.LoadFile(goldensDir + "/loansvc.graph.json")
+	g.Entrypoints = append(g.Entrypoints,
+		graph.Entrypoint{Kind: "http", Name: "GET /loan-application", Fn: status})
+	if r := ResolveRoute(graph.NewIndex(g), "/loan-application"); !r.Ambiguous || len(r.Matches) != 2 {
+		t.Errorf("method-less query over two methods should be ambiguous: %v", r.Matches)
+	}
+}
+
+// The consumer side of an event resolves to the actual handler (the
+// entrypoints join), not just the registration site the CONSUME edge points
+// from.
+func TestResolveEventPrefersHandler(t *testing.T) {
+	ix := index(t, "loansvc.graph.json")
+	r := ResolveEvent(ix, "payment.settled")
+	found := false
+	for _, m := range r.Matches {
+		if m == "(*example.com/loansvc/internal/consumer.Payments).OnSettled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("consumer handler missing from %v", r.Matches)
+	}
+}
+
 // IT-2 exit criterion: "peer P down" names exactly the entrypoints whose paths
 // cross a boundary:P edge — asserted against a hand-derived expected set from
 // the loansvc golden.
