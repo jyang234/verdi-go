@@ -1,7 +1,8 @@
 # Idea: incident triage — blast radius and failure-scenario exploration
 
-**Status:** exploratory idea, not built. This distills a design discussion; it is
-a proposal to weigh, not a committed plan.
+**Status:** refined into a plan-of-record — see
+[`../incident-triage-plan.md`](../incident-triage-plan.md). This document is
+the original design discussion, kept for the reasoning.
 
 Related reading: the `impact` surface and failure-mode analysis in
 [`../../groundwork/distilled-learnings.md`](../../groundwork/distilled-learnings.md);
