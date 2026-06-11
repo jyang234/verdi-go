@@ -72,6 +72,7 @@ func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, e
 	blind := false
 	for _, from := range froms {
 		cone := append([]string{from}, ix.Reachable(from)...)
+		effects := ix.Effects(cone...)
 
 		// A reachable function matching a To pattern is a direct hit.
 		for _, fn := range cone {
@@ -80,15 +81,18 @@ func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, e
 			}
 		}
 		// A reachable boundary effect matching a To pattern is also a hit.
-		for _, e := range ix.Effects(cone...) {
+		for _, e := range effects {
 			if matchAny(e.To, toPatterns) {
 				return reachable, evidence{from: from, target: e.To}
 			}
 		}
-		// No path from this seed: is the frontier sound enough to call it a proof?
-		if site, isBlind := frontierBlindSite(ix, cone); isBlind && !blind {
-			blind = true
-			blindEv = evidence{from: from, target: site}
+		// No path from this seed: is the frontier sound enough to call it a
+		// proof? Probe only until the first blind site is found.
+		if !blind {
+			if site, isBlind := frontierBlindSiteWith(ix, cone, effects); isBlind {
+				blind = true
+				blindEv = evidence{from: from, target: site}
+			}
 		}
 	}
 	if blind {
@@ -103,6 +107,12 @@ func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, e
 // be hidden past it and a "no path" conclusion is not sound. It returns a
 // representative site for the caution message.
 func frontierBlindSite(ix *graph.Index, cone []string) (string, bool) {
+	return frontierBlindSiteWith(ix, cone, ix.Effects(cone...))
+}
+
+// frontierBlindSiteWith is frontierBlindSite for callers that already hold the
+// cone's effects — the probe must not redo the gather it sits next to.
+func frontierBlindSiteWith(ix *graph.Index, cone []string, effects []graph.Edge) (string, bool) {
 	for _, fn := range cone {
 		if bs := ix.BlindSpotsAt(fn); len(bs) > 0 {
 			return fmt.Sprintf("%s at %s", bs[0].Kind, ShortName(fn)), true
@@ -111,7 +121,7 @@ func frontierBlindSite(ix *graph.Index, cone []string) (string, bool) {
 			return fmt.Sprintf("%s in %s", bs[0].Kind, PkgOf(fn)), true
 		}
 	}
-	for _, e := range ix.Effects(cone...) {
+	for _, e := range effects {
 		if e.IsDynamic() {
 			return "unresolved boundary effect " + e.To, true
 		}

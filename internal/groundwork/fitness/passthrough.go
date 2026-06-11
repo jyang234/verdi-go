@@ -35,6 +35,7 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 				continue // the source IS the waypoint: trivially guarded
 			}
 			cone, parent := guardedWalk(ix, from, rule.Through)
+			effects := ix.Effects(cone...)
 
 			// A reachable function matching To, with the waypoints removed, is a
 			// bypass. The source itself never matches as a target (a route that is
@@ -55,7 +56,7 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			// A boundary effect made anywhere in the guarded-walk cone is reached
 			// without a waypoint (waypoint nodes are never walked, so their own
 			// effects never appear here).
-			for _, e := range ix.Effects(cone...) {
+			for _, e := range effects {
 				if matchAny(e.To, rule.To) && !rule.Allowed(from, e.To) {
 					bypassed = true
 					r.add(Finding{
@@ -69,10 +70,13 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 				}
 			}
 			// No bypass from this source: a blind node in the walked cone means
-			// hidden edges could still skirt the waypoint — "guarded" is unprovable.
-			if site, isBlind := frontierBlindSite(ix, cone); isBlind && !blind {
-				blind = true
-				blindEv = evidence{from: from, target: site}
+			// hidden edges could still skirt the waypoint — "guarded" is
+			// unprovable. Probe only until the first blind site is found.
+			if !blind {
+				if site, isBlind := frontierBlindSiteWith(ix, cone, effects); isBlind {
+					blind = true
+					blindEv = evidence{from: from, target: site}
+				}
 			}
 		}
 

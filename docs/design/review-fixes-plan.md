@@ -215,8 +215,11 @@ oracle that output is identical.
   replaces per-suspect `EntrypointCover`; effects gathered once and reused by
   the dynamic-blind-spot pass.
 - `review.reachExisting`: one multi-seed reverse BFS + one Sources scan.
-- `obligations.Check`: one instruction pass per function bucketing call sites
-  by (pkg, name) consumed by all rules; `usesRecover` memoized per function.
+- `obligations.Check`: `usesRecover` memoized per function (was rescanned per
+  acquire site). The (pkg, name) site-bucketing across rules is **deferred
+  until profiled**, same reasoning as the passthrough node-scan amortization:
+  rule counts are small, the restructuring is not, and speculative
+  performance work is how behavior-preserving phases stop being one.
 
 *Regression locks:* no golden may change in this phase — `git diff
 testdata/` must be empty after `regen.sh`; all fixture-exactness tests

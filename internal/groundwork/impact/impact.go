@@ -52,10 +52,17 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 	suspects := setutil.SortedKeys(setutil.StringSet(fqns))
 
 	callers := ix.Reaching(suspects...)
-	entry := map[string]bool{}
+	// Entrypoint cover for the whole suspect set in one pass: a source covers
+	// a suspect iff it reaches one (or is one) — Sources ∩ (callers ∪ suspects).
+	// Per-suspect EntrypointCover would redo a full reverse BFS per suspect.
+	inCover := setutil.StringSet(callers)
 	for _, s := range suspects {
-		for _, ep := range ix.EntrypointCover(s) {
-			entry[ep] = true
+		inCover[s] = true
+	}
+	entry := map[string]bool{}
+	for _, src := range ix.Sources() {
+		if inCover[src] {
+			entry[src] = true
 		}
 	}
 
@@ -64,8 +71,10 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 	for _, fn := range forward {
 		cone[fn] = true
 	}
+	coneSorted := setutil.SortedKeys(cone)
+	coneEffects := ix.Effects(coneSorted...) // gathered once: the effects section AND the dynamic probe read it
 	effects := map[string]bool{}
-	for _, e := range ix.Effects(setutil.SortedKeys(cone)...) {
+	for _, e := range coneEffects {
 		effects[e.To] = true
 	}
 
@@ -91,7 +100,7 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		addBlind(ix.BlindSpotsAt(fn))
 		addBlind(ix.BlindSpotsAt(fitness.PkgOf(fn)))
 	}
-	for _, e := range ix.Effects(setutil.SortedKeys(cone)...) {
+	for _, e := range coneEffects {
 		if e.IsDynamic() {
 			addBlind([]graph.BlindSpot{{Kind: "DynamicEffect", Site: e.From, Detail: e.To}})
 		}

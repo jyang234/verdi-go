@@ -221,12 +221,17 @@ func reachExisting(d graphDelta, baseIx, branchIx *graph.Index) []string {
 		sites[e.From] = true
 	}
 
-	hit := map[string]bool{}
+	// One multi-seed reverse BFS over all changed sites, then one Sources
+	// scan: identical to unioning per-site EntrypointCover (a source covers a
+	// site iff it reaches one or is one), without a full BFS per site.
+	reach := setutil.StringSet(branchIx.Reaching(setutil.SortedKeys(sites)...))
 	for site := range sites {
-		for _, ep := range branchIx.EntrypointCover(site) {
-			if existing[ep] {
-				hit[ep] = true
-			}
+		reach[site] = true
+	}
+	hit := map[string]bool{}
+	for _, src := range branchIx.Sources() {
+		if existing[src] && reach[src] {
+			hit[src] = true
 		}
 	}
 	return setutil.SortedKeys(hit)

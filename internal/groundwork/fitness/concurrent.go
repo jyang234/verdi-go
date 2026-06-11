@@ -48,7 +48,7 @@ func checkNoConcurrentReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	}
 	cone := setutil.SortedKeys(coneSet)
 	effects := ix.Effects(cone...)
-	blindSite, blindFound := frontierBlindSite(ix, cone)
+	blindSite, blindFound := frontierBlindSiteWith(ix, cone, effects)
 
 	type pair struct{ from, to string }
 	for _, rule := range p.NoConcurrentReach {

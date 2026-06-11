@@ -197,6 +197,8 @@ func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 		return nil
 	}
 
+	fnRecovers := usesRecover(fn) // per-function fact; do not rescan per acquire site
+
 	var out []Finding
 	for i, acq := range acquires {
 		f := Finding{
@@ -204,7 +206,7 @@ func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 			Fn: fn.RelString(nil), Site: site(fn, acq.Pos(), baseDir, i),
 		}
 		switch {
-		case usesRecover(fn):
+		case fnRecovers:
 			f.Status, f.Detail = CantProve, "function uses recover; control flow after a panic is invisible to the CFG"
 		default:
 			if why, escaped := ownershipEscapes(acq); escaped {
