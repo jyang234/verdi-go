@@ -70,6 +70,12 @@ func ShortName(fqn string) string {
 	return strings.ReplaceAll(s, ")", "")
 }
 
+// MatchesAny is the exported form of the rule-pattern matcher, for surfaces
+// (the ground card) that must answer "does this rule bind this symbol?" with
+// EXACTLY the semantics the checks use — a second matcher is how a card
+// promises a guardrail that does not actually bind.
+func MatchesAny(s string, patterns []string) bool { return matchAny(s, patterns) }
+
 // matchAny reports whether s equals or is prefixed by any of patterns. Patterns
 // are treated as prefixes so a policy can name a function, a type, or a whole
 // package, and a boundary pattern like "boundary:bus PUBLISH" can match both a

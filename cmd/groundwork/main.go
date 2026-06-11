@@ -19,6 +19,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/ground"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
@@ -46,6 +47,8 @@ func run(args []string) error {
 		return cmdReach(args[1:])
 	case "triage":
 		return cmdTriage(args[1:])
+	case "ground":
+		return cmdGround(args[1:])
 	case "fitness":
 		return cmdFitness(args[1:])
 	case "review":
@@ -74,6 +77,7 @@ func usage() {
 usage:
   groundwork reach <graph.json> <fqn>          reachability + entrypoint cover + effects for a function
   groundwork triage (--frame|--table|--event|--peer) <v> [--fail] [--json] <graph.json>  incident triage card from a symptom
+  groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]  pre-edit grounding card: what binds this function
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
@@ -155,6 +159,44 @@ func cmdTriage(args []string) error {
 	}
 	if len(res.Possible) > 0 {
 		fmt.Printf("⚠️  %d possible match(es) via <dynamic> boundary effects, included and flagged\n\n", len(res.Possible))
+	}
+	fmt.Print(card.Render())
+	return nil
+}
+
+// cmdGround prints the pre-edit grounding card for one function: identity,
+// neighborhood, reachable effects, the rules that demonstrably bind it, and
+// the blind spots touching those claims. The same rules that gate the merge,
+// surfaced BEFORE the edit — ground → edit → verify, one rule set at both
+// ends. The policy is optional; without it the card carries the graph-borne
+// facts only.
+func cmdGround(args []string) error {
+	policyPath, hasPolicy, args := takeValueFlag(args, "--policy", "-policy")
+	asJSON, args := takeFlag(args, "--json", "-json")
+	if len(args) != 2 {
+		return fmt.Errorf("usage: groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]")
+	}
+	g, err := graph.LoadFile(args[0])
+	if err != nil {
+		return err
+	}
+	var p *policy.Policy
+	if hasPolicy {
+		if p, err = policy.Load(policyPath); err != nil {
+			return err
+		}
+	}
+	card, err := ground.For(graph.NewIndex(g), p, args[1])
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		b, err := canonjson.Marshal(card)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
 	}
 	fmt.Print(card.Render())
 	return nil
