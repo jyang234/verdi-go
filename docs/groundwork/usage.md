@@ -200,6 +200,7 @@ groundwork exceptions <policy> <graph>                  audit allow-lists; flag 
 groundwork init <graph> [--guide …]                     propose a baseline policy from measured facts
 groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
 groundwork mcp --service <name>=<graph> …               one server, several services' maps (+ fleet-events)
+groundwork mcp … --http <addr> [--token <secret>]       team-shared streamable-HTTP transport
 groundwork fitness <policy> <graph>                     evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
 groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
@@ -555,6 +556,22 @@ services); answers stay per-service and honest. This is **not** a merged
 cross-service graph: a side with no loaded match says so rather than
 guessing, and dynamically-named publishes are disclosed per service.
 
+`--http <addr> [--token <secret>]` swaps stdio for the **streamable-HTTP
+transport** (protocol revision 2025-03-26), turning either form into a
+team-shared server — one centrally-managed instance, fed directly by CI
+artifacts, answering every agent on the team. This *strengthens* the trust
+posture: with stdio the agent's own `.mcp.json` picks the file the server
+loads; here the operator picked the inputs and the agent cannot choose them
+at all. The server is stateless (one JSON-RPC message per POST, one JSON
+response; no sessions, no SSE streams — no tool ever sends a server-initiated
+message, so `GET` is honestly 405). Auth is one static bearer token
+(`--token` or `$GROUNDWORK_MCP_TOKEN`), compared in constant time and
+**required when binding beyond loopback** — an unauthenticated team server
+fails at startup, not in production. Browser-borne requests with non-loopback
+`Origin` headers are rejected (the spec's DNS-rebinding defense). TLS and
+real identity belong to a reverse proxy in front; `GET /healthz` answers
+liveness without auth; `SIGINT`/`SIGTERM` drain gracefully.
+
 ---
 
 ## Integration guide
@@ -677,6 +694,42 @@ making the explicit per-service hop:
   }
 }
 ```
+
+### Team-shared serving (`--http`)
+
+One operator runs the server next to the CI artifact store; every agent on
+the team points at it and none of them chooses what it loads:
+
+```console
+# Operator (systemd unit, container, whatever you run daemons with).
+# CI's deploy job overwrites the graph files in place; the server flags
+# staleness on every answer until someone calls the reload tool.
+$ GROUNDWORK_MCP_TOKEN=$(cat /etc/groundwork/token) groundwork mcp \
+    --service payments=/srv/graphs/payments.json \
+    --service ledger=/srv/graphs/ledger.json \
+    --policy payments=/srv/policies/payments.json \
+    --expect payments="$DEPLOYED_SHA" \
+    --http 127.0.0.1:8137          # reverse proxy terminates TLS in front
+```
+
+```json
+// Each agent's .mcp.json: a URL, not a command — no file to pick.
+{
+  "mcpServers": {
+    "groundwork": {
+      "type": "http",
+      "url": "https://groundwork.internal/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+Operationally honest defaults: the token is required the moment the bind
+address leaves loopback (startup error, not a production surprise), the
+reload tool re-verifies the stamp it was started with unless the call
+supplies a new `expect`, and `--log` keeps working — now as the *team's*
+usage transcript.
 
 ### Consuming graph.json directly
 

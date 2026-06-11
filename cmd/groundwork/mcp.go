@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
@@ -19,7 +20,8 @@ import (
 )
 
 const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]
-   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]`
+   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]
+add --http <addr> [--token <secret>] to either form for the team-shared streamable-HTTP transport (token also read from $GROUNDWORK_MCP_TOKEN; required off loopback)`
 
 // cmdMCP serves the agent-facing MCP surface over stdio (IT-4): the triage,
 // reach, ground, and exceptions lenses as tools an agent calls interactively
@@ -46,6 +48,14 @@ func cmdMCP(args []string) error {
 	policyPairs, args := takeValueFlags(args, "--policy", "-policy")
 	expectPairs, args := takeValueFlags(args, "--expect", "-expect")
 	logPath, hasLog, args := takeValueFlag(args, "--log", "-log")
+	httpAddr, hasHTTP, args := takeValueFlag(args, "--http", "-http")
+	token, hasToken, args := takeValueFlag(args, "--token", "-token")
+	if !hasToken {
+		token = os.Getenv("GROUNDWORK_MCP_TOKEN")
+	}
+	if hasToken && !hasHTTP {
+		return fmt.Errorf("--token only applies to the --http transport\n%s", mcpUsage)
+	}
 
 	fleet := &mcpFleet{services: map[string]*mcpServer{}}
 	if len(servicePairs) > 0 {
@@ -120,6 +130,9 @@ func cmdMCP(args []string) error {
 		defer func() { _ = f.Close() }()
 		fleet.log = f
 	}
+	if hasHTTP {
+		return serveMCPHTTP(httpAddr, token, fleet)
+	}
 	return serveMCP(os.Stdin, os.Stdout, fleet)
 }
 
@@ -131,6 +144,8 @@ type mcpFleet struct {
 	names    []string // sorted; the single-graph form uses the graph path as the name
 	services map[string]*mcpServer
 	log      io.Writer
+	proto    string     // protocol version to report; "" means 2024-11-05 (stdio)
+	mu       sync.Mutex // serializes tool calls + log writes (HTTP is concurrent)
 }
 
 // lone returns the only service when exactly one is loaded, else nil.
@@ -236,7 +251,7 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-// serveMCP runs the request loop until EOF. Notifications (no id) are
+// serveMCP runs the stdio request loop until EOF. Notifications (no id) are
 // consumed silently per JSON-RPC; tool failures are MCP tool results with
 // isError, not protocol errors, so the agent can read and recover from them.
 func serveMCP(r io.Reader, w io.Writer, fleet *mcpFleet) error {
@@ -252,31 +267,45 @@ func serveMCP(r io.Reader, w io.Writer, fleet *mcpFleet) error {
 		if err := json.Unmarshal(line, &req); err != nil || req.ID == nil {
 			continue // malformed or a notification: nothing to answer
 		}
-		resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
-		switch req.Method {
-		case "initialize":
-			resp.Result = map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "groundwork", "version": version},
-			}
-		case "ping":
-			resp.Result = map[string]any{}
-		case "tools/list":
-			resp.Result = map[string]any{"tools": toolDefs()}
-		case "tools/call":
-			if fleet.log != nil {
-				_, _ = fleet.log.Write(append(append([]byte(`{"call":`), req.Params...), '}', 10))
-			}
-			resp.Result = fleet.callTool(req.Params)
-		default:
-			resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
-		}
-		if err := enc.Encode(resp); err != nil {
+		if err := enc.Encode(fleet.dispatch(req)); err != nil {
 			return err
 		}
 	}
 	return sc.Err()
+}
+
+// dispatch answers one JSON-RPC request — the transport-independent core
+// shared by the stdio loop and the streamable-HTTP handler. Tool calls (and
+// the transcript log) are serialized under the fleet mutex: HTTP requests
+// arrive concurrently, and reload mutates per-service state.
+func (f *mcpFleet) dispatch(req rpcRequest) rpcResponse {
+	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
+	switch req.Method {
+	case "initialize":
+		proto := f.proto
+		if proto == "" {
+			proto = "2024-11-05"
+		}
+		resp.Result = map[string]any{
+			"protocolVersion": proto,
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "groundwork", "version": version},
+		}
+	case "ping":
+		resp.Result = map[string]any{}
+	case "tools/list":
+		resp.Result = map[string]any{"tools": toolDefs()}
+	case "tools/call":
+		f.mu.Lock()
+		if f.log != nil {
+			_, _ = f.log.Write(append(append([]byte(`{"call":`), req.Params...), '}', 10))
+		}
+		resp.Result = f.callTool(req.Params)
+		f.mu.Unlock()
+	default:
+		resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
+	}
+	return resp
 }
 
 func toolDefs() []map[string]any {

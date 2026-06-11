@@ -106,6 +106,7 @@ $ groundwork triage --fail --peer credit-bureau graph.json       # what-if: peer
 $ groundwork ground graph.json '<fqn>' --policy policy.json      # what binds this function
 $ groundwork mcp graph.json --policy policy.json                 # the same lenses, as MCP tools
 $ groundwork mcp --service pay=pay.json --service ledger=ledger.json  # one session, the neighborhood's maps
+$ groundwork mcp pay.json --http 127.0.0.1:8137 --token "$T"      # team-shared server over streamable HTTP
 ```
 
 Every command is read-only over CI-generated artifacts, byte-deterministic,
