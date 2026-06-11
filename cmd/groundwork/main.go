@@ -56,6 +56,8 @@ func run(args []string) error {
 		return cmdDiff(args[1:])
 	case "verify-artifact":
 		return cmdVerifyArtifact(args[1:])
+	case "exceptions":
+		return cmdExceptions(args[1:])
 	case "policy-check":
 		return cmdPolicyCheck(args[1:])
 	case "help", "-h", "--help":
@@ -77,6 +79,7 @@ usage:
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork verify-artifact <artifact> <policy> <base> <branch>  prove an artifact is authentic (not tampered/stale)
+  groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
   groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
 
@@ -457,6 +460,51 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 		return nil, nil, nil, err
 	}
 	return p, base, branch, nil
+}
+
+// cmdExceptions audits the policy's allow-lists against a graph: every active
+// suppression is listed with its reason, and entries that no longer suppress
+// anything are flagged DEAD — stale excuses that should be deleted before they
+// silently excuse something new. Read-only, exit 0: it informs review.
+func cmdExceptions(args []string) error {
+	fs := flag.NewFlagSet("exceptions", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "emit the audit as canonical JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: groundwork exceptions <policy.json> <graph.json> [--json]")
+	}
+	p, err := policy.Load(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	g, err := graph.LoadFile(fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	xs := fitness.Exceptions(p, graph.NewIndex(g))
+	if *asJSON {
+		b, err := canonjson.Marshal(xs)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	if len(xs) == 0 {
+		fmt.Println("no allow-list entries configured")
+		return nil
+	}
+	for _, x := range xs {
+		fmt.Println(x)
+	}
+	if dead := fitness.DeadCount(xs); dead > 0 {
+		fmt.Printf("\n%d dead exception(s) — delete them: a stale excuse can silently cover a future violation\n", dead)
+	} else {
+		fmt.Printf("\nall %d exception(s) live and justified\n", len(xs))
+	}
+	return nil
 }
 
 // cmdPolicyCheck loads and validates a policy, printing a one-line-per-rule
