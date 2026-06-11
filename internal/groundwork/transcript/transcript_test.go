@@ -82,6 +82,35 @@ func TestSummarize(t *testing.T) {
 	}
 }
 
+// Session ids beat line order: two clients of a shared team server
+// interleave their lines, and every call must land in the session whose id
+// it carries — positional grouping would put all three calls in session "2".
+func TestSummarizeInterleavedSessions(t *testing.T) {
+	path := write(t,
+		`{"init":true,"session":"1"}`,
+		`{"init":true,"session":"2"}`,
+		`{"call":{"name":"ground","arguments":{}},"service":"loans","session":"1"}`,
+		`{"call":{"name":"reach","arguments":{}},"service":"oblig","session":"2"}`,
+		`{"call":{"name":"triage","arguments":{}},"service":"oblig","session":"1"}`,
+	)
+	entries, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Summarize(entries)
+	if s.Sessions != 2 || s.Calls != 3 {
+		t.Errorf("Sessions/Calls = %d/%d, want 2/3", s.Sessions, s.Calls)
+	}
+	// Session 1 walked loans → oblig (a hop); session 2 made one call (no hop).
+	if s.CrossServiceHops != 1 || s.SessionsWithHop != 1 {
+		t.Errorf("hops = %d in %d sessions, want 1 in 1 — interleaved lines must not fake or hide hops",
+			s.CrossServiceHops, s.SessionsWithHop)
+	}
+	if s.CallsPerSessionMin != 1 || s.CallsPerSessionMax != 2 {
+		t.Errorf("per-session min/max = %d/%d, want 1/2", s.CallsPerSessionMin, s.CallsPerSessionMax)
+	}
+}
+
 // A session that initialized and asked nothing is evidence, and must count.
 func TestSummarizeEmptySession(t *testing.T) {
 	entries, err := Load(write(t, `{"init":true}`))

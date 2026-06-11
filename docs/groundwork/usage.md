@@ -530,9 +530,12 @@ including effects possibly committed before the fault), `exceptions`,
 the server never reloads silently; `reload` re-verifies the stamp. `--log`
 writes a deterministic transcript (the E4 measurement apparatus): one JSON
 line per tool call carrying the raw params, the resolution (the answering
-service, `*` for fleet-wide lenses, absent when resolution failed), and the
-isError outcome, plus an `init` marker per session — no timestamps, so a
-replayed drill produces identical bytes. `groundwork transcript calls.jsonl`
+service, `*` for fleet-wide lenses, absent when resolution failed), the
+session id, and the isError outcome. Session ids are sequential, minted at
+`initialize`, and attribution rides the id rather than line order — so the
+shared team server's transcript stays readable when concurrent clients
+interleave. No timestamps, so a replayed drill produces identical bytes.
+`groundwork transcript calls.jsonl`
 is the reader: sessions, per-session query counts, tool/service mix,
 cross-service hops, error/correction rates.
 **No write tools, ever**: a tool that edited rules would let the
@@ -570,8 +573,12 @@ artifacts, answering every agent on the team. This *strengthens* the trust
 posture: with stdio the agent's own `.mcp.json` picks the file the server
 loads; here the operator picked the inputs and the agent cannot choose them
 at all. The server is stateless (one JSON-RPC message per POST, one JSON
-response; no sessions, no SSE streams — no tool ever sends a server-initiated
-message, so `GET` is honestly 405). Auth is one static bearer token
+response; no SSE streams — no tool ever sends a server-initiated message, so
+`GET` is honestly 405). `initialize` returns an `Mcp-Session-Id` that
+clients echo on later requests; it is a transcript attribution label only —
+the server stores no session state, never requires the header, and a client
+that omits it lands in the transcript's anonymous bucket. Auth is one static
+bearer token
 (`--token` or `$GROUNDWORK_MCP_TOKEN`), compared in constant time and
 **required when binding beyond loopback** — an unauthenticated team server
 fails at startup, not in production. Browser-borne requests with non-loopback

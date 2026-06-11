@@ -71,13 +71,22 @@ func guardHTTPExposure(addr, token string) error {
 	if err != nil {
 		return fmt.Errorf("--http wants host:port, got %q: %w", addr, err)
 	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("--http %s binds beyond loopback without a token; set --token or $GROUNDWORK_MCP_TOKEN (or bind 127.0.0.1)", addr)
+	}
+	return nil
+}
+
+// isLoopbackHost is the one definition of "loopback" the exposure guard and
+// the Origin defense share — the two must never drift apart. An empty host
+// (":8137", all interfaces) and an unresolved hostname are NOT loopback:
+// both checks fail closed.
+func isLoopbackHost(host string) bool {
 	if host == "localhost" {
-		return nil
+		return true
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return nil
-	}
-	return fmt.Errorf("--http %s binds beyond loopback without a token; set --token or $GROUNDWORK_MCP_TOKEN (or bind 127.0.0.1)", addr)
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // httpHandler is the streamable-HTTP endpoint plus /healthz. Auth failures
@@ -118,8 +127,20 @@ func (f *mcpFleet) httpHandler(token string) http.Handler {
 			w.WriteHeader(http.StatusAccepted) // a notification: acknowledged, no body
 			return
 		}
+		// Session identity is transport-scoped: initialize mints an id and
+		// hands it back as Mcp-Session-Id; clients echo it on later requests.
+		// It is a transcript attribution label ONLY — the server stores no
+		// session state, never requires the header, and a client that omits
+		// it simply lands in the transcript's anonymous bucket. This is what
+		// keeps the shared team log readable: concurrent clients interleave
+		// lines, and attribution rides the id, not the line order.
+		session := r.Header.Get("Mcp-Session-Id")
+		if req.Method == "initialize" {
+			session = f.newSession()
+			w.Header().Set("Mcp-Session-Id", session)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(f.dispatch(req))
+		_ = json.NewEncoder(w).Encode(f.dispatch(req, session))
 	})
 	return mux
 }
@@ -130,10 +151,5 @@ func loopbackOrigin(origin string) bool {
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return isLoopbackHost(u.Hostname())
 }

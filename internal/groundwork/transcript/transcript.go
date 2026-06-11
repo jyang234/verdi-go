@@ -16,18 +16,25 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// Entry is one transcript line: a session boundary (Init, written on MCP
-// initialize) or one tool call with its resolution. Service is the name of
-// the service that answered, "*" for a fleet-wide answer, and absent when
-// resolution failed; IsError marks an isError tool result. Lines written by
-// servers older than the resolution fields decode fine — both are optional.
+// Entry is one transcript line: a session boundary (Init, written when MCP
+// initialize mints a session id) or one tool call with its resolution.
+// Service is the name of the service that answered, "*" for a fleet-wide
+// answer, and absent when resolution failed — the sentinels cannot collide
+// with real names because the server validates --service names at startup.
+// Session is the id the call belongs to; attribution rides it, never line
+// order, because a shared team server interleaves concurrent clients' lines.
+// Lines written by servers older than any of these fields decode fine — all
+// are optional, and sessionless lines fall back to positional init-marker
+// grouping.
 type Entry struct {
 	Init    bool            `json:"init,omitempty"`
 	Call    json.RawMessage `json:"call,omitempty"`
 	Service string          `json:"service,omitempty"`
+	Session string          `json:"session,omitempty"`
 	IsError bool            `json:"isError,omitempty"`
 }
 
@@ -108,33 +115,57 @@ const (
 	unresolvedLabel = "(unresolved)"
 )
 
-// Summarize computes the transcript's reading. Sessions split on init
-// markers; calls logged before the first marker (a server that predates the
-// marker, or a truncated file) form an implicit leading session. A
-// cross-service hop is a call answered by a different concrete service than
-// the previous concrete answer in the same session — fleet-wide and
-// unresolved calls between them neither make nor break a hop. An error
-// counts corrected when the same session's next call of the same tool
-// succeeds.
+// call is one flattened tool call: the raw params are unmarshaled exactly
+// once, here, however many passes the statistics make afterwards.
+type call struct {
+	tool, service string
+	isError       bool
+}
+
+// Summarize computes the transcript's reading. A call belongs to the session
+// whose id it carries; sessionless lines (older servers, clients that never
+// echoed their id) fall back to positional grouping — split on unlabeled
+// init markers, with calls before the first marker forming an implicit
+// leading session, exactly as before ids existed. A cross-service hop is a
+// call answered by a different concrete service than the session's previous
+// concrete answer — fleet-wide and unresolved calls between them neither
+// make nor break a hop. An error counts corrected when the session's next
+// call of the same tool succeeds (counted in one pass: per tool, an
+// error→success transition is exactly that).
 func Summarize(entries []Entry) Summary {
-	var sessions [][]Entry
-	cur := []Entry{}
-	leading := true
+	var order []string
+	sessions := map[string][]call{}
+	register := func(key string) {
+		if _, ok := sessions[key]; !ok {
+			sessions[key] = []call{}
+			order = append(order, key)
+		}
+	}
+	posN := 0
+	posKey := "" // current positional session; registered lazily so an empty leading session does not count
 	for _, e := range entries {
 		if e.Init {
-			if !leading || len(cur) > 0 {
-				sessions = append(sessions, cur)
+			if e.Session != "" {
+				register("id:" + e.Session)
+			} else {
+				posN++
+				posKey = "pos:" + strconv.Itoa(posN)
+				register(posKey)
 			}
-			cur, leading = []Entry{}, false
 			continue
 		}
-		cur = append(cur, e)
-	}
-	if !leading || len(cur) > 0 {
-		sessions = append(sessions, cur)
+		key := "id:" + e.Session
+		if e.Session == "" {
+			if posKey == "" {
+				posKey = "pos:0"
+			}
+			key = posKey
+		}
+		register(key)
+		sessions[key] = append(sessions[key], call{tool: e.Tool(), service: e.Service, isError: e.IsError})
 	}
 
-	s := Summary{Sessions: len(sessions)}
+	s := Summary{Sessions: len(order)}
 	tools, services := map[string]*Count{}, map[string]*Count{}
 	tally := func(m map[string]*Count, name string, isErr bool) {
 		c := m[name]
@@ -148,36 +179,34 @@ func Summarize(entries []Entry) Summary {
 		}
 	}
 	var perSession []int
-	for _, ses := range sessions {
+	for _, key := range order {
+		ses := sessions[key]
 		perSession = append(perSession, len(ses))
 		lastConcrete := ""
 		hopped := false
-		for i, e := range ses {
+		pendingErr := map[string]bool{}
+		for _, c := range ses {
 			s.Calls++
-			if e.IsError {
+			if c.isError {
 				s.Errors++
-				for _, later := range ses[i+1:] {
-					if later.Tool() == e.Tool() {
-						if !later.IsError {
-							s.ErrorsCorrected++
-						}
-						break
-					}
-				}
 			}
-			tally(tools, e.Tool(), e.IsError)
-			switch e.Service {
+			if pendingErr[c.tool] && !c.isError {
+				s.ErrorsCorrected++
+			}
+			pendingErr[c.tool] = c.isError
+			tally(tools, c.tool, c.isError)
+			switch c.service {
 			case "*":
-				tally(services, fleetLabel, e.IsError)
+				tally(services, fleetLabel, c.isError)
 			case "":
-				tally(services, unresolvedLabel, e.IsError)
+				tally(services, unresolvedLabel, c.isError)
 			default:
-				tally(services, e.Service, e.IsError)
-				if lastConcrete != "" && lastConcrete != e.Service {
+				tally(services, c.service, c.isError)
+				if lastConcrete != "" && lastConcrete != c.service {
 					s.CrossServiceHops++
 					hopped = true
 				}
-				lastConcrete = e.Service
+				lastConcrete = c.service
 			}
 		}
 		if hopped {

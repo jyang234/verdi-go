@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,7 +35,7 @@ func TestServeMCPSession(t *testing.T) {
 
 	var out strings.Builder
 	srv := &mcpServer{path: "../../testdata/groundwork/goldens/obligsvc.graph.json", ix: graph.NewIndex(g)}
-	fleet := &mcpFleet{names: []string{srv.path}, services: map[string]*mcpServer{srv.path: srv}}
+	fleet := newMCPFleet(map[string]*mcpServer{srv.path: srv})
 	if err := serveMCP(strings.NewReader(in), &out, fleet); err != nil {
 		t.Fatal(err)
 	}
@@ -105,15 +107,15 @@ func TestServeMCPSession(t *testing.T) {
 // service when several are loaded, and an unknown service is a correctable
 // tool error — never a protocol error.
 func TestServeMCPFleetSession(t *testing.T) {
-	fleet := &mcpFleet{services: map[string]*mcpServer{}}
+	services := map[string]*mcpServer{}
 	for _, name := range []string{"loansvc", "obligsvc"} {
 		srv := &mcpServer{path: "../../testdata/groundwork/goldens/" + name + ".graph.json"}
 		if err := srv.load(); err != nil {
 			t.Fatal(err)
 		}
-		fleet.services[name] = srv
-		fleet.names = append(fleet.names, name)
+		services[name] = srv
 	}
+	fleet := newMCPFleet(services)
 	in := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"entrypoints","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fleet-events","arguments":{}}}`,
@@ -192,17 +194,18 @@ func TestServeMCPFleetSession(t *testing.T) {
 	}
 }
 
-// The transcript is deterministic on purpose (no timestamps): the same
-// session produces identical bytes, so the log's shape is locked exactly —
-// an init marker per initialize, and per call the raw params plus the
-// resolution (answering service, "*" for fleet-wide, absent when resolution
-// failed) and the isError outcome. `groundwork transcript` reads this.
+// The transcript is deterministic on purpose (no timestamps, sequential
+// session ids): the same session produces identical bytes, so the log's
+// shape is locked exactly — an id-stamped init line per initialize, and per
+// call the raw params plus the resolution (answering service, "*" for
+// fleet-wide, absent when resolution failed), the session id, and the
+// isError outcome. `groundwork transcript` reads this.
 func TestMCPTranscriptLog(t *testing.T) {
 	srv := &mcpServer{path: "../../testdata/groundwork/goldens/obligsvc.graph.json"}
 	if err := srv.load(); err != nil {
 		t.Fatal(err)
 	}
-	fleet := &mcpFleet{names: []string{"oblig"}, services: map[string]*mcpServer{"oblig": srv}}
+	fleet := newMCPFleet(map[string]*mcpServer{"oblig": srv})
 	var log strings.Builder
 	fleet.log = &log
 	in := strings.Join([]string{
@@ -210,20 +213,66 @@ func TestMCPTranscriptLog(t *testing.T) {
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ground","arguments":{"fqn":"example.com/obligsvc/internal/app.DisburseAndCharge"}}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fleet-events","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"reach","arguments":{"service":"nope","fqn":"x"}}}`,
-		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"triage","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"triage","arguments":{}}}`,
 	}, "\n") + "\n"
 	var out strings.Builder
 	if err := serveMCP(strings.NewReader(in), &out, fleet); err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Join([]string{
-		`{"init":true}`,
-		`{"call":{"name":"ground","arguments":{"fqn":"example.com/obligsvc/internal/app.DisburseAndCharge"}},"service":"oblig"}`,
-		`{"call":{"name":"fleet-events","arguments":{}},"service":"*"}`,
-		`{"call":{"name":"reach","arguments":{"service":"nope","fqn":"x"}},"isError":true}`,
-		`{"call":{"name":"triage","arguments":{}},"service":"oblig","isError":true}`,
+		`{"init":true,"session":"1"}`,
+		`{"call":{"name":"ground","arguments":{"fqn":"example.com/obligsvc/internal/app.DisburseAndCharge"}},"service":"oblig","session":"1"}`,
+		`{"call":{"name":"fleet-events","arguments":{}},"service":"*","session":"1"}`,
+		`{"call":{"name":"reach","arguments":{"service":"nope","fqn":"x"}},"session":"1","isError":true}`,
+		`{"init":true,"session":"2"}`,
+		`{"call":{"name":"triage","arguments":{}},"service":"oblig","session":"2","isError":true}`,
 	}, "\n") + "\n"
 	if log.String() != want {
 		t.Errorf("transcript bytes:\ngot:\n%swant:\n%s", log.String(), want)
+	}
+}
+
+// Service names label transcript lines, listings, and error texts, so the
+// charset is tight: the transcript's sentinels ("*") and list separators
+// must be unreachable by configuration.
+func TestValidServiceName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"payments": true, "pay_ments-2.x": true,
+		"": false, "*": false, "a b": false, "a,b": false,
+		"(fleet-wide)": false, "a=b": false, "a/b": false,
+	} {
+		if got := validServiceName(name); got != want {
+			t.Errorf("validServiceName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A stale fleet with no entrypoints must answer with BOTH disclosures: the
+// staleness warning and the empty-case explanation — one must never swallow
+// the other.
+func TestFleetEntrypointsStaleAndEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bare.graph.json")
+	if err := os.WriteFile(path, []byte(`{"nodes":[],"edges":[],"blind_spots":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &mcpServer{path: path}
+	if err := a.load(); err != nil {
+		t.Fatal(err)
+	}
+	b := &mcpServer{path: path}
+	if err := b.load(); err != nil {
+		t.Fatal(err)
+	}
+	fleet := newMCPFleet(map[string]*mcpServer{"a": a, "b": b})
+	a.mtime = a.mtime.Add(-1) // simulate the file having changed since load
+	res := fleet.fleetEntrypoints()
+	text := res["content"].([]map[string]any)[0]["text"].(string)
+	if !strings.Contains(text, "service a") || !strings.Contains(text, "changed on disk") {
+		t.Errorf("missing the stale disclosure: %q", text)
+	}
+	if !strings.Contains(text, "no named entrypoints") {
+		t.Errorf("stale note swallowed the empty-case explanation: %q", text)
 	}
 }

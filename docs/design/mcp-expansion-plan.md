@@ -51,10 +51,12 @@ loopback (startup error, fail-closed); TLS and identity are a reverse
 proxy's job, not this binary's. Lifecycle is graceful SIGINT/SIGTERM drain
 plus an unauthenticated /healthz. The server is stateless on purpose — one
 JSON-RPC message per POST, one JSON response, protocol revision 2025-03-26,
-no sessions, no SSE streams (no tool ever sends a server-initiated message,
-so GET is honestly 405), non-loopback Origins rejected per the spec's
-DNS-rebinding defense. Both transports share one dispatch; tool calls are
-serialized under a mutex because reload mutates per-service state.
+no SSE streams (no tool ever sends a server-initiated message, so GET is
+honestly 405), non-loopback Origins rejected per the spec's DNS-rebinding
+defense. Mcp-Session-Id is minted at initialize as a transcript attribution
+label only — no server-side session state. Both transports share one
+dispatch; tool calls run read-locked and concurrent, reload (the lone
+mutator) takes the write lock.
 
 ## Standing refusals (decided, recorded in the server's doc comment)
 
@@ -74,11 +76,14 @@ and whether shared serving earns its keep. If the transcripts come back
 empty, the honest move is documented retirement, the same standard every
 other surface in this repo is held to.
 
-The instrument for that decision is built: each transcript line now carries
-its resolution (answering service, fleet-wide, or failed) and isError
-outcome, an init marker bounds sessions, and `groundwork transcript
-calls.jsonl [--json]` computes the keep/retire evidence — per-session query
-counts, tool/service mix, cross-service hops, correction rates —
-deterministically (no timestamps; a replayed drill produces identical
-bytes). What it deliberately does not compute: value. Whether conclusions
-cite card facts is E4's human-judged half, and the card says so.
+The instrument for that decision is built: each transcript line carries its
+resolution (answering service, fleet-wide, or failed), its session id, and
+the isError outcome, and `groundwork transcript calls.jsonl [--json]`
+computes the keep/retire evidence — per-session query counts, tool/service
+mix, cross-service hops, correction rates — deterministically (no
+timestamps, sequential session ids; a replayed drill produces identical
+bytes). Attribution rides the session id rather than line order, so the
+team server's shared transcript stays readable under concurrent clients;
+sessionless lines from older transcripts fall back to positional grouping.
+What it deliberately does not compute: value. Whether conclusions cite card
+facts is E4's human-judged half, and the card says so.

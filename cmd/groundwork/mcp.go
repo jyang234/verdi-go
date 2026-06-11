@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +17,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/ground"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]
@@ -57,7 +58,7 @@ func cmdMCP(args []string) error {
 		return fmt.Errorf("--token only applies to the --http transport\n%s", mcpUsage)
 	}
 
-	fleet := &mcpFleet{services: map[string]*mcpServer{}}
+	services := map[string]*mcpServer{}
 	if len(servicePairs) > 0 {
 		if len(args) != 0 {
 			return fmt.Errorf("a positional graph and --service are mutually exclusive\n%s", mcpUsage)
@@ -67,14 +68,17 @@ func cmdMCP(args []string) error {
 			if !ok || name == "" || path == "" {
 				return fmt.Errorf("--service wants <name>=<graph.json>, got %q", pair)
 			}
-			if _, dup := fleet.services[name]; dup {
+			if !validServiceName(name) {
+				return fmt.Errorf("--service name %q: names label transcripts and listings, so they are letters, digits, '.', '_', '-' only", name)
+			}
+			if _, dup := services[name]; dup {
 				return fmt.Errorf("duplicate --service name %q", name)
 			}
-			fleet.services[name] = &mcpServer{path: path}
+			services[name] = &mcpServer{path: path}
 		}
 		for _, pair := range expectPairs {
 			name, stamp, ok := strings.Cut(pair, "=")
-			srv := fleet.services[name]
+			srv := services[name]
 			if !ok || srv == nil {
 				return fmt.Errorf("--expect wants <name>=<stamp> naming a --service, got %q", pair)
 			}
@@ -91,12 +95,14 @@ func cmdMCP(args []string) error {
 		if len(expectPairs) > 0 {
 			srv.expect, srv.hasExpect = expectPairs[len(expectPairs)-1], true
 		}
-		fleet.services[args[0]] = srv
+		if len(policyPairs) > 1 {
+			// takeValueFlag's last-wins for a repeated flag, preserved exactly:
+			// earlier values are dropped unread, never loaded-and-discarded.
+			policyPairs = policyPairs[len(policyPairs)-1:]
+		}
+		services[args[0]] = srv
 	}
-	for name := range fleet.services {
-		fleet.names = append(fleet.names, name)
-	}
-	sort.Strings(fleet.names)
+	fleet := newMCPFleet(services)
 	for _, name := range fleet.names {
 		if err := fleet.services[name].load(); err != nil {
 			return err
@@ -136,16 +142,52 @@ func cmdMCP(args []string) error {
 	return serveMCP(os.Stdin, os.Stdout, fleet)
 }
 
-// mcpFleet is the session state: one or more named services, each holding its
+// mcpFleet is the server state: one or more named services, each holding its
 // own graph/policy/stamp/staleness, plus the optional call log. Tools that
 // answer about one service take an optional `service` argument; with a single
 // loaded service it is never needed (the lone service is the default).
+//
+// Concurrency (HTTP serves requests concurrently; stdio is sequential): mu
+// guards the per-service state — read-held by every tool call, write-held by
+// reload, the only mutator — so card renders run concurrently and never
+// straddle a reload. logMu makes each transcript line (and the session
+// counter) atomic; cross-client line ORDER is deliberately unguaranteed,
+// which is why every line carries its session id instead of relying on
+// position.
 type mcpFleet struct {
-	names    []string // sorted; the single-graph form uses the graph path as the name
+	names    []string // sorted, derived from services by newMCPFleet; the single-graph form uses the graph path as the name
 	services map[string]*mcpServer
+	proto    string // protocol version to report; "" means 2024-11-05 (stdio)
+
+	mu sync.RWMutex
+
 	log      io.Writer
-	proto    string     // protocol version to report; "" means 2024-11-05 (stdio)
-	mu       sync.Mutex // serializes tool calls + log writes (HTTP is concurrent)
+	logMu    sync.Mutex
+	sessionN int
+}
+
+// newMCPFleet builds the fleet over its services; names are derived here,
+// once, so they can never drift from the map.
+func newMCPFleet(services map[string]*mcpServer) *mcpFleet {
+	return &mcpFleet{names: setutil.SortedKeys(services), services: services}
+}
+
+// validServiceName restricts --service names to letters, digits, and ._-
+// — they label transcript lines, fleet listings, and error texts, so the
+// transcript's resolution sentinels ("*", "") and its list separators can
+// never collide with a real name.
+func validServiceName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // lone returns the only service when exactly one is loaded, else nil.
@@ -254,10 +296,13 @@ type rpcError struct {
 // serveMCP runs the stdio request loop until EOF. Notifications (no id) are
 // consumed silently per JSON-RPC; tool failures are MCP tool results with
 // isError, not protocol errors, so the agent can read and recover from them.
+// Session identity is transport-scoped, so the transport mints it: stdio has
+// one client, whose current session is whatever initialize last began.
 func serveMCP(r io.Reader, w io.Writer, fleet *mcpFleet) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<24)
 	enc := json.NewEncoder(w)
+	session := ""
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
@@ -267,29 +312,72 @@ func serveMCP(r io.Reader, w io.Writer, fleet *mcpFleet) error {
 		if err := json.Unmarshal(line, &req); err != nil || req.ID == nil {
 			continue // malformed or a notification: nothing to answer
 		}
-		if err := enc.Encode(fleet.dispatch(req)); err != nil {
+		if req.Method == "initialize" {
+			session = fleet.newSession()
+		}
+		if err := enc.Encode(fleet.dispatch(req, session)); err != nil {
 			return err
 		}
 	}
 	return sc.Err()
 }
 
+// newSession issues the next session id and records the boundary in the
+// transcript. Ids are sequential, not random — deterministic, like the rest
+// of the transcript — and they are attribution labels only: the fleet keeps
+// no per-session state. A session that begins and then asks nothing is
+// itself E4 evidence, which is why the boundary is recorded immediately.
+func (f *mcpFleet) newSession() string {
+	f.logMu.Lock()
+	defer f.logMu.Unlock()
+	f.sessionN++
+	sid := strconv.Itoa(f.sessionN)
+	if f.log != nil {
+		fmt.Fprintf(f.log, "{\"init\":true,\"session\":%q}\n", sid)
+	}
+	return sid
+}
+
+// logCall writes one transcript line, AFTER the call so the line carries its
+// resolution: the service that answered ("*" for the fleet-wide lenses,
+// absent when resolution failed), the session the call belongs to, and the
+// isError outcome. Deterministic on purpose — no timestamps — so a replayed
+// drill produces identical bytes; `groundwork transcript` is the reader.
+// Only the line itself is atomic: concurrent HTTP clients interleave lines
+// freely, and attribution survives because it rides the session id, never
+// the line order.
+func (f *mcpFleet) logCall(params json.RawMessage, service, session string, result map[string]any) {
+	if f.log == nil {
+		return
+	}
+	if len(params) == 0 {
+		params = json.RawMessage("null")
+	}
+	line := append([]byte(`{"call":`), params...)
+	if service != "" {
+		q, _ := json.Marshal(service)
+		line = append(append(line, []byte(`,"service":`)...), q...)
+	}
+	if session != "" {
+		q, _ := json.Marshal(session)
+		line = append(append(line, []byte(`,"session":`)...), q...)
+	}
+	if isErr, _ := result["isError"].(bool); isErr {
+		line = append(line, []byte(`,"isError":true`)...)
+	}
+	f.logMu.Lock()
+	_, _ = f.log.Write(append(line, '}', '\n'))
+	f.logMu.Unlock()
+}
+
 // dispatch answers one JSON-RPC request — the transport-independent core
-// shared by the stdio loop and the streamable-HTTP handler. Tool calls (and
-// the transcript log) are serialized under the fleet mutex: HTTP requests
-// arrive concurrently, and reload mutates per-service state.
-func (f *mcpFleet) dispatch(req rpcRequest) rpcResponse {
+// shared by the stdio loop and the streamable-HTTP handler. session is the
+// transport's attribution label for the transcript ("" when the client never
+// initialized or did not echo its id).
+func (f *mcpFleet) dispatch(req rpcRequest, session string) rpcResponse {
 	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 	switch req.Method {
 	case "initialize":
-		if f.log != nil {
-			// The session boundary: per-session query counts are an E4
-			// measure, and a session that initialized and then asked nothing
-			// is itself evidence.
-			f.mu.Lock()
-			_, _ = f.log.Write([]byte("{\"init\":true}\n"))
-			f.mu.Unlock()
-		}
 		proto := f.proto
 		if proto == "" {
 			proto = "2024-11-05"
@@ -304,31 +392,9 @@ func (f *mcpFleet) dispatch(req rpcRequest) rpcResponse {
 	case "tools/list":
 		resp.Result = map[string]any{"tools": toolDefs()}
 	case "tools/call":
-		f.mu.Lock()
 		result, service := f.callTool(req.Params)
-		if f.log != nil {
-			// One JSON line per call, written AFTER the call so the line can
-			// carry its resolution: the service that answered ("*" for the
-			// fleet-wide lenses, absent when resolution failed) and whether
-			// the result was an isError. Deterministic on purpose — no
-			// timestamps — so a replayed drill produces identical bytes;
-			// `groundwork transcript` is the reader.
-			params := req.Params
-			if len(params) == 0 {
-				params = json.RawMessage("null")
-			}
-			line := append([]byte(`{"call":`), params...)
-			if service != "" {
-				q, _ := json.Marshal(service)
-				line = append(append(line, []byte(`,"service":`)...), q...)
-			}
-			if isErr, _ := result["isError"].(bool); isErr {
-				line = append(line, []byte(`,"isError":true`)...)
-			}
-			_, _ = f.log.Write(append(line, '}', '\n'))
-		}
+		f.logCall(req.Params, service, session, result)
 		resp.Result = result
-		f.mu.Unlock()
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
 	}
@@ -415,6 +481,9 @@ type toolArgs struct {
 // are answered here; everything else resolves to one service first. The
 // second return is the transcript's resolution label: the answering
 // service's name, "*" for a fleet-wide answer, "" when resolution failed.
+//
+// Every tool reads per-service state and runs read-locked, concurrently;
+// reload, the lone mutator, takes the write lock so no card can straddle it.
 func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
 	var call struct {
 		Name      string   `json:"name"`
@@ -422,6 +491,13 @@ func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
 	}
 	if err := json.Unmarshal(params, &call); err != nil {
 		return toolError("malformed tools/call params: " + err.Error()), ""
+	}
+	if call.Name == "reload" {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+	} else {
+		f.mu.RLock()
+		defer f.mu.RUnlock()
 	}
 	if call.Name == "fleet-events" {
 		return f.fleetEvents(), "*"
@@ -442,30 +518,31 @@ func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
 
 // fleetEntrypoints lists every service's named roots, prefixed by service —
 // the fleet directory an agent orients with before making an explicit hop.
+// Stale notes and the empty-case disclosure are independent: a stale warning
+// must never swallow the "there are no entrypoints" answer.
 func (f *mcpFleet) fleetEntrypoints() map[string]any {
+	stale := f.staleNotes()
 	var b strings.Builder
-	b.WriteString(f.staleNotes())
 	for _, name := range f.names {
 		for _, ep := range f.services[name].ix.Entrypoints() {
 			fmt.Fprintf(&b, "%-12s %-9s %-40s → %s\n", name, ep.Kind, ep.Name, ep.Fn)
 		}
 	}
 	if b.Len() == 0 {
-		return toolText("no named entrypoints in any loaded graph (routes behind uncovered routers are absent — see the docs)")
+		return toolText(stale + "no named entrypoints in any loaded graph (routes behind uncovered routers are absent — see the docs)")
 	}
-	return toolText(b.String())
+	return toolText(stale + b.String())
 }
 
 // fleetEvents joins the loaded graphs' bus surfaces by event name: which
 // service publishes each event and which consumes it. The join vocabulary is
 // the boundary contracts' — published/consumed names match across services —
 // so no merged graph is needed or implied; an empty side is reported as
-// outside the loaded fleet, never guessed. Publishers come from PUBLISH
-// boundary edges; consumers from CONSUME edges and consumer entrypoints.
-// Dynamically-named publishes/consumes are disclosed per service: events this
-// lens cannot name are absent from it.
+// outside the loaded fleet, never guessed. The surface itself comes from
+// graph.Index.BusEffects (the schema owner decodes its own labels), plus
+// consumer entrypoints. Dynamically-named bus effects are disclosed per
+// service: events this lens cannot name are absent from it.
 func (f *mcpFleet) fleetEvents() map[string]any {
-	const busPrefix = "boundary:bus "
 	pub, con := map[string]map[string]bool{}, map[string]map[string]bool{}
 	dynamic := map[string]int{}
 	add := func(m map[string]map[string]bool, event, service string) {
@@ -476,23 +553,14 @@ func (f *mcpFleet) fleetEvents() map[string]any {
 	}
 	for _, name := range f.names {
 		ix := f.services[name].ix
-		for _, e := range ix.Edges() {
-			if !strings.HasPrefix(e.To, busPrefix) {
-				continue
-			}
-			if e.IsDynamic() {
-				dynamic[name]++
-				continue
-			}
-			fields := strings.Fields(strings.TrimPrefix(e.To, busPrefix))
-			if len(fields) < 2 {
-				continue
-			}
-			switch fields[0] {
-			case "PUBLISH":
-				add(pub, fields[1], name)
-			case "CONSUME":
-				add(con, fields[1], name)
+		effects, dyn := ix.BusEffects()
+		dynamic[name] = dyn
+		for _, be := range effects {
+			switch be.Op {
+			case graph.BusPublish:
+				add(pub, be.Event, name)
+			case graph.BusConsume:
+				add(con, be.Event, name)
 			}
 		}
 		for _, ep := range ix.Entrypoints() {
@@ -511,26 +579,16 @@ func (f *mcpFleet) fleetEvents() map[string]any {
 	if len(events) == 0 {
 		return toolText("no bus events in any loaded graph")
 	}
-	names := func(m map[string]bool) string {
+	side := func(m map[string]bool) string {
 		if len(m) == 0 {
 			return "(none in the loaded fleet)"
 		}
-		var ns []string
-		for n := range m {
-			ns = append(ns, n)
-		}
-		sort.Strings(ns)
-		return strings.Join(ns, ", ")
+		return strings.Join(setutil.SortedKeys(m), ", ")
 	}
-	var sorted []string
-	for ev := range events {
-		sorted = append(sorted, ev)
-	}
-	sort.Strings(sorted)
 	var b strings.Builder
 	b.WriteString(f.staleNotes())
-	for _, ev := range sorted {
-		fmt.Fprintf(&b, "%-28s published by: %-28s consumed by: %s\n", ev, names(pub[ev]), names(con[ev]))
+	for _, ev := range setutil.SortedKeys(events) {
+		fmt.Fprintf(&b, "%-28s published by: %-28s consumed by: %s\n", ev, side(pub[ev]), side(con[ev]))
 	}
 	for _, name := range f.names {
 		if n := dynamic[name]; n > 0 {

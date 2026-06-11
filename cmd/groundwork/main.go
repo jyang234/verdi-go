@@ -532,36 +532,11 @@ func cmdVerifyArtifact(args []string) error {
 	return nil
 }
 
-// takeValueFlag removes a value flag ("--name v" or "--name=v") from args in
-// any position, returning its value. One mechanism for every subcommand —
-// stdlib flag.Parse stops at the first positional, so each hand-rolled parser
-// is a usage string waiting to disagree with reality.
-func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		matched := false
-		for _, n := range names {
-			if a == n && i+1 < len(args) {
-				value, found, matched = args[i+1], true, true
-				i++
-				break
-			}
-			if strings.HasPrefix(a, n+"=") {
-				value, found, matched = strings.TrimPrefix(a, n+"="), true, true
-				break
-			}
-		}
-		if !matched {
-			rest = append(rest, a)
-		}
-	}
-	return value, found, rest
-}
-
-// takeValueFlags removes every occurrence of a repeatable value flag from
-// args, returning the values in order of appearance. takeValueFlag's
-// last-wins collapse is right for singular flags; the mcp --service form
-// needs each occurrence.
+// takeValueFlags removes every occurrence of a value flag ("--name v" or
+// "--name=v") from args in any position, returning the values in order of
+// appearance. One scanning mechanism for every subcommand — stdlib
+// flag.Parse stops at the first positional, so each hand-rolled parser is a
+// usage string waiting to disagree with reality.
 func takeValueFlags(args []string, names ...string) (values []string, rest []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -582,6 +557,16 @@ func takeValueFlags(args []string, names ...string) (values []string, rest []str
 		}
 	}
 	return values, rest
+}
+
+// takeValueFlag is the singular form: every occurrence is removed, the last
+// value wins. A thin wrapper so the scanning loop exists exactly once.
+func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
+	values, rest := takeValueFlags(args, names...)
+	if len(values) == 0 {
+		return "", false, rest
+	}
+	return values[len(values)-1], true, rest
 }
 
 // takeFlag removes any of the given boolean flag spellings from args, reporting
