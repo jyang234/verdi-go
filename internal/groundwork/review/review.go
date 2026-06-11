@@ -101,10 +101,10 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 
 	baseKeys := map[string]bool{}
 	for _, f := range baseRes.Findings {
-		baseKeys[findingKey(f)] = true
+		baseKeys[f.Key()] = true
 	}
 	for _, f := range branchRes.Findings {
-		if baseKeys[findingKey(f)] {
+		if baseKeys[f.Key()] {
 			continue
 		}
 		v := Violation{Rule: f.Rule, Summary: f.Summary, From: f.From, To: f.To, Detail: f.Detail}
@@ -115,10 +115,6 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 		}
 	}
 	return violations, cautions
-}
-
-func findingKey(f fitness.Finding) string {
-	return strings.Join([]string{f.Rule, f.From, f.To, f.Summary}, "\x00")
 }
 
 // contractChanges reports inter-service surface movement: entrypoints (Sources)

@@ -75,6 +75,13 @@ func TestValidateErrors(t *testing.T) {
 			Service: "s", Version: 1,
 			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}}},
 		},
+		"dup pass rule name": {
+			Service: "s", Version: 1,
+			MustPassThrough: []PassRule{
+				{Name: "r", From: []string{"a"}, To: []string{"b"}, Through: []string{"c"}},
+				{Name: "r", From: []string{"x"}, To: []string{"y"}, Through: []string{"z"}},
+			},
+		},
 		"selector in reach to": {
 			Service: "s", Version: 1,
 			MustNotReach: []ReachRule{{Name: "r", From: []string{"a"}, To: []string{EntrypointSelector}}},

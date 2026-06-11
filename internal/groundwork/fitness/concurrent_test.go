@@ -79,3 +79,20 @@ func TestConcurrentBlindFrontier(t *testing.T) {
 		t.Fatalf("require_proof must escalate, got %v", res.Findings)
 	}
 }
+
+// RF-2: findings are a set, not a multiset. The same function spawned from two
+// goroutine sites — and its boundary effect reached both directly and through
+// the cone — is one finding per (from, target) pair.
+func TestConcurrentDuplicateSpawnsSingleFinding(t *testing.T) {
+	g := loadGraph(t, "layeredsvc.graph.json")
+	const sUpdate = "(*example.com/layeredsvc/internal/store.Store).UpdateUser"
+	g.Edges = append(g.Edges,
+		graph.Edge{From: "(*example.com/layeredsvc/internal/app.Service).UpdateProfile", To: sUpdate, Tier: 2, Concurrent: true},
+		graph.Edge{From: "(*example.com/layeredsvc/internal/handler.Server).UpdateUser", To: sUpdate, Tier: 2, Concurrent: true},
+	)
+	rule := policy.ConcurrentRule{Name: "no-async-writes", To: []string{"boundary:db UPDATE"}}
+	res := Check(concurrentPolicy(rule), graph.NewIndex(g))
+	if v := res.Violations(); len(v) != 1 {
+		t.Fatalf("two spawn sites of one function must yield one finding, got %v", v)
+	}
+}

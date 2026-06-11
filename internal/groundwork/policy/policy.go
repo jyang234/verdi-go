@@ -249,10 +249,17 @@ func (p *Policy) Validate() error {
 			return err
 		}
 	}
+	passNames := make(map[string]bool, len(p.MustPassThrough))
 	for i, r := range p.MustPassThrough {
 		if strings.TrimSpace(r.Name) == "" {
 			return fmt.Errorf("must_pass_through[%d]: name is required", i)
 		}
+		// Names are identity: findings carry them, and the exceptions audit
+		// attributes suppressed findings to entries by rule name.
+		if passNames[r.Name] {
+			return fmt.Errorf("must_pass_through[%d]: duplicate name %q", i, r.Name)
+		}
+		passNames[r.Name] = true
 		if len(r.From) == 0 || len(r.To) == 0 || len(r.Through) == 0 {
 			return fmt.Errorf("must_pass_through[%d] (%s): from, to and through are all required", i, r.Name)
 		}

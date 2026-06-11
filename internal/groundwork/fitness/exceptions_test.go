@@ -75,3 +75,31 @@ func TestExceptionsBlindSpotLiveness(t *testing.T) {
 		t.Errorf("DeadCount = %d, want 1", DeadCount(xs))
 	}
 }
+
+// RF-2: the case the count-equality differential got wrong. Removing this
+// allow entry swaps the rule's blind-frontier Caution for a bypass Violation —
+// the finding COUNT stays equal, but the entry is actively suppressing a
+// gate-failing violation and must be LIVE. Set-based attribution cannot be
+// fooled by the swap.
+func TestExceptionsLiveOnCautionViolationSwap(t *testing.T) {
+	p := &policy.Policy{Service: "blindsvc", Version: 1, MustPassThrough: []policy.PassRule{{
+		Name:    "audit-guards-bus",
+		From:    []string{policy.EntrypointSelector},
+		To:      []string{"boundary:bus PUBLISH user.created"}, // exactly one bypass target
+		Through: []string{"example.com/blindsvc/internal/audit.Check"},
+		Allow:   []policy.Exception{{To: "boundary:bus PUBLISH user.created", Reason: "reviewed"}},
+	}}}
+	ix := graph.NewIndex(loadGraph(t, "blindsvc.graph.json")) // blind cone: caution when allowed
+
+	// Sanity: the swap shape holds — allowed run yields one caution, stripped
+	// run yields violations; counts may coincide, which is the trap.
+	base := Check(p, ix)
+	if len(base.Violations()) != 0 || len(base.Cautions()) != 1 {
+		t.Fatalf("fixture drifted: want exactly one caution with the allow present, got %v", base.Findings)
+	}
+
+	xs := Exceptions(p, ix)
+	if len(xs) != 1 || xs[0].Dead {
+		t.Fatalf("entry suppressing the only bypass must be LIVE: %+v", xs)
+	}
+}

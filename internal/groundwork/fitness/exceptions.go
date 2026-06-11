@@ -3,6 +3,7 @@ package fitness
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
@@ -23,39 +24,66 @@ type ExceptionStatus struct {
 	Dead   bool   `json:"dead,omitempty"`
 }
 
-// Exceptions audits every allow-list in the policy against one graph. For the
-// finding-suppressing lists (layering, must_pass_through) liveness is decided
-// differentially: re-run the checks with the single entry removed — if no new
-// finding appears, the entry suppresses nothing here. A blind-spot exception
-// is live while the graph still carries a matching blind spot. Deterministic
-// and read-only; it informs review, it does not gate.
+// Exceptions audits every allow-list in the policy against one graph.
+//
+// Liveness is decided by suppressed-set attribution: run Check twice — once as
+// configured (baseline) and once with every audited allow-list emptied — and
+// take the findings that appear only in the stripped run. Those are exactly
+// what the allow-lists are suppressing, by finding Key. An entry is LIVE iff
+// it matches at least one suppressed finding, using the same matcher its
+// check uses (a layering entry via exempted; a pass-through entry via
+// rule.Allowed on the bypass pair, scoped to its rule's findings by the
+// rule-name summary prefix — names are validated unique). A blind-spot
+// exception is live while the graph still carries a matching spot.
+//
+// This is identity-based on purpose: an earlier draft compared finding COUNTS
+// per removed entry, and a live entry whose removal swaps a blind-frontier
+// Caution for a bypass Violation kept the count equal — a gate-protecting
+// exception reported DEAD. Sets cannot be fooled that way, and two Check runs
+// replace N+1. Deterministic and read-only; it informs review, it does not
+// gate.
 func Exceptions(p *policy.Policy, ix *graph.Index) []ExceptionStatus {
-	baseline := len(Check(p, ix).Findings)
-	var out []ExceptionStatus
+	baseline := map[string]bool{}
+	for _, f := range Check(p, ix).Findings {
+		baseline[f.Key()] = true
+	}
+	var suppressed []Finding
+	for _, f := range Check(stripAllows(p), ix).Findings {
+		if !baseline[f.Key()] {
+			suppressed = append(suppressed, f)
+		}
+	}
 
+	var out []ExceptionStatus
 	if p.Layering != nil {
-		for i, a := range p.Layering.Allow {
-			p2 := *p
-			lay := *p.Layering
-			lay.Allow = dropException(p.Layering.Allow, i)
-			p2.Layering = &lay
+		for _, a := range p.Layering.Allow {
+			live := false
+			for _, f := range suppressed {
+				if f.Rule == "layering" && exempted([]policy.Exception{a}, f.From, f.To) {
+					live = true
+					break
+				}
+			}
 			out = append(out, ExceptionStatus{
-				Source: "layering", From: a.From, To: a.To, Reason: a.Reason,
-				Dead: len(Check(&p2, ix).Findings) == baseline,
+				Source: "layering", From: a.From, To: a.To, Reason: a.Reason, Dead: !live,
 			})
 		}
 	}
 
 	for ri := range p.MustPassThrough {
 		rule := &p.MustPassThrough[ri]
-		for i, a := range rule.Allow {
-			p2 := *p
-			rules := append([]policy.PassRule{}, p.MustPassThrough...)
-			rules[ri].Allow = dropException(rule.Allow, i)
-			p2.MustPassThrough = rules
+		prefix := rule.Name + ": "
+		for _, a := range rule.Allow {
+			one := policy.PassRule{Allow: []policy.Exception{a}}
+			live := false
+			for _, f := range suppressed {
+				if f.Rule == "must_pass_through" && strings.HasPrefix(f.Summary, prefix) && one.Allowed(f.From, f.To) {
+					live = true
+					break
+				}
+			}
 			out = append(out, ExceptionStatus{
-				Source: "must_pass_through:" + rule.Name, From: a.From, To: a.To, Reason: a.Reason,
-				Dead: len(Check(&p2, ix).Findings) == baseline,
+				Source: "must_pass_through:" + rule.Name, From: a.From, To: a.To, Reason: a.Reason, Dead: !live,
 			})
 		}
 	}
@@ -93,10 +121,25 @@ func Exceptions(p *policy.Policy, ix *graph.Index) []ExceptionStatus {
 	return out
 }
 
-func dropException(xs []policy.Exception, i int) []policy.Exception {
-	out := make([]policy.Exception, 0, len(xs)-1)
-	out = append(out, xs[:i]...)
-	return append(out, xs[i+1:]...)
+// stripAllows returns a copy of p with every audited allow-list emptied, so
+// one Check run exposes everything the allow-lists collectively suppress.
+// Blind-spot exceptions are not part of fitness findings and keep their own
+// present-spot liveness test.
+func stripAllows(p *policy.Policy) *policy.Policy {
+	stripped := *p
+	if p.Layering != nil {
+		lay := *p.Layering
+		lay.Allow = nil
+		stripped.Layering = &lay
+	}
+	if len(p.MustPassThrough) > 0 {
+		rules := append([]policy.PassRule{}, p.MustPassThrough...)
+		for i := range rules {
+			rules[i].Allow = nil
+		}
+		stripped.MustPassThrough = rules
+	}
+	return &stripped
 }
 
 // DeadCount tallies the dead entries — the number the audit wants at zero.

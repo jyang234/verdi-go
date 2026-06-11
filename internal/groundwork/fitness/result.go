@@ -1,6 +1,9 @@
 package fitness
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Severity ranks a finding. Violations fail the gate; Cautions are surfaced but
 // do not fail it — they are the legible form of the graph abstaining (a
@@ -35,6 +38,15 @@ type Finding struct {
 	From     string
 	To       string
 	Detail   string
+}
+
+// Key is the finding's identity for set operations — the base-vs-branch
+// "new findings only" diff and the exception-liveness attribution both key on
+// it. Identity is (Rule, From, To, Summary); Detail is presentation and
+// deliberately excluded (D-OB6), so re-derived prose can never make an old
+// finding look new.
+func (f Finding) Key() string {
+	return strings.Join([]string{f.Rule, f.From, f.To, f.Summary}, "\x00")
 }
 
 // Result is the full set of findings from evaluating a policy against a graph.
