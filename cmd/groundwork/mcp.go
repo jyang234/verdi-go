@@ -333,7 +333,7 @@ func (f *mcpFleet) newSession() string {
 	f.sessionN++
 	sid := strconv.Itoa(f.sessionN)
 	if f.log != nil {
-		fmt.Fprintf(f.log, "{\"init\":true,\"session\":%q}\n", sid)
+		_, _ = fmt.Fprintf(f.log, "{\"init\":true,\"session\":%q}\n", sid)
 	}
 	return sid
 }
