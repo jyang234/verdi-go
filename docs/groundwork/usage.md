@@ -199,6 +199,7 @@ groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding car
 groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
 groundwork init <graph> [--guide …]                     propose a baseline policy from measured facts
 groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
+groundwork mcp --service <name>=<graph> …               one server, several services' maps (+ fleet-events)
 groundwork fitness <policy> <graph>                     evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
 groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
@@ -517,11 +518,12 @@ derived with the exact matchers the checks use, so the card never promises a
 guardrail that does not bind.
 
 `groundwork mcp <graph.json> [--policy …] [--expect …] [--log calls.jsonl]`
-serves seven tools over
+serves eight tools over
 MCP stdio (newline-delimited JSON-RPC, protocol 2024-11-05, no third-party
 dependencies): `ground`, `reach`, `triage` (with the `fail` what-if framing,
 including effects possibly committed before the fault), `exceptions`,
-`entrypoints` (what the route/event symptoms can address), `fitness`, and
+`entrypoints` (what the route/event symptoms can address), `fleet-events`,
+`fitness`, and
 `reload`. A graph file that changes on disk is flagged on every response —
 the server never reloads silently; `reload` re-verifies the stamp. `--log`
 writes a deterministic transcript of tool calls (the E4 measurement
@@ -529,8 +531,29 @@ apparatus). **No write tools, ever**: a tool that edited rules would let the
 agent author its own guardrails. The
 agent's edit loop becomes ground → edit → verify with one rule set at both
 ends; the incident loop becomes triage → narrow → `flowmap behavior ingest`.
-The server only ever reads the CI-generated graph it was started with — the
+The server only ever reads the CI-generated graphs it was started with — the
 same trust posture as every other groundwork surface.
+
+The `--service` form serves a neighborhood of services in one session:
+
+```console
+$ groundwork mcp --service payments=graphs/payments.json \
+                 --service ledger=graphs/ledger.json \
+                 --policy payments=payments-policy.json \
+                 --expect payments="$DEPLOYED_SHA"
+```
+
+Each service keeps its own index, policy, stamp, and staleness state; every
+tool takes an optional `service` argument, and with a single loaded service
+it is never needed (the lone service is the default — the single-graph form
+is unchanged). With several loaded, per-service tools require the hop to be
+explicit, `entrypoints` with no service lists the whole fleet prefixed by
+service, and `fleet-events` joins the graphs' bus surfaces by event name —
+who publishes what, who consumes it — the first cross-service lens. The join
+vocabulary is the boundary contracts' (published/consumed names match across
+services); answers stay per-service and honest. This is **not** a merged
+cross-service graph: a side with no loaded match says so rather than
+guessing, and dynamically-named publishes are disclosed per service.
 
 ---
 
@@ -635,6 +658,25 @@ audit). The intended loop is **ground → edit → verify**: the same rule set
 that will gate the merge, surfaced before the edit is made. Tool failures
 come back as readable tool results the agent can correct from, never protocol
 errors.
+
+When the agent works across a service boundary (a publisher in one repo, the
+consumer in another), serve both maps from one server with `--service` and
+the agent orients with `entrypoints` (fleet-wide) and `fleet-events` before
+making the explicit per-service hop:
+
+```json
+{
+  "mcpServers": {
+    "groundwork": {
+      "command": "groundwork",
+      "args": ["mcp",
+               "--service", "payments=ci-artifacts/payments.json",
+               "--service", "ledger=ci-artifacts/ledger.json",
+               "--policy", "payments=payments-policy.json"]
+    }
+  }
+}
+```
 
 ### Consuming graph.json directly
 

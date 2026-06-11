@@ -44,7 +44,7 @@ no committed lock would be ⚠️, not ✅.
 | Incident triage (5 symptom kinds) | 📐 | **10/10 recall, median 8% hunt space, route scenarios 3%** (E1); trace handoff proven end-to-end (E2); staleness mis-scope demonstrated (E3); thresholds are committed assertions | Fixture is 39 nodes and well-factored — fractions will grow on monoliths (why the thresholds are ratchets); non-code causes are out of scope, stated on every fault card |
 | Partial-effect fault answers | ✅ | Certainly/possibly split locked; scope statement prints even when sections are empty | Inherits effect_order's same-function limit |
 | Ground cards (pre-edit binding rules) | ✅ | The defining test seeds the violation the card warns about and asserts the named rules fire; same matchers as the checks | Binding ≠ exhaustive: only declared rules appear; an unconfigured hazard is invisible by definition |
-| MCP server | ✅ | Scripted-session test: handshake, discovery, cards, isError tool results, -32601 | One graph loaded at startup (no reload on redeploy); stdio only; first-of-kind surface with no field hours |
+| MCP server | ✅ | Scripted-session tests: handshake, discovery, cards, isError tool results, -32601; fleet session: prefixed entrypoints, fleet-events join, explicit-hop errors | Staleness flagged but reload is manual by design; stdio only (no shared/team serving — Tier 3, deferred); fleet-events covers loaded services only; first-of-kind surface with no field hours |
 | Effectiveness drills as ratchet | 📐 | E1–E3 committed; numbers reprint on every `-v` run | They measure that triage does its job well, not that its job covers everything |
 
 ## Cross-cutting properties

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,30 +18,92 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
 
+const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]
+   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]`
+
 // cmdMCP serves the agent-facing MCP surface over stdio (IT-4): the triage,
 // reach, ground, and exceptions lenses as tools an agent calls interactively
 // ("now show who publishes T", "what binds the function I'm about to edit").
-// The graph is loaded once at startup and is read-only — the server holds the
-// same trust posture as every other groundwork surface: it judges a
-// CI-generated graph, it never generates one.
+// Graphs are loaded once at startup and are read-only — the server holds the
+// same trust posture as every other groundwork surface: it judges
+// CI-generated graphs, it never generates one.
+//
+// Two forms. The single-graph form is unchanged. The --service form serves a
+// named fleet of graphs in one session so an agent can walk a publisher in
+// service A to the consumer in service B — each service keeps its own
+// index/policy/stamp/staleness state, every answer stays per-service and
+// honest, and the cross-service hop is explicit (the agent names the service
+// it asks about). This is NOT a merged cross-service graph; `fleet-events`
+// is the one fleet-wide lens, and it only joins names the contracts already
+// share.
 //
 // Infrastructure decision, recorded here: the transport is hand-rolled
 // newline-delimited JSON-RPC 2.0 (the MCP stdio framing), protocol version
 // 2024-11-05, tools capability only. ~150 lines of encoding beats taking the
 // engine module's first third-party server dependency for three methods.
 func cmdMCP(args []string) error {
-	policyPath, hasPolicy, args := takeValueFlag(args, "--policy", "-policy")
-	expect, hasExpect, args := takeValueFlag(args, "--expect", "-expect")
+	servicePairs, args := takeValueFlags(args, "--service", "-service")
+	policyPairs, args := takeValueFlags(args, "--policy", "-policy")
+	expectPairs, args := takeValueFlags(args, "--expect", "-expect")
 	logPath, hasLog, args := takeValueFlag(args, "--log", "-log")
-	if len(args) != 1 {
-		return fmt.Errorf("usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]")
+
+	fleet := &mcpFleet{services: map[string]*mcpServer{}}
+	if len(servicePairs) > 0 {
+		if len(args) != 0 {
+			return fmt.Errorf("a positional graph and --service are mutually exclusive\n%s", mcpUsage)
+		}
+		for _, pair := range servicePairs {
+			name, path, ok := strings.Cut(pair, "=")
+			if !ok || name == "" || path == "" {
+				return fmt.Errorf("--service wants <name>=<graph.json>, got %q", pair)
+			}
+			if _, dup := fleet.services[name]; dup {
+				return fmt.Errorf("duplicate --service name %q", name)
+			}
+			fleet.services[name] = &mcpServer{path: path}
+		}
+		for _, pair := range expectPairs {
+			name, stamp, ok := strings.Cut(pair, "=")
+			srv := fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--expect wants <name>=<stamp> naming a --service, got %q", pair)
+			}
+			srv.expect, srv.hasExpect = stamp, true
+		}
+	} else {
+		// Single-graph form: the lone service is named by its path, so every
+		// fleet-aware code path below sees one shape; calls never need to (and
+		// in practice never do) pass a service argument when only one is loaded.
+		if len(args) != 1 {
+			return fmt.Errorf("%s", mcpUsage)
+		}
+		srv := &mcpServer{path: args[0]}
+		if len(expectPairs) > 0 {
+			srv.expect, srv.hasExpect = expectPairs[len(expectPairs)-1], true
+		}
+		fleet.services[args[0]] = srv
 	}
-	srv := &mcpServer{path: args[0], expect: expect, hasExpect: hasExpect}
-	if err := srv.load(); err != nil {
-		return err
+	for name := range fleet.services {
+		fleet.names = append(fleet.names, name)
 	}
-	if hasPolicy {
-		p, err := policy.Load(policyPath)
+	sort.Strings(fleet.names)
+	for _, name := range fleet.names {
+		if err := fleet.services[name].load(); err != nil {
+			return err
+		}
+	}
+	for _, pair := range policyPairs {
+		path := pair
+		srv := fleet.lone()
+		if len(servicePairs) > 0 {
+			name, p, ok := strings.Cut(pair, "=")
+			srv = fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--policy wants <name>=<policy.json> naming a --service, got %q", pair)
+			}
+			path = p
+		}
+		p, err := policy.Load(path)
 		if err != nil {
 			return err
 		}
@@ -55,13 +118,63 @@ func cmdMCP(args []string) error {
 			return err
 		}
 		defer func() { _ = f.Close() }()
-		srv.log = f
+		fleet.log = f
 	}
-	return serveMCP(os.Stdin, os.Stdout, srv)
+	return serveMCP(os.Stdin, os.Stdout, fleet)
 }
 
-// mcpServer is the per-session state: the loaded graph, its file identity
-// (for staleness detection), the optional policy, and the optional call log.
+// mcpFleet is the session state: one or more named services, each holding its
+// own graph/policy/stamp/staleness, plus the optional call log. Tools that
+// answer about one service take an optional `service` argument; with a single
+// loaded service it is never needed (the lone service is the default).
+type mcpFleet struct {
+	names    []string // sorted; the single-graph form uses the graph path as the name
+	services map[string]*mcpServer
+	log      io.Writer
+}
+
+// lone returns the only service when exactly one is loaded, else nil.
+func (f *mcpFleet) lone() *mcpServer {
+	if len(f.names) == 1 {
+		return f.services[f.names[0]]
+	}
+	return nil
+}
+
+// resolve picks the service a call addresses. Failures are tool results the
+// agent can read and correct: an unknown name lists the loaded ones, and an
+// omitted name with several services loaded asks for the hop to be explicit.
+func (f *mcpFleet) resolve(name string) (*mcpServer, map[string]any) {
+	if name == "" {
+		if srv := f.lone(); srv != nil {
+			return srv, nil
+		}
+		return nil, toolError(fmt.Sprintf("%d services are loaded; pass service: one of %s", len(f.names), strings.Join(f.names, ", ")))
+	}
+	if srv, ok := f.services[name]; ok {
+		return srv, nil
+	}
+	return nil, toolError(fmt.Sprintf("unknown service %q; loaded: %s", name, strings.Join(f.names, ", ")))
+}
+
+// staleNotes flags every service whose graph file changed on disk — the
+// fleet-wide listings disclose staleness per service, by name, just as the
+// per-service answers do for their own graph.
+func (f *mcpFleet) staleNotes() string {
+	var b strings.Builder
+	for _, name := range f.names {
+		if f.services[name].isStale() {
+			fmt.Fprintf(&b, "⚠️ service %s: the graph file changed on disk after this server loaded it — call the reload tool before trusting answers about it\n", name)
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// mcpServer is the per-service state: the loaded graph, its file identity
+// (for staleness detection), and the optional policy.
 // NO WRITE TOOLS, EVER: a tool that edited policy or rules would let the
 // agent author its own guardrails — the one thing the trust model forbids.
 // Graph generation likewise stays in CLI/CI; this server only ever reads.
@@ -72,7 +185,6 @@ type mcpServer struct {
 	p         *policy.Policy
 	expect    string
 	hasExpect bool
-	log       io.Writer
 }
 
 func (s *mcpServer) load() error {
@@ -90,11 +202,16 @@ func (s *mcpServer) load() error {
 	return nil
 }
 
+// isStale reports whether the graph file changed on disk after load.
+func (s *mcpServer) isStale() bool {
+	st, err := os.Stat(s.path)
+	return err == nil && !st.ModTime().Equal(s.mtime)
+}
+
 // staleNote flags a changed graph file on every response rather than silently
 // reloading: answers must never change mid-session without disclosure.
 func (s *mcpServer) staleNote() string {
-	st, err := os.Stat(s.path)
-	if err == nil && !st.ModTime().Equal(s.mtime) {
+	if s.isStale() {
 		return "⚠️ the graph file changed on disk after this server loaded it — call the reload tool (or restart) before trusting further answers\n\n"
 	}
 	return ""
@@ -122,7 +239,7 @@ type rpcError struct {
 // serveMCP runs the request loop until EOF. Notifications (no id) are
 // consumed silently per JSON-RPC; tool failures are MCP tool results with
 // isError, not protocol errors, so the agent can read and recover from them.
-func serveMCP(r io.Reader, w io.Writer, srv *mcpServer) error {
+func serveMCP(r io.Reader, w io.Writer, fleet *mcpFleet) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<24)
 	enc := json.NewEncoder(w)
@@ -148,10 +265,10 @@ func serveMCP(r io.Reader, w io.Writer, srv *mcpServer) error {
 		case "tools/list":
 			resp.Result = map[string]any{"tools": toolDefs()}
 		case "tools/call":
-			if srv.log != nil {
-				_, _ = srv.log.Write(append(append([]byte(`{"call":`), req.Params...), '}', 10))
+			if fleet.log != nil {
+				_, _ = fleet.log.Write(append(append([]byte(`{"call":`), req.Params...), '}', 10))
 			}
-			resp.Result = srv.callTool(req.Params)
+			resp.Result = fleet.callTool(req.Params)
 		default:
 			resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
 		}
@@ -163,14 +280,15 @@ func serveMCP(r io.Reader, w io.Writer, srv *mcpServer) error {
 }
 
 func toolDefs() []map[string]any {
+	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	obj := func(props map[string]any, required ...string) map[string]any {
+		props["service"] = str("service name, when more than one graph is loaded (default: the only loaded service)")
 		s := map[string]any{"type": "object", "properties": props}
 		if len(required) > 0 {
 			s["required"] = required
 		}
 		return s
 	}
-	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	return []map[string]any{
 		{
 			"name":        "ground",
@@ -196,49 +314,174 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "entrypoints",
-			"description": "List the service's named roots (HTTP routes, consumed topics) with their handler functions — what triage's route/event symptoms can address.",
+			"description": "List a service's named roots (HTTP routes, consumed topics) with their handler functions — what triage's route/event symptoms can address. With several services loaded and no service argument, lists across the whole fleet, prefixed by service.",
 			"inputSchema": obj(map[string]any{}),
 		},
 		{
+			"name":        "fleet-events",
+			"description": "Cross-service event lens: every bus event a loaded service publishes or consumes, joined by name across the fleet — who publishes what, who consumes it. Covers loaded services only and discloses dynamically-named publishes it cannot see.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			"name":        "fitness",
-			"description": "Evaluate every policy invariant against the loaded graph: violations, cautions, and obligation verdicts. Requires the server to be started with --policy.",
+			"description": "Evaluate every policy invariant against a loaded graph: violations, cautions, and obligation verdicts. Requires the service to be started with --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 		{
 			"name":        "reload",
-			"description": "Reload the graph from disk after a redeploy changed it (the server flags staleness on every response; it never reloads silently). Optionally re-verify identity with expect.",
+			"description": "Reload a service's graph from disk after a redeploy changed it (the server flags staleness on every response; it never reloads silently). Optionally re-verify identity with expect.",
 			"inputSchema": obj(map[string]any{"expect": str("stamp the reloaded graph must carry (e.g. the new deployed SHA)")}),
 		},
 		{
 			"name":        "exceptions",
-			"description": "Audit every policy allow-list entry against the graph; DEAD entries suppress nothing and should be deleted. Requires the server to be started with --policy.",
+			"description": "Audit every policy allow-list entry against a loaded graph; DEAD entries suppress nothing and should be deleted. Requires the service to be started with --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
 }
 
+// toolArgs is the union of every tool's arguments.
+type toolArgs struct {
+	Service string `json:"service"`
+	FQN     string `json:"fqn"`
+	Frame   string `json:"frame"`
+	Route   string `json:"route"`
+	Table   string `json:"table"`
+	Event   string `json:"event"`
+	Peer    string `json:"peer"`
+	Fail    bool   `json:"fail"`
+	Expect  string `json:"expect"`
+}
+
 // callTool dispatches one tools/call. Failures are tool results (isError),
 // never protocol errors: the agent reads the reason and corrects its call.
-func (s *mcpServer) callTool(params json.RawMessage) map[string]any {
-	ix, p := s.ix, s.p
-	stale := s.staleNote()
+// The fleet-wide lenses (fleet-events, the no-service entrypoints listing)
+// are answered here; everything else resolves to one service first.
+func (f *mcpFleet) callTool(params json.RawMessage) map[string]any {
 	var call struct {
-		Name      string `json:"name"`
-		Arguments struct {
-			FQN    string `json:"fqn"`
-			Frame  string `json:"frame"`
-			Route  string `json:"route"`
-			Table  string `json:"table"`
-			Event  string `json:"event"`
-			Peer   string `json:"peer"`
-			Fail   bool   `json:"fail"`
-			Expect string `json:"expect"`
-		} `json:"arguments"`
+		Name      string   `json:"name"`
+		Arguments toolArgs `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &call); err != nil {
 		return toolError("malformed tools/call params: " + err.Error())
 	}
-	a := call.Arguments
+	if call.Name == "fleet-events" {
+		return f.fleetEvents()
+	}
+	if call.Name == "entrypoints" && call.Arguments.Service == "" && len(f.names) > 1 {
+		return f.fleetEntrypoints()
+	}
+	srv, errRes := f.resolve(call.Arguments.Service)
+	if errRes != nil {
+		return errRes
+	}
+	return srv.call(call.Name, call.Arguments)
+}
+
+// fleetEntrypoints lists every service's named roots, prefixed by service —
+// the fleet directory an agent orients with before making an explicit hop.
+func (f *mcpFleet) fleetEntrypoints() map[string]any {
+	var b strings.Builder
+	b.WriteString(f.staleNotes())
+	for _, name := range f.names {
+		for _, ep := range f.services[name].ix.Entrypoints() {
+			fmt.Fprintf(&b, "%-12s %-9s %-40s → %s\n", name, ep.Kind, ep.Name, ep.Fn)
+		}
+	}
+	if b.Len() == 0 {
+		return toolText("no named entrypoints in any loaded graph (routes behind uncovered routers are absent — see the docs)")
+	}
+	return toolText(b.String())
+}
+
+// fleetEvents joins the loaded graphs' bus surfaces by event name: which
+// service publishes each event and which consumes it. The join vocabulary is
+// the boundary contracts' — published/consumed names match across services —
+// so no merged graph is needed or implied; an empty side is reported as
+// outside the loaded fleet, never guessed. Publishers come from PUBLISH
+// boundary edges; consumers from CONSUME edges and consumer entrypoints.
+// Dynamically-named publishes/consumes are disclosed per service: events this
+// lens cannot name are absent from it.
+func (f *mcpFleet) fleetEvents() map[string]any {
+	const busPrefix = "boundary:bus "
+	pub, con := map[string]map[string]bool{}, map[string]map[string]bool{}
+	dynamic := map[string]int{}
+	add := func(m map[string]map[string]bool, event, service string) {
+		if m[event] == nil {
+			m[event] = map[string]bool{}
+		}
+		m[event][service] = true
+	}
+	for _, name := range f.names {
+		ix := f.services[name].ix
+		for _, e := range ix.Edges() {
+			if !strings.HasPrefix(e.To, busPrefix) {
+				continue
+			}
+			if e.IsDynamic() {
+				dynamic[name]++
+				continue
+			}
+			fields := strings.Fields(strings.TrimPrefix(e.To, busPrefix))
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "PUBLISH":
+				add(pub, fields[1], name)
+			case "CONSUME":
+				add(con, fields[1], name)
+			}
+		}
+		for _, ep := range ix.Entrypoints() {
+			if ep.Kind == "consumer" {
+				add(con, ep.Name, name)
+			}
+		}
+	}
+	events := map[string]bool{}
+	for ev := range pub {
+		events[ev] = true
+	}
+	for ev := range con {
+		events[ev] = true
+	}
+	if len(events) == 0 {
+		return toolText("no bus events in any loaded graph")
+	}
+	names := func(m map[string]bool) string {
+		if len(m) == 0 {
+			return "(none in the loaded fleet)"
+		}
+		var ns []string
+		for n := range m {
+			ns = append(ns, n)
+		}
+		sort.Strings(ns)
+		return strings.Join(ns, ", ")
+	}
+	var sorted []string
+	for ev := range events {
+		sorted = append(sorted, ev)
+	}
+	sort.Strings(sorted)
+	var b strings.Builder
+	b.WriteString(f.staleNotes())
+	for _, ev := range sorted {
+		fmt.Fprintf(&b, "%-28s published by: %-28s consumed by: %s\n", ev, names(pub[ev]), names(con[ev]))
+	}
+	for _, name := range f.names {
+		if n := dynamic[name]; n > 0 {
+			fmt.Fprintf(&b, "\n⚠️ %s has %d dynamically-named bus effect(s) — events it cannot name are absent from this lens", name, n)
+		}
+	}
+	return toolText(b.String())
+}
+
+// call answers one per-service tool against this service's graph and policy.
+func (s *mcpServer) call(name string, a toolArgs) map[string]any {
+	ix, p := s.ix, s.p
+	stale := s.staleNote()
 	withStale := func(r map[string]any) map[string]any {
 		if stale == "" {
 			return r
@@ -248,8 +491,7 @@ func (s *mcpServer) callTool(params json.RawMessage) map[string]any {
 		}
 		return r
 	}
-	_ = withStale
-	switch call.Name {
+	switch name {
 	case "entrypoints":
 		eps := ix.Entrypoints()
 		if len(eps) == 0 {
@@ -352,7 +594,7 @@ func (s *mcpServer) callTool(params json.RawMessage) map[string]any {
 		fmt.Fprintf(&b, "\n%d dead exception(s)\n", fitness.DeadCount(xs))
 		return toolText(b.String())
 	default:
-		return toolError("unknown tool: " + call.Name)
+		return toolError("unknown tool: " + name)
 	}
 }
 

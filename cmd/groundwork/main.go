@@ -83,6 +83,7 @@ usage:
   groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] [--expect <stamp>] [--json] <graph.json>  incident triage card
   groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]  pre-edit grounding card: what binds this function
   groundwork mcp <graph.json> [--policy <policy.json>]  serve triage/reach/ground/exceptions as MCP tools over stdio
+  groundwork mcp --service <name>=<graph.json> ...      same server holding several services' maps (+ fleet-events lens)
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
@@ -550,6 +551,32 @@ func takeValueFlag(args []string, names ...string) (value string, found bool, re
 		}
 	}
 	return value, found, rest
+}
+
+// takeValueFlags removes every occurrence of a repeatable value flag from
+// args, returning the values in order of appearance. takeValueFlag's
+// last-wins collapse is right for singular flags; the mcp --service form
+// needs each occurrence.
+func takeValueFlags(args []string, names ...string) (values []string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		matched := false
+		for _, n := range names {
+			if a == n && i+1 < len(args) {
+				values, matched = append(values, args[i+1]), true
+				i++
+				break
+			}
+			if strings.HasPrefix(a, n+"=") {
+				values, matched = append(values, strings.TrimPrefix(a, n+"=")), true
+				break
+			}
+		}
+		if !matched {
+			rest = append(rest, a)
+		}
+	}
+	return values, rest
 }
 
 // takeFlag removes any of the given boolean flag spellings from args, reporting

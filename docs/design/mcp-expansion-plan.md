@@ -1,11 +1,14 @@
 # MCP expansion: tiers 2–3 — plan-of-record
 
-**Status:** Tier 1 is built (entrypoints, fitness, reload + staleness
-flagging, --log transcript). Tiers 2–3 are designed and deliberately
-deferred; this records the pressure-tested shape so implementation starts
-warm.
+**Status:** Tiers 1 and 2 are built. Tier 1: entrypoints, fitness, reload +
+staleness flagging, --log transcript. Tier 2: `--service` fleet serving with
+the optional `service` arg on every tool, the fleet-wide prefixed
+`entrypoints` listing, and the `fleet-events` lens — implemented in the
+pressure-tested shape recorded below (the lone deviation: the lone service
+is keyed by its graph path in the single-graph form, so one code shape
+serves both). Tier 3 remains designed and deliberately deferred.
 
-## Tier 2 — multi-service serving (build when cross-service is prioritized)
+## Tier 2 — multi-service serving (BUILT)
 
 `groundwork mcp --service payments=graphs/payments.json --service
 ledger=graphs/ledger.json [--policy payments=...]` — a map of named services,
@@ -24,7 +27,10 @@ transport, not its substance. Scoping note: the boundary contracts are the
 join vocabulary (published/consumed events match across services); a
 `fleet-events` discovery tool (which service publishes/consumes each event,
 from the contracts) is the cheap first cross-service lens and needs no merged
-graph.
+graph. As built, fleet-events reads the same vocabulary from the loaded
+graphs themselves (PUBLISH/CONSUME boundary edges + consumer entrypoints) —
+the server already holds them, so no extra contract files are taken — and
+discloses dynamically-named bus effects per service.
 
 ## Tier 3 — streamable-HTTP transport for a team-shared server
 
