@@ -81,6 +81,13 @@ func TestResolvers(t *testing.T) {
 	if r := ResolveFrame(lay, "UpdateUser"); !r.Ambiguous || len(r.Matches) != 2 {
 		t.Errorf("suffix UpdateUser should be ambiguous (handler + store), got %v", r.Matches)
 	}
+	// The suffix contract is token-bounded: "User" must not match GetUser.
+	if r := ResolveFrame(lay, "User"); len(r.Matches) != 0 {
+		t.Errorf("bare 'User' matched %v; suffixes must start at a token boundary", r.Matches)
+	}
+	if r := ResolveFrame(lay, "Server).GetUser"); !reflect.DeepEqual(r.Matches, []string{hGetUser}) {
+		t.Errorf("paren-bounded suffix resolved to %v", r.Matches)
+	}
 	if r := ResolveTable(lay, "users"); !r.Ambiguous || len(r.Matches) != 2 {
 		t.Errorf("table users = %v, want the two store functions", r.Matches)
 	}

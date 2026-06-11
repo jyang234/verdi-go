@@ -20,9 +20,12 @@ type Resolution struct {
 	Possible  []string `json:"possible,omitempty"`
 }
 
-// ResolveFrame resolves a stack frame to graph nodes. It accepts the graph's
-// own FQN form, the runtime frame form ("pkg.(*T).Method"), or a suffix
-// ("handler.Server).GetUser", "GetUser").
+// ResolveFrame resolves a stack frame to graph nodes. The matching contract,
+// most precise first: the graph's own FQN form; the runtime frame form
+// ("pkg.(*T).Method"); a TOKEN-BOUNDED suffix — the suffix must start at a
+// name boundary ('.', '(', '*', '/' or the whole string), so "--frame User"
+// does not match GetUser/SelectUser and inflate the suspect set to most of
+// the service.
 func ResolveFrame(ix *graph.Index, frame string) Resolution {
 	if ix.Has(frame) {
 		return Resolution{Matches: []string{frame}}
@@ -32,11 +35,27 @@ func ResolveFrame(ix *graph.Index, frame string) Resolution {
 	}
 	var matches []string
 	for _, fqn := range ix.Nodes() {
-		if strings.HasSuffix(fqn, frame) || strings.HasSuffix(fqn, "."+frame) {
+		if suffixAtBoundary(fqn, frame) {
 			matches = append(matches, fqn)
 		}
 	}
 	return Resolution{Matches: matches, Ambiguous: len(matches) > 1}
+}
+
+// suffixAtBoundary reports whether frame is a suffix of fqn starting at a
+// token boundary.
+func suffixAtBoundary(fqn, frame string) bool {
+	if frame == "" || !strings.HasSuffix(fqn, frame) {
+		return false
+	}
+	if len(fqn) == len(frame) {
+		return true
+	}
+	switch fqn[len(fqn)-len(frame)-1] {
+	case '.', '(', '*', '/':
+		return true
+	}
+	return false
 }
 
 // frameToFQN converts a runtime pointer-receiver frame ("pkg.(*T).Method") to

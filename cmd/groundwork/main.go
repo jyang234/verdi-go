@@ -94,28 +94,18 @@ only ever reads it.
 // spots past which the card's claims are unsound. Read-only and exploratory:
 // exit 0 unless the symptom resolves to nothing at all.
 func cmdTriage(args []string) error {
-	fs := flag.NewFlagSet("triage", flag.ContinueOnError)
-	frame := fs.String("frame", "", "stack frame (FQN, runtime frame form, or suffix)")
-	table := fs.String("table", "", "DB table name")
-	event := fs.String("event", "", "bus event name")
-	peer := fs.String("peer", "", "outbound peer name")
-	fail := fs.Bool("fail", false, "fault framing: treat the resolved suspects as failing (what-if)")
-	asJSON := fs.Bool("json", false, "emit the card as canonical JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
+	frame, hasFrame, args := takeValueFlag(args, "--frame", "-frame")
+	table, hasTable, args := takeValueFlag(args, "--table", "-table")
+	event, hasEvent, args := takeValueFlag(args, "--event", "-event")
+	peer, hasPeer, args := takeValueFlag(args, "--peer", "-peer")
+	fail, args := takeFlag(args, "--fail", "-fail")
+	asJSON, args := takeFlag(args, "--json", "-json")
+	if len(args) != 1 {
+		return fmt.Errorf("usage: groundwork triage (--frame|--table|--event|--peer) <value> [--fail] [--json] <graph.json>")
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: groundwork triage (--frame|--table|--event|--peer) <value> [--json] <graph.json>")
-	}
-	g, err := graph.LoadFile(fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	ix := graph.NewIndex(g)
-
 	set := 0
-	for _, v := range []string{*frame, *table, *event, *peer} {
-		if v != "" {
+	for _, has := range []bool{hasFrame, hasTable, hasEvent, hasPeer} {
+		if has {
 			set++
 		}
 	}
@@ -123,16 +113,22 @@ func cmdTriage(args []string) error {
 		// A symptom silently ignored mis-scopes an incident hunt; demand one.
 		return fmt.Errorf("triage: exactly one of --frame, --table, --event, --peer is required (got %d)", set)
 	}
+	g, err := graph.LoadFile(args[0])
+	if err != nil {
+		return err
+	}
+	ix := graph.NewIndex(g)
+
 	var res impact.Resolution
 	switch {
-	case *frame != "":
-		res = impact.ResolveFrame(ix, *frame)
-	case *table != "":
-		res = impact.ResolveTable(ix, *table)
-	case *event != "":
-		res = impact.ResolveEvent(ix, *event)
-	case *peer != "":
-		res = impact.ResolvePeer(ix, *peer)
+	case hasFrame:
+		res = impact.ResolveFrame(ix, frame)
+	case hasTable:
+		res = impact.ResolveTable(ix, table)
+	case hasEvent:
+		res = impact.ResolveEvent(ix, event)
+	case hasPeer:
+		res = impact.ResolvePeer(ix, peer)
 	}
 	if len(res.Matches) == 0 && len(res.Possible) == 0 {
 		return fmt.Errorf("triage: symptom resolved to nothing in this graph")
@@ -140,10 +136,10 @@ func cmdTriage(args []string) error {
 
 	suspects := append(append([]string{}, res.Matches...), res.Possible...)
 	card := impact.ForNodes(ix, suspects)
-	if *fail {
+	if fail {
 		card = impact.ForFault(ix, suspects)
 	}
-	if *asJSON {
+	if asJSON {
 		b, err := canonjson.Marshal(struct {
 			Resolution impact.Resolution `json:"resolution"`
 			Card       impact.Card       `json:"card"`
@@ -244,24 +240,22 @@ func cmdFitness(args []string) error {
 
 	violations, cautions := res.Violations(), res.Cautions()
 	for _, f := range violations {
-		fmt.Printf("⛔ [%s] %s\n", f.Rule, f.Summary)
-		if f.From != "" {
-			fmt.Printf("     %s\n", edgeLine(f))
-		}
-		if f.Detail != "" {
-			fmt.Printf("     via %s\n", f.Detail)
-		}
+		printFinding("⛔", f)
 	}
 	for _, f := range cautions {
-		fmt.Printf("⚠️  [%s] %s\n", f.Rule, f.Summary)
-		if f.From != "" {
-			fmt.Printf("     %s\n", edgeLine(f))
-		}
+		printFinding("⚠️ ", f)
 	}
 	if !res.OK() {
 		return fmt.Errorf("%d invariant violation(s)", len(violations))
 	}
-	fmt.Printf("fitness OK — %d invariant(s) hold, %d caution(s)\n", ruleCount(p), len(cautions))
+	// The summary reports what Check actually evaluated: policy rules PLUS the
+	// graph-carried obligation verdicts. "0 invariant(s)" while obligations
+	// were judged would misreport the gate's coverage.
+	summary := fmt.Sprintf("fitness OK — %d invariant(s) hold", ruleCount(p))
+	if n := len(g.Obligations); n > 0 {
+		summary += fmt.Sprintf(", %d obligation verdict(s) judged", n)
+	}
+	fmt.Printf("%s, %d caution(s)\n", summary, len(cautions))
 	return nil
 }
 
@@ -271,6 +265,18 @@ func edgeLine(f fitness.Finding) string {
 		return f.From + " → " + f.To
 	}
 	return f.From
+}
+
+// printFinding renders one finding, Detail included — a caution's witness is
+// as load-bearing as a violation's.
+func printFinding(prefix string, f fitness.Finding) {
+	fmt.Printf("%s [%s] %s\n", prefix, f.Rule, f.Summary)
+	if f.From != "" {
+		fmt.Printf("     %s\n", edgeLine(f))
+	}
+	if f.Detail != "" {
+		fmt.Printf("     via %s\n", f.Detail)
+	}
 }
 
 // ruleCount is a rough tally of configured invariants, for the OK summary.
@@ -435,6 +441,32 @@ func cmdVerifyArtifact(args []string) error {
 	return nil
 }
 
+// takeValueFlag removes a value flag ("--name v" or "--name=v") from args in
+// any position, returning its value. One mechanism for every subcommand —
+// stdlib flag.Parse stops at the first positional, so each hand-rolled parser
+// is a usage string waiting to disagree with reality.
+func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		matched := false
+		for _, n := range names {
+			if a == n && i+1 < len(args) {
+				value, found, matched = args[i+1], true, true
+				i++
+				break
+			}
+			if strings.HasPrefix(a, n+"=") {
+				value, found, matched = strings.TrimPrefix(a, n+"="), true, true
+				break
+			}
+		}
+		if !matched {
+			rest = append(rest, a)
+		}
+	}
+	return value, found, rest
+}
+
 // takeFlag removes any of the given boolean flag spellings from args, reporting
 // whether one was present. It lets a flag appear anywhere, including after the
 // positional arguments (Go's flag package stops at the first positional).
@@ -475,24 +507,23 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 // anything are flagged DEAD — stale excuses that should be deleted before they
 // silently excuse something new. Read-only, exit 0: it informs review.
 func cmdExceptions(args []string) error {
-	fs := flag.NewFlagSet("exceptions", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "emit the audit as canonical JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 2 {
+	asJSON, rest := takeFlag(args, "--json", "-json")
+	if len(rest) != 2 {
 		return fmt.Errorf("usage: groundwork exceptions <policy.json> <graph.json> [--json]")
 	}
-	p, err := policy.Load(fs.Arg(0))
+	p, err := policy.Load(rest[0])
 	if err != nil {
 		return err
 	}
-	g, err := graph.LoadFile(fs.Arg(1))
+	g, err := graph.LoadFile(rest[1])
 	if err != nil {
 		return err
 	}
 	xs := fitness.Exceptions(p, graph.NewIndex(g))
-	if *asJSON {
+	if xs == nil {
+		xs = []fitness.ExceptionStatus{} // canonical [] rather than null
+	}
+	if asJSON {
 		b, err := canonjson.Marshal(xs)
 		if err != nil {
 			return err
