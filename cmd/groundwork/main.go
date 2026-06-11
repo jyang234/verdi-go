@@ -78,7 +78,7 @@ func usage() {
 
 usage:
   groundwork reach <graph.json> <fqn>          reachability + entrypoint cover + effects for a function
-  groundwork triage (--frame|--table|--event|--peer) <v> [--fail] [--expect <stamp>] [--json] <graph.json>  incident triage card
+  groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] [--expect <stamp>] [--json] <graph.json>  incident triage card
   groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]  pre-edit grounding card: what binds this function
   groundwork mcp <graph.json> [--policy <policy.json>]  serve triage/reach/ground/exceptions as MCP tools over stdio
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
@@ -102,6 +102,7 @@ only ever reads it.
 // exit 0 unless the symptom resolves to nothing at all.
 func cmdTriage(args []string) error {
 	frame, hasFrame, args := takeValueFlag(args, "--frame", "-frame")
+	route, hasRoute, args := takeValueFlag(args, "--route", "-route")
 	table, hasTable, args := takeValueFlag(args, "--table", "-table")
 	event, hasEvent, args := takeValueFlag(args, "--event", "-event")
 	peer, hasPeer, args := takeValueFlag(args, "--peer", "-peer")
@@ -109,17 +110,17 @@ func cmdTriage(args []string) error {
 	asJSON, args := takeFlag(args, "--json", "-json")
 	expect, hasExpect, args := takeValueFlag(args, "--expect", "-expect")
 	if len(args) != 1 {
-		return fmt.Errorf("usage: groundwork triage (--frame|--table|--event|--peer) <value> [--fail] [--expect <stamp>] [--json] <graph.json>")
+		return fmt.Errorf("usage: groundwork triage (--frame|--route|--table|--event|--peer) <value> [--fail] [--expect <stamp>] [--json] <graph.json>")
 	}
 	set := 0
-	for _, has := range []bool{hasFrame, hasTable, hasEvent, hasPeer} {
+	for _, has := range []bool{hasFrame, hasRoute, hasTable, hasEvent, hasPeer} {
 		if has {
 			set++
 		}
 	}
 	if set != 1 {
 		// A symptom silently ignored mis-scopes an incident hunt; demand one.
-		return fmt.Errorf("triage: exactly one of --frame, --table, --event, --peer is required (got %d)", set)
+		return fmt.Errorf("triage: exactly one of --frame, --route, --table, --event, --peer is required (got %d)", set)
 	}
 	g, err := graph.LoadFile(args[0])
 	if err != nil {
@@ -134,6 +135,8 @@ func cmdTriage(args []string) error {
 	switch {
 	case hasFrame:
 		res = impact.ResolveFrame(ix, frame)
+	case hasRoute:
+		res = impact.ResolveRoute(ix, route)
 	case hasTable:
 		res = impact.ResolveTable(ix, table)
 	case hasEvent:

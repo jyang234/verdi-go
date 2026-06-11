@@ -30,7 +30,9 @@ const (
 	lsMarkPaid   = "(*example.com/loansvc/internal/store.Loans).MarkPaid"
 	lsEvaluate   = "(*example.com/loansvc/internal/origination.Evaluator).Evaluate"
 	lsNotify     = "(*example.com/loansvc/internal/origination.Evaluator).notify"
-	lsRun        = "example.com/loansvc.run"
+	lsOnSettled  = "(*example.com/loansvc/internal/consumer.Payments).OnSettled"
+	lsCreate     = "(*example.com/loansvc/internal/handler.App).Create"
+	lsStatus     = "(*example.com/loansvc/internal/handler.App).Status"
 	lsSelectAppl = "(*example.com/loansvc/internal/store.Loans).SelectApplicant"
 )
 
@@ -65,7 +67,13 @@ func TestDrillE1RecallAndScopingPower(t *testing.T) {
 			// Resolves only via the <dynamic> publisher: the flagged-possible path.
 			func() Resolution { return ResolveEvent(ix, "loan.flagged") }, lsNotify},
 		{"consumed event payment.settled not arriving",
-			func() Resolution { return ResolveEvent(ix, "payment.settled") }, lsRun},
+			// The culprit label is the actual handler, not the registration
+			// site — the entrypoints join sharpened this scenario.
+			func() Resolution { return ResolveEvent(ix, "payment.settled") }, lsOnSettled},
+		{"route POST /loan-application returning 500s",
+			func() Resolution { return ResolveRoute(ix, "POST /loan-application") }, lsCreate},
+		{"route alert with mount prefix and concrete id",
+			func() Resolution { return ResolveRoute(ix, "GET /api/v1/loan-application/8842/status") }, lsStatus},
 		{"panic frame from a Dynatrace stack trace",
 			func() Resolution {
 				return ResolveFrame(ix, "example.com/loansvc/internal/store.(*Loans).SelectApplicant")

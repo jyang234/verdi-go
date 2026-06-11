@@ -13,17 +13,20 @@ $ go test ./internal/groundwork/impact/ -run TestDrill -v
 
 ## E1 — staged incidents: recall and scoping power
 
-Eight realistic alert symptoms, each with a hand-labeled true culprit (chosen
+Ten realistic alert symptoms, each with a hand-labeled true culprit (chosen
 by reading the fixture, never the tool's output), spanning every symptom kind:
 two failing peers, two corrupted tables, a missing published event, a missing
-*dynamically-named* event (the flagged-possible path), a starved consumer, and
-a panic frame pasted in Dynatrace's runtime form.
+*dynamically-named* event (the flagged-possible path), a starved consumer, two
+route alerts (one exact, one with a mount prefix and a concrete path id — the
+forms a Dynatrace problem actually reports), and a panic frame pasted in
+Dynatrace's runtime form.
 
 | Measure | Result | Threshold |
 |---|---|---|
-| Recall (culprit ∈ suspect set) | **8/8 (100%)** | keep: 100% — a miss is a resolver defect |
+| Recall (culprit ∈ suspect set) | **10/10 (100%)** | keep: 100% — a miss is a resolver defect |
 | Median hunt space (suspects ∪ upstream callers) | **8% of the graph** (3 of 39 nodes) | kill: ≥50% ("the card narrows nothing") |
-| Worst-case hunt space | 13% (the starved-consumer scenario) | — |
+| Sharpest scenarios | the route alerts, at 3% (a route maps straight to its handler) | — |
+| Worst-case hunt space | 15% (the starved consumer — its suspect set now includes the actual handler via the entrypoints join, not just the registration site) | — |
 
 Reading: on this fixture, a responder (or agent) starts an incident with the
 hunt already narrowed from 39 functions to a median of three, and the true
@@ -73,7 +76,10 @@ exercise when adopting; record results here.
 
 ## Standing limitations these drills do NOT cover
 
-Symptoms outside the resolver's four kinds (notably routes), causes outside
-the code entirely (the fault card's scope statement exists for this), and
-cross-function effect orderings (disclosed on every fault card). The drills
-measure that triage does its job well — not that its job covers everything.
+Causes outside the code entirely (the fault card's scope statement exists for
+this), cross-function effect orderings (disclosed on every fault card), and
+routes registered through routers outside root discovery's coverage (gin's
+variadic handlers, gorilla's .Methods() chains, gRPC) — those routes are
+absent from the entrypoints section, so a route query against them is a loud
+no-match, never a guess. The drills measure that triage does its job well —
+not that its job covers everything.

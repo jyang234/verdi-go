@@ -125,5 +125,17 @@
       "site": "example.com/blindsvc/internal/rawmem",
       "detail": "package imports unsafe; pointer conversions can hide edges from the call graph"
     }
+  ],
+  "entrypoints": [
+    {
+      "kind": "http",
+      "name": "POST /publish/{id}",
+      "fn": "(*example.com/blindsvc/internal/handler.Server).Publish"
+    },
+    {
+      "kind": "http",
+      "name": "POST /users/{id}",
+      "fn": "(*example.com/blindsvc/internal/handler.Server).Create"
+    }
   ]
 }

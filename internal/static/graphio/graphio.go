@@ -19,6 +19,7 @@ import (
 	cg "github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/obligations"
+	"github.com/jyang234/golang-code-graph/internal/static/roots"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
 )
 
@@ -43,6 +44,17 @@ type Graph struct {
 	// are configured, so rule-free services emit byte-identical graphs.
 	Obligations []obligations.Finding `json:"obligations,omitempty"`
 
+	// Entrypoints maps each named root (HTTP route, bus topic) to its handler
+	// function — the route→fn join neither artifact carried before. The names
+	// are REGISTRATION-SITE literals: a stdlib HandleFunc root has no method,
+	// and a route mounted under a router prefix carries only its leaf pattern
+	// — which is why the triage resolver matches them segment-wise rather than
+	// exactly. The fn is the registered handler ARGUMENT, so a middleware
+	// wrapper resolves to the wrapping closure (one hop upstream of the human
+	// expectation; its forward reach still covers the real handler). Like the
+	// other level-2 slices it rides unscoped builds only.
+	Entrypoints []Entrypoint `json:"entrypoints,omitempty"`
+
 	// EffectOrder is the partial-effect disclosure (incident-triage plan IT-3):
 	// for each function holding both a committed external effect (bus publish,
 	// DB mutation) and a fallible call, whether the effect can — or always
@@ -50,6 +62,14 @@ type Graph struct {
 	// faults, what may already be committed?". Like Obligations it rides
 	// unscoped builds only and is omitted when empty.
 	EffectOrder []obligations.EffectOrder `json:"effect_order,omitempty"`
+}
+
+// Entrypoint is one named root: an HTTP route or a consumed topic, with the
+// function registered to handle it.
+type Entrypoint struct {
+	Kind string `json:"kind"` // "http" or "consumer"
+	Name string `json:"name"` // "POST /loan-application", "/transfer", "payment.settled"
+	Fn   string `json:"fn"`
 }
 
 // Node is one first-party function.
@@ -90,6 +110,26 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		g.BlindSpots = gs
 	}
 	rootFns := rootFuncSet(res)
+	if entry == "" {
+		for _, r := range res.Roots.Roots {
+			if r.Name == "" || !scope[r.Func] {
+				continue
+			}
+			if r.Kind == roots.KindHTTP || r.Kind == roots.KindConsumer {
+				g.Entrypoints = append(g.Entrypoints, Entrypoint{Kind: string(r.Kind), Name: r.Name, Fn: r.FQN()})
+			}
+		}
+		sort.Slice(g.Entrypoints, func(i, j int) bool {
+			a, b := g.Entrypoints[i], g.Entrypoints[j]
+			if a.Kind != b.Kind {
+				return a.Kind < b.Kind
+			}
+			if a.Name != b.Name {
+				return a.Name < b.Name
+			}
+			return a.Fn < b.Fn
+		})
+	}
 	base := ""
 	if entry == "" {
 		abs, err := filepath.Abs(res.Dir)

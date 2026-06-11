@@ -152,5 +152,17 @@
       "tier": 3
     }
   ],
-  "blind_spots": []
+  "blind_spots": [],
+  "entrypoints": [
+    {
+      "kind": "http",
+      "name": "GET /users/{id}",
+      "fn": "(*example.com/layeredsvc/internal/handler.Server).GetUser"
+    },
+    {
+      "kind": "http",
+      "name": "PUT /users/{id}",
+      "fn": "(*example.com/layeredsvc/internal/handler.Server).UpdateUser"
+    }
+  ]
 }

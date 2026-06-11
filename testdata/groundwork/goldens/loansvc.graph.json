@@ -465,6 +465,23 @@
     }
   ],
   "blind_spots": [],
+  "entrypoints": [
+    {
+      "kind": "consumer",
+      "name": "payment.settled",
+      "fn": "(*example.com/loansvc/internal/consumer.Payments).OnSettled"
+    },
+    {
+      "kind": "http",
+      "name": "GET /loan-application/{id}/status",
+      "fn": "(*example.com/loansvc/internal/handler.App).Status"
+    },
+    {
+      "kind": "http",
+      "name": "POST /loan-application",
+      "fn": "(*example.com/loansvc/internal/handler.App).Create"
+    }
+  ],
   "effect_order": [
     {
       "fn": "(*example.com/loansvc/internal/origination.Evaluator).Evaluate",

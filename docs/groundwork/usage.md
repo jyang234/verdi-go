@@ -78,9 +78,14 @@ graph JSON between them:
 - **flowmap is the producer.** `flowmap graph <service>` builds the call graph
   (`go/packages → go/ssa → go/callgraph`) and emits it as canonical JSON — nodes
   (`fqn`, `sig`, `tier`, `fallible`), edges (caller→callee, with `boundary` and
-  `concurrent` flags), and a blind-spot manifest. `flowmap boundary <service>`
-  emits the gated inter-service **boundary contract** (routes, published/consumed
-  events, external dependencies).
+  `concurrent` flags), a blind-spot manifest, and the level-2 disclosure
+  sections computed from each function's CFG and the discovered roots:
+  `obligations` (path-obligation verdicts), `effect_order` (partial-effect
+  facts), and `entrypoints` (the route/topic → handler join). An optional
+  `--stamp <sha>` records a caller-supplied identity for `--expect`
+  verification. `flowmap boundary <service>` emits the gated inter-service
+  **boundary contract** (routes, published/consumed events, external
+  dependencies).
 - **groundwork is the judge.** It only ever *reads* those JSON files; it never
   runs flowmap. Keeping the producer and the judge as different binaries is what
   lets CI control which runs where — the security boundary is around graph
@@ -189,7 +194,7 @@ policy for "layeredsvc" (v1) — valid
 
 ```
 groundwork reach <graph> <fqn>                          explore one function's blast radius
-groundwork triage (--frame|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
+groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
 groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding card: what binds this function
 groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
 groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
@@ -432,11 +437,19 @@ The incident front door: resolve a symptom to suspect functions and read the
 blast radius off the graph — throwaway interrogation, no test authoring.
 
 ```console
+$ groundwork triage --route "POST /api/v1/loans/{id}" graph.json  # failing endpoint
 $ groundwork triage --table users graph.json          # corrupted table
 $ groundwork triage --frame 'pkg.(*T).Method' graph.json   # panic frame
 $ groundwork triage --fail --peer credit-bureau graph.json # what-if: peer down
 $ groundwork triage --fail --event loan.approved graph.json
 ```
+
+Routes are matched segment-wise against the graph's `entrypoints` join, never
+exactly-or-nothing: path params on either side are wildcards, a method-less
+registration (stdlib `HandleFunc`) matches any queried method, and a mount
+prefix on the alert's URL is tolerated (the registration site only ever saw
+the leaf pattern). Routers outside root discovery's coverage are absent from
+the join — a loud no-match, never a guess.
 
 The card lists the suspects, the implicated entrypoints (their cover), the
 upstream callers, the reachable boundary effects, and every blind spot on a
@@ -605,6 +618,8 @@ it. Top-level sections:
 | `blind_spots[]` | `{kind, site, detail}` — where the graph's knowledge stops | the soundness frontier |
 | `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
 | `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |
+| `entrypoints[]` | `{kind: http\|consumer, name, fn}` — the route/topic → handler join | names are registration-site literals: match segment-wise, never exactly-or-nothing |
+| `stamp` | optional caller-supplied identity (the CI commit SHA) | verify with `triage`/`mcp` `--expect`; absent on local/golden builds by design |
 
 Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
 have not been taught about should fail loudly, not drop fields silently.
