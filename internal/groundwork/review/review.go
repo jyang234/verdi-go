@@ -40,26 +40,28 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		NewCautions:   newCautions,
 		NewBlindSpots: blindSpots,
 	}
-	a.Verdict = verdict(p, d, newViolations, contract, blindSpots)
+	a.Verdict = verdict(p, d, newViolations, contract, newCautions, blindSpots)
 	a.Digest = digestOf(a)
 	return a
 }
 
 // verdict applies the three-valued rule: a new violation, a breaking contract
 // change, or (when the policy gates the blind-spot ratchet) a new blind spot
-// blocks; an empty delta abstains; otherwise the structure is clear. A new
-// blind spot suppresses the abstention even when the node/edge delta is empty —
-// "the graph's knowledge of this code shrank" IS a structural signal, and a
-// body-only change that introduces reflection must not read as the graph
-// having nothing to say.
-func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, blindSpots []BlindSpotDelta) Verdict {
+// blocks; otherwise the artifact abstains only when it carries NO signal at
+// all. Abstention is a statement about the whole artifact, not the node/edge
+// delta: graph sections beyond structure (obligations, blind spots) change on
+// body-only edits, and NO-STRUCTURAL-SIGNAL's render says "the graph has
+// nothing to say" — which must never hide a new caution or disclosure. Any
+// future finding source is covered automatically by the hasSignal form.
+func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, cautions []Violation, blindSpots []BlindSpotDelta) Verdict {
 	if len(violations) > 0 || anyBreaking(contract) {
 		return Block
 	}
 	if p.GatesBlindSpots() && len(blindSpots) > 0 {
 		return Block
 	}
-	if d.empty() && len(blindSpots) == 0 {
+	hasSignal := !d.empty() || len(cautions) > 0 || len(blindSpots) > 0
+	if !hasSignal {
 		return NoStructuralSignal
 	}
 	return StructurallyClear

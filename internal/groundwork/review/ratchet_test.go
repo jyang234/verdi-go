@@ -219,3 +219,39 @@ func TestRatchetDeterministic(t *testing.T) {
 		t.Fatalf("non-deterministic digest: %s vs %s", a.Digest, b.Digest)
 	}
 }
+
+// RF-3: abstention follows the artifact, not the delta. A body-only change
+// that surfaces a new obligation caution must not render as "the graph has
+// nothing to say" — that early return would hide the exact disclosure the
+// obligations feature exists to surface.
+func TestNewCautionSuppressesAbstention(t *testing.T) {
+	p := &policy.Policy{Service: "obligsvc", Version: 1}
+	base := loadGraph(t, "obligsvc.graph.json")
+	branch := loadGraph(t, "obligsvc.graph.json")
+	branch.Obligations = append(branch.Obligations, graph.Obligation{
+		Rule: "tx-must-close", Kind: "must-release",
+		Fn: "example.com/obligsvc/internal/app.TransferDefer", Site: "internal/app/app.go:31",
+		Status: "CANT-PROVE", Detail: "a body refactor made the release unprovable",
+	})
+
+	a := Review(p, base, branch)
+	if a.Verdict == NoStructuralSignal {
+		t.Fatal("verdict abstained despite a new caution")
+	}
+	if len(a.NewCautions) != 1 {
+		t.Fatalf("new cautions = %v, want the CANT-PROVE disclosure", a.NewCautions)
+	}
+	if !strings.Contains(a.Render(), "cannot prove") {
+		t.Error("rendered artifact hides the new caution")
+	}
+}
+
+// Truly identical inputs still abstain: identical graphs produce identical
+// findings, so no new anything, and NO-STRUCTURAL-SIGNAL stands.
+func TestIdenticalGraphsStillAbstain(t *testing.T) {
+	p := &policy.Policy{Service: "obligsvc", Version: 1}
+	g := loadGraph(t, "obligsvc.graph.json") // carries violations AND cautions
+	if a := Review(p, g, g); a.Verdict != NoStructuralSignal {
+		t.Fatalf("identical graphs must abstain; got %s", a.Verdict)
+	}
+}
