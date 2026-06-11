@@ -2,6 +2,7 @@ package graph
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
@@ -179,6 +180,45 @@ func (ix *Index) Effects(fqns ...string) []Edge {
 		out = append(out, ix.effOf[fqn]...)
 	}
 	return out
+}
+
+// Bus boundary-effect operations as flowmap labels them. Decoding these here
+// keeps the label vocabulary in the package that owns the graph schema;
+// consumers must never re-parse boundary labels themselves.
+const (
+	BusPublish = "PUBLISH"
+	BusConsume = "CONSUME"
+)
+
+// BusEffect is one statically-named bus boundary effect: From publishes or
+// consumes Event (Op is BusPublish or BusConsume).
+type BusEffect struct {
+	Op    string
+	Event string
+	From  string
+}
+
+// BusEffects decodes the graph's bus boundary surface: every statically-named
+// publish/consume effect, plus the count of dynamically-named bus effects —
+// the events this surface cannot name, which any consumer must disclose
+// rather than ignore. Unrecognized label shapes are skipped, not guessed.
+func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
+	prefix := boundaryPrefix + "bus "
+	for _, e := range ix.g.Edges {
+		if !strings.HasPrefix(e.To, prefix) {
+			continue
+		}
+		if e.IsDynamic() {
+			dynamic++
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(e.To, prefix))
+		if len(fields) < 2 {
+			continue
+		}
+		effects = append(effects, BusEffect{Op: fields[0], Event: fields[1], From: e.From})
+	}
+	return effects, dynamic
 }
 
 // BlindSpotsAt returns the blind spots recorded at a site (an FQN or a package

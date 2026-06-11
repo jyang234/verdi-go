@@ -23,6 +23,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/transcript"
 )
 
 var version = "dev"
@@ -63,6 +64,8 @@ func run(args []string) error {
 		return cmdVerifyArtifact(args[1:])
 	case "exceptions":
 		return cmdExceptions(args[1:])
+	case "transcript":
+		return cmdTranscript(args[1:])
 	case "init":
 		return cmdInit(args[1:])
 	case "policy-check":
@@ -83,12 +86,15 @@ usage:
   groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] [--expect <stamp>] [--json] <graph.json>  incident triage card
   groundwork ground <graph.json> <fqn> [--policy <policy.json>] [--json]  pre-edit grounding card: what binds this function
   groundwork mcp <graph.json> [--policy <policy.json>]  serve triage/reach/ground/exceptions as MCP tools over stdio
+  groundwork mcp --service <name>=<graph.json> ...      same server holding several services' maps (+ fleet-events lens)
+  groundwork mcp ... --http <addr> [--token <secret>]    team-shared streamable-HTTP transport (token required off loopback)
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork verify-artifact <artifact> <policy> <base> <branch>  prove an artifact is authentic (not tampered/stale)
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
+  groundwork transcript <calls.jsonl> [--json]   summarize an mcp --log transcript: sessions, tool/service mix, cross-service hops
   groundwork init <graph.json> [--name <svc>] [--guide <out.md>]  propose a baseline policy from measured facts
   groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
@@ -526,22 +532,23 @@ func cmdVerifyArtifact(args []string) error {
 	return nil
 }
 
-// takeValueFlag removes a value flag ("--name v" or "--name=v") from args in
-// any position, returning its value. One mechanism for every subcommand —
-// stdlib flag.Parse stops at the first positional, so each hand-rolled parser
-// is a usage string waiting to disagree with reality.
-func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
+// takeValueFlags removes every occurrence of a value flag ("--name v" or
+// "--name=v") from args in any position, returning the values in order of
+// appearance. One scanning mechanism for every subcommand — stdlib
+// flag.Parse stops at the first positional, so each hand-rolled parser is a
+// usage string waiting to disagree with reality.
+func takeValueFlags(args []string, names ...string) (values []string, rest []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		matched := false
 		for _, n := range names {
 			if a == n && i+1 < len(args) {
-				value, found, matched = args[i+1], true, true
+				values, matched = append(values, args[i+1]), true
 				i++
 				break
 			}
 			if strings.HasPrefix(a, n+"=") {
-				value, found, matched = strings.TrimPrefix(a, n+"="), true, true
+				values, matched = append(values, strings.TrimPrefix(a, n+"=")), true
 				break
 			}
 		}
@@ -549,7 +556,17 @@ func takeValueFlag(args []string, names ...string) (value string, found bool, re
 			rest = append(rest, a)
 		}
 	}
-	return value, found, rest
+	return values, rest
+}
+
+// takeValueFlag is the singular form: every occurrence is removed, the last
+// value wins. A thin wrapper so the scanning loop exists exactly once.
+func takeValueFlag(args []string, names ...string) (value string, found bool, rest []string) {
+	values, rest := takeValueFlags(args, names...)
+	if len(values) == 0 {
+		return "", false, rest
+	}
+	return values[len(values)-1], true, rest
 }
 
 // takeFlag removes any of the given boolean flag spellings from args, reporting
@@ -628,6 +645,34 @@ func cmdExceptions(args []string) error {
 	} else {
 		fmt.Printf("\nall %d exception(s) live and justified\n", len(xs))
 	}
+	return nil
+}
+
+// cmdTranscript summarizes an `mcp --log` transcript: the reader half of the
+// E4 measurement apparatus, and the evidence the MCP tiers 2–3 plan defers
+// to. Counts only — per-session query volume, tool and service mix,
+// cross-service hops, error/correction rates; the qualitative half of E4
+// (do conclusions cite card facts?) stays human-judged and the card says so.
+// Read-only, exit 0: it informs a keep/retire decision, it does not make one.
+func cmdTranscript(args []string) error {
+	asJSON, rest := takeFlag(args, "--json", "-json")
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: groundwork transcript <calls.jsonl> [--json]")
+	}
+	entries, err := transcript.Load(rest[0])
+	if err != nil {
+		return err
+	}
+	s := transcript.Summarize(entries)
+	if asJSON {
+		b, err := canonjson.Marshal(s)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	fmt.Print(transcript.Render(s))
 	return nil
 }
 

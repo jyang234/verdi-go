@@ -150,3 +150,34 @@ func contains(s []string, v string) bool {
 	}
 	return false
 }
+
+// BusEffects must decode the whole statically-named bus surface and count —
+// never name — the dynamic effects, against the loansvc golden which has
+// publishes, a consume, and one dynamically-named publish.
+func TestBusEffects(t *testing.T) {
+	ix := loadGolden(t, "loansvc.graph.json")
+	effects, dynamic := ix.BusEffects()
+	if dynamic != 1 {
+		t.Errorf("dynamic = %d, want 1 (the PUBLISH <dynamic> edge)", dynamic)
+	}
+	byOpEvent := map[string]bool{}
+	for _, be := range effects {
+		if be.From == "" {
+			t.Errorf("effect %v missing From", be)
+		}
+		byOpEvent[be.Op+" "+be.Event] = true
+	}
+	for _, want := range []string{
+		BusPublish + " loan.approved",
+		BusPublish + " loan.declined",
+		BusPublish + " disbursement.initiated",
+		BusConsume + " payment.settled",
+	} {
+		if !byOpEvent[want] {
+			t.Errorf("BusEffects missing %q (got %v)", want, byOpEvent)
+		}
+	}
+	if byOpEvent[BusPublish+" <dynamic>"] {
+		t.Error("a dynamic effect must be counted, never named as an event")
+	}
+}

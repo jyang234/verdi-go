@@ -199,6 +199,9 @@ groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding car
 groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
 groundwork init <graph> [--guide …]                     propose a baseline policy from measured facts
 groundwork mcp <graph> [--policy …]                     serve the lenses as MCP tools over stdio
+groundwork mcp --service <name>=<graph> …               one server, several services' maps (+ fleet-events)
+groundwork mcp … --http <addr> [--token <secret>]       team-shared streamable-HTTP transport
+groundwork transcript <calls.jsonl> [--json]            summarize an mcp --log transcript (the E4 reader)
 groundwork fitness <policy> <graph>                     evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
 groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
@@ -517,20 +520,71 @@ derived with the exact matchers the checks use, so the card never promises a
 guardrail that does not bind.
 
 `groundwork mcp <graph.json> [--policy …] [--expect …] [--log calls.jsonl]`
-serves seven tools over
+serves eight tools over
 MCP stdio (newline-delimited JSON-RPC, protocol 2024-11-05, no third-party
 dependencies): `ground`, `reach`, `triage` (with the `fail` what-if framing,
 including effects possibly committed before the fault), `exceptions`,
-`entrypoints` (what the route/event symptoms can address), `fitness`, and
+`entrypoints` (what the route/event symptoms can address), `fleet-events`,
+`fitness`, and
 `reload`. A graph file that changes on disk is flagged on every response —
 the server never reloads silently; `reload` re-verifies the stamp. `--log`
-writes a deterministic transcript of tool calls (the E4 measurement
-apparatus). **No write tools, ever**: a tool that edited rules would let the
+writes a deterministic transcript (the E4 measurement apparatus): one JSON
+line per tool call carrying the raw params, the resolution (the answering
+service, `*` for fleet-wide lenses, absent when resolution failed), the
+session id, and the isError outcome. Session ids are sequential, minted at
+`initialize`, and attribution rides the id rather than line order — so the
+shared team server's transcript stays readable when concurrent clients
+interleave. No timestamps, so a replayed drill produces identical bytes.
+`groundwork transcript calls.jsonl`
+is the reader: sessions, per-session query counts, tool/service mix,
+cross-service hops, error/correction rates.
+**No write tools, ever**: a tool that edited rules would let the
 agent author its own guardrails. The
 agent's edit loop becomes ground → edit → verify with one rule set at both
 ends; the incident loop becomes triage → narrow → `flowmap behavior ingest`.
-The server only ever reads the CI-generated graph it was started with — the
+The server only ever reads the CI-generated graphs it was started with — the
 same trust posture as every other groundwork surface.
+
+The `--service` form serves a neighborhood of services in one session:
+
+```console
+$ groundwork mcp --service payments=graphs/payments.json \
+                 --service ledger=graphs/ledger.json \
+                 --policy payments=payments-policy.json \
+                 --expect payments="$DEPLOYED_SHA"
+```
+
+Each service keeps its own index, policy, stamp, and staleness state; every
+tool takes an optional `service` argument, and with a single loaded service
+it is never needed (the lone service is the default — the single-graph form
+is unchanged). With several loaded, per-service tools require the hop to be
+explicit, `entrypoints` with no service lists the whole fleet prefixed by
+service, and `fleet-events` joins the graphs' bus surfaces by event name —
+who publishes what, who consumes it — the first cross-service lens. The join
+vocabulary is the boundary contracts' (published/consumed names match across
+services); answers stay per-service and honest. This is **not** a merged
+cross-service graph: a side with no loaded match says so rather than
+guessing, and dynamically-named publishes are disclosed per service.
+
+`--http <addr> [--token <secret>]` swaps stdio for the **streamable-HTTP
+transport** (protocol revision 2025-03-26), turning either form into a
+team-shared server — one centrally-managed instance, fed directly by CI
+artifacts, answering every agent on the team. This *strengthens* the trust
+posture: with stdio the agent's own `.mcp.json` picks the file the server
+loads; here the operator picked the inputs and the agent cannot choose them
+at all. The server is stateless (one JSON-RPC message per POST, one JSON
+response; no SSE streams — no tool ever sends a server-initiated message, so
+`GET` is honestly 405). `initialize` returns an `Mcp-Session-Id` that
+clients echo on later requests; it is a transcript attribution label only —
+the server stores no session state, never requires the header, and a client
+that omits it lands in the transcript's anonymous bucket. Auth is one static
+bearer token
+(`--token` or `$GROUNDWORK_MCP_TOKEN`), compared in constant time and
+**required when binding beyond loopback** — an unauthenticated team server
+fails at startup, not in production. Browser-borne requests with non-loopback
+`Origin` headers are rejected (the spec's DNS-rebinding defense). TLS and
+real identity belong to a reverse proxy in front; `GET /healthz` answers
+liveness without auth; `SIGINT`/`SIGTERM` drain gracefully.
 
 ---
 
@@ -635,6 +689,61 @@ audit). The intended loop is **ground → edit → verify**: the same rule set
 that will gate the merge, surfaced before the edit is made. Tool failures
 come back as readable tool results the agent can correct from, never protocol
 errors.
+
+When the agent works across a service boundary (a publisher in one repo, the
+consumer in another), serve both maps from one server with `--service` and
+the agent orients with `entrypoints` (fleet-wide) and `fleet-events` before
+making the explicit per-service hop:
+
+```json
+{
+  "mcpServers": {
+    "groundwork": {
+      "command": "groundwork",
+      "args": ["mcp",
+               "--service", "payments=ci-artifacts/payments.json",
+               "--service", "ledger=ci-artifacts/ledger.json",
+               "--policy", "payments=payments-policy.json"]
+    }
+  }
+}
+```
+
+### Team-shared serving (`--http`)
+
+One operator runs the server next to the CI artifact store; every agent on
+the team points at it and none of them chooses what it loads:
+
+```console
+# Operator (systemd unit, container, whatever you run daemons with).
+# CI's deploy job overwrites the graph files in place; the server flags
+# staleness on every answer until someone calls the reload tool.
+$ GROUNDWORK_MCP_TOKEN=$(cat /etc/groundwork/token) groundwork mcp \
+    --service payments=/srv/graphs/payments.json \
+    --service ledger=/srv/graphs/ledger.json \
+    --policy payments=/srv/policies/payments.json \
+    --expect payments="$DEPLOYED_SHA" \
+    --http 127.0.0.1:8137          # reverse proxy terminates TLS in front
+```
+
+```json
+// Each agent's .mcp.json: a URL, not a command — no file to pick.
+{
+  "mcpServers": {
+    "groundwork": {
+      "type": "http",
+      "url": "https://groundwork.internal/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+Operationally honest defaults: the token is required the moment the bind
+address leaves loopback (startup error, not a production surprise), the
+reload tool re-verifies the stamp it was started with unless the call
+supplies a new `expect`, and `--log` keeps working — now as the *team's*
+usage transcript.
 
 ### Consuming graph.json directly
 
