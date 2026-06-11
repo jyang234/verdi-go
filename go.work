@@ -8,4 +8,6 @@ use (
 	.
 	./testdata/fixtures/loansvc
 	./testdata/fixtures/oapisvc
+	./testdata/groundwork/blindsvc
+	./testdata/groundwork/layeredsvc
 )

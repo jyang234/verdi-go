@@ -1,0 +1,10 @@
+version: 1
+service: layeredsvc
+
+# layeredsvc is a deliberately strict handler -> app -> store service used as a
+# groundwork fixture: its base graph contains NO handler->store edge, so a
+# skip-level edge introduced on a branch is genuinely novel (unlike loansvc,
+# whose base already reads from store in a handler). database/sql is a built-in
+# DB hint; it is listed here only for clarity.
+classify:
+  db: ["database/sql"]
