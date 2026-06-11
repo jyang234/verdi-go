@@ -14,6 +14,13 @@ groundwork is a sound *local/advisory* tool, not yet an adversary-resistant gate
 
 ## Start here
 
+- **[`drills.md`](drills.md)** — the measured effectiveness record: the staged
+  incident drills (recall, scoping power, the trace handoff, the staleness
+  demonstration) committed as test assertions, plus the E4 design awaiting a
+  live run.
+- **[`scorecard.md`](scorecard.md)** — the capability scorecard, graded by
+  evidence class: what is proven, what is measured, and what is honestly
+  unproven from inside this repo.
 - **[`usage.md`](usage.md)** — the practical guide: how groundwork and flowmap fit
   together, every command with real examples, a worked end-to-end review, and the
   trust boundary. Read this first to *use* it.

@@ -63,13 +63,18 @@ leaking exit; a CANT-PROVE tells you exactly why the claim would be unsound.
 are keyed to *your* named functions.
 
 **If you carry a pager:** `groundwork triage` is the incident front door.
-Hand it a symptom — a stack frame, a corrupted table, a missing event, a slow
-peer — and get the bounded suspect set, the implicated routes, and (with
+Hand it a symptom — the failing route straight off the alert
+(`--route "POST /api/v1/loans/{id}"`, mount prefixes and concrete IDs
+tolerated), a stack frame in runtime form, a corrupted table, a missing event,
+a slow peer — and get the bounded suspect set, the implicated routes, and (with
 `--fail`) the partial-effect answer responders are desperate for: *"if the
 charge call faulted, `loan.approved` was already published — you may have
 approved-but-uncharged loans."* Then `flowmap behavior ingest` takes the
 incident's own OTel trace and pinpoints where it diverged from known-good.
-The graph narrows; the telemetry locates. No test cases authored, ever.
+The graph narrows; the telemetry locates. No test cases authored, ever. And these claims are *measured*, not asserted:
+the committed effectiveness drills hold triage at 10/10 recall with a median
+hunt space of 8% of the graph — as test assertions, so the numbers re-verify
+on every run ([`docs/groundwork/drills.md`](docs/groundwork/drills.md)).
 
 **If you build with coding agents:** `groundwork mcp` serves all of it as MCP
 tools, and `ground` closes the loop *before* the edit: the grounding card
@@ -93,6 +98,7 @@ $ groundwork verify policy.json base.json branch.json            # fail-closed p
 $ groundwork review policy.json base.json branch.json            # the reviewer's computed artifact
 
 # During an incident:
+$ groundwork triage --route "POST /loans" graph.json             # the alert's own words
 $ groundwork triage --table users graph.json                     # who touches it, what's implicated
 $ groundwork triage --fail --peer credit-bureau graph.json       # what-if: peer down
 
@@ -114,12 +120,13 @@ threaded through every output.
 | Understand *why* it is built this way (thesis, failure modes, pressure tests) | [`docs/groundwork/README.md`](docs/groundwork/README.md) and [`docs/groundwork/distilled-learnings.md`](docs/groundwork/distilled-learnings.md) |
 | See the component specifications (the source of truth) | `docs/*.md` (tier map, static extractor, canonicalization, capture harness, golden diff) |
 | Follow the feature plans and their validation criteria | `docs/design/*-plan.md` |
+| See how well it actually works — and what is honestly unproven | [`docs/groundwork/drills.md`](docs/groundwork/drills.md) (measured) and [`docs/groundwork/scorecard.md`](docs/groundwork/scorecard.md) (graded by evidence class) |
 | A complete worked example service | `testdata/fixtures/loansvc` (and `testdata/groundwork/{layeredsvc,blindsvc,obligsvc}`) |
 
 ## Layout
 
 ```
-cmd/flowmap/     CLI: boundary [--check] | graph [--entry] | diff | coverage | behavior ingest | version
+cmd/flowmap/     CLI: boundary [--check] | graph [--entry] [--stamp] | diff | coverage | behavior ingest | version
 cmd/groundwork/  CLI: reach | triage | ground | fitness | review | verify | diff | verify-artifact
                       | exceptions | policy-check | mcp | version
 harness/ capture/ flow/ ir/   PUBLIC: in-process flow-test capture + the canonical IR

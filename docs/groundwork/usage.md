@@ -78,9 +78,14 @@ graph JSON between them:
 - **flowmap is the producer.** `flowmap graph <service>` builds the call graph
   (`go/packages → go/ssa → go/callgraph`) and emits it as canonical JSON — nodes
   (`fqn`, `sig`, `tier`, `fallible`), edges (caller→callee, with `boundary` and
-  `concurrent` flags), and a blind-spot manifest. `flowmap boundary <service>`
-  emits the gated inter-service **boundary contract** (routes, published/consumed
-  events, external dependencies).
+  `concurrent` flags), a blind-spot manifest, and the level-2 disclosure
+  sections computed from each function's CFG and the discovered roots:
+  `obligations` (path-obligation verdicts), `effect_order` (partial-effect
+  facts), and `entrypoints` (the route/topic → handler join). An optional
+  `--stamp <sha>` records a caller-supplied identity for `--expect`
+  verification. `flowmap boundary <service>` emits the gated inter-service
+  **boundary contract** (routes, published/consumed events, external
+  dependencies).
 - **groundwork is the judge.** It only ever *reads* those JSON files; it never
   runs flowmap. Keeping the producer and the judge as different binaries is what
   lets CI control which runs where — the security boundary is around graph
@@ -613,6 +618,8 @@ it. Top-level sections:
 | `blind_spots[]` | `{kind, site, detail}` — where the graph's knowledge stops | the soundness frontier |
 | `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
 | `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |
+| `entrypoints[]` | `{kind: http\|consumer, name, fn}` — the route/topic → handler join | names are registration-site literals: match segment-wise, never exactly-or-nothing |
+| `stamp` | optional caller-supplied identity (the CI commit SHA) | verify with `triage`/`mcp` `--expect`; absent on local/golden builds by design |
 
 Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
 have not been taught about should fail loudly, not drop fields silently.
