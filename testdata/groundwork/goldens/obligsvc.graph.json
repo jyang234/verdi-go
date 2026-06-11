@@ -1,0 +1,226 @@
+{
+  "nodes": [
+    {
+      "fqn": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "sig": "func (*store.Store).BeginTx() (*store.Tx, error)",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/obligsvc/internal/store.Tx).Commit",
+      "sig": "func (*store.Tx).Commit() error",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "sig": "func (*store.Tx).Rollback()",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc.main",
+      "sig": "func main.main()",
+      "tier": 1
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.Disburse",
+      "sig": "func app.Disburse(approved bool)",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.DisburseRacy",
+      "sig": "func app.DisburseRacy(approved bool)",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.Transfer",
+      "sig": "func app.Transfer(s *store.Store) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.TransferDefer",
+      "sig": "func app.TransferDefer(s *store.Store) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.TransferOwn",
+      "sig": "func app.TransferOwn(s *store.Store) (*store.Tx, error)",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.credit",
+      "sig": "func app.credit(t *store.Tx) error",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.debit",
+      "sig": "func app.debit(t *store.Tx) error",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/audit.Write",
+      "sig": "func audit.Write(event string)",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/bus.Publish",
+      "sig": "func bus.Publish(event string)",
+      "tier": 3
+    }
+  ],
+  "edges": [
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Commit",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.Disburse",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.DisburseRacy",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.Transfer",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.TransferDefer",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.TransferOwn",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Disburse",
+      "to": "example.com/obligsvc/internal/audit.Write",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Disburse",
+      "to": "example.com/obligsvc/internal/bus.Publish",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.DisburseRacy",
+      "to": "example.com/obligsvc/internal/audit.Write",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.DisburseRacy",
+      "to": "example.com/obligsvc/internal/bus.Publish",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Transfer",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Transfer",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Commit",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Transfer",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Transfer",
+      "to": "example.com/obligsvc/internal/app.credit",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.Transfer",
+      "to": "example.com/obligsvc/internal/app.debit",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDefer",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDefer",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Commit",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDefer",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "tier": 3,
+      "concurrent": true
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDefer",
+      "to": "example.com/obligsvc/internal/app.debit",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferOwn",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    }
+  ],
+  "blind_spots": [],
+  "obligations": [
+    {
+      "rule": "audit-before-publish",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.Disburse",
+      "site": "internal/app/app.go:57",
+      "status": "SATISFIED"
+    },
+    {
+      "rule": "audit-before-publish",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.DisburseRacy",
+      "site": "internal/app/app.go:66",
+      "status": "VIOLATED",
+      "detail": "no call to example.com/obligsvc/internal/audit#Write dominates this call to example.com/obligsvc/internal/bus#Publish"
+    },
+    {
+      "rule": "renamed-away",
+      "kind": "must-release",
+      "status": "UNMATCHED",
+      "detail": "anchor example.com/obligsvc/internal/store#BeginTransaction matches no call site — the rule is inert"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.Transfer",
+      "site": "internal/app/app.go:16",
+      "status": "VIOLATED",
+      "detail": "exit at internal/app/app.go:21 reachable without release"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.TransferDefer",
+      "site": "internal/app/app.go:32",
+      "status": "SATISFIED"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.TransferOwn",
+      "site": "internal/app/app.go:46",
+      "status": "CANT-PROVE",
+      "detail": "acquired value is returned — its lifecycle leaves the function"
+    }
+  ]
+}

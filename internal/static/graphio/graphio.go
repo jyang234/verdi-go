@@ -7,6 +7,7 @@
 package graphio
 
 import (
+	"path/filepath"
 	"sort"
 
 	"golang.org/x/tools/go/ssa"
@@ -16,6 +17,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 	cg "github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
+	"github.com/jyang234/golang-code-graph/internal/static/obligations"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
 )
 
@@ -28,6 +30,12 @@ type Graph struct {
 	Nodes      []Node                 `json:"nodes"`
 	Edges      []Edge                 `json:"edges"`
 	BlindSpots []blindspots.BlindSpot `json:"blind_spots"`
+
+	// Obligations is the path-obligation disclosure section: per-site verdicts
+	// for the .flowmap.yaml obligation rules, FQN-keyed and separate from the
+	// call-graph edges (a narrow level-2 slice). Omitted entirely when no rules
+	// are configured, so rule-free services emit byte-identical graphs.
+	Obligations []obligations.Finding `json:"obligations,omitempty"`
 }
 
 // Node is one first-party function.
@@ -88,6 +96,23 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 			Fallible: fallible(fn),
 		})
 		g.Edges = append(g.Edges, nodeEdges...)
+	}
+
+	if rules := res.Config.Obligations; len(rules) > 0 {
+		// Site paths are anchored at the service directory (made absolute, so the
+		// emitted module-relative form is identical regardless of where flowmap
+		// was invoked from — the cross-machine determinism requirement).
+		base, err := filepath.Abs(res.Dir)
+		if err != nil {
+			return nil, err
+		}
+		var fns []*ssa.Function
+		for _, n := range res.Graph.Nodes {
+			if scope[n.Func] {
+				fns = append(fns, n.Func)
+			}
+		}
+		g.Obligations = obligations.Check(rules, fns, base)
 	}
 
 	sortGraph(g)

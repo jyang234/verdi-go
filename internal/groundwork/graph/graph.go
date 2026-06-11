@@ -32,10 +32,25 @@ const dynamicMarker = "<dynamic>"
 // Graph is one call-graph view as emitted by `flowmap graph`. It is the whole,
 // unscoped service graph unless Entrypoint is set.
 type Graph struct {
-	Entrypoint string      `json:"entrypoint,omitempty"`
-	Nodes      []Node      `json:"nodes"`
-	Edges      []Edge      `json:"edges"`
-	BlindSpots []BlindSpot `json:"blind_spots"`
+	Entrypoint  string       `json:"entrypoint,omitempty"`
+	Nodes       []Node       `json:"nodes"`
+	Edges       []Edge       `json:"edges"`
+	BlindSpots  []BlindSpot  `json:"blind_spots"`
+	Obligations []Obligation `json:"obligations,omitempty"`
+}
+
+// Obligation is one path-obligation verdict flowmap computed from a function's
+// SSA CFG against a .flowmap.yaml rule. groundwork only judges it: VIOLATED is
+// a gate-failing finding, CANT-PROVE and UNMATCHED are disclosed abstentions,
+// SATISFIED is the proof and produces no finding. Identity is (rule, fn, site);
+// detail is presentation only.
+type Obligation struct {
+	Rule   string `json:"rule"`
+	Kind   string `json:"kind"`
+	Fn     string `json:"fn,omitempty"`
+	Site   string `json:"site,omitempty"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Node is one first-party function.

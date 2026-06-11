@@ -1,0 +1,17 @@
+version: 1
+service: obligsvc
+obligations:
+  - name: tx-must-close
+    acquire: "example.com/obligsvc/internal/store#BeginTx"
+    release:
+      - "example.com/obligsvc/internal/store#Commit"
+      - "example.com/obligsvc/internal/store#Rollback"
+  - name: audit-before-publish
+    require: "example.com/obligsvc/internal/audit#Write"
+    before: "example.com/obligsvc/internal/bus#Publish"
+  # Deliberately inert: the anchor was "renamed away". The UNMATCHED disclosure
+  # is the fixture's dead-guardrail case.
+  - name: renamed-away
+    acquire: "example.com/obligsvc/internal/store#BeginTransaction"
+    release:
+      - "example.com/obligsvc/internal/store#Commit"

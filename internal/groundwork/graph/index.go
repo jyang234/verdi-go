@@ -187,3 +187,6 @@ func (ix *Index) BlindSpotsAt(site string) []BlindSpot { return ix.blind[site] }
 
 // BlindSpots returns the whole graph-completeness blind-spot manifest.
 func (ix *Index) BlindSpots() []BlindSpot { return ix.g.BlindSpots }
+
+// Obligations returns the graph's path-obligation verdicts.
+func (ix *Index) Obligations() []Obligation { return ix.g.Obligations }

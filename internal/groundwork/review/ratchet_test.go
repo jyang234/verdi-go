@@ -1,6 +1,7 @@
 package review
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -171,6 +172,42 @@ func TestPassThroughSecondBypassIsNewViolation(t *testing.T) {
 	}
 	if len(passViolations) != 1 || passViolations[0].From != v2Export {
 		t.Fatalf("want only the second bypass as new, got %v", a.NewViolations)
+	}
+}
+
+// The obligation drift ratchet (O4/O5): a SATISFIED→VIOLATED flip surfaces as
+// a NEW violation against the old base, and a detail-prose change does not.
+func TestObligationFlipIsNewViolation(t *testing.T) {
+	p := &policy.Policy{Service: "obligsvc", Version: 1}
+	base := loadGraph(t, "obligsvc.graph.json")
+	branch := loadGraph(t, "obligsvc.graph.json")
+	for i := range branch.Obligations {
+		if strings.Contains(branch.Obligations[i].Fn, "TransferDefer") {
+			branch.Obligations[i].Status = "VIOLATED"
+			branch.Obligations[i].Detail = "exit reachable without release"
+		}
+	}
+	a := Review(p, base, branch)
+	if a.Verdict != Block {
+		t.Fatalf("verdict = %s, want BLOCK on a flipped obligation", a.Verdict)
+	}
+	if len(a.NewViolations) != 1 || !strings.Contains(a.NewViolations[0].From, "TransferDefer") {
+		t.Fatalf("new violations = %v, want only the flipped TransferDefer", a.NewViolations)
+	}
+}
+
+func TestObligationDetailChangeIsNotNew(t *testing.T) {
+	p := &policy.Policy{Service: "obligsvc", Version: 1}
+	base := loadGraph(t, "obligsvc.graph.json")
+	branch := loadGraph(t, "obligsvc.graph.json")
+	for i := range branch.Obligations {
+		if branch.Obligations[i].Status == "VIOLATED" {
+			branch.Obligations[i].Detail = "re-worded evidence prose"
+		}
+	}
+	a := Review(p, base, branch)
+	if len(a.NewViolations) != 0 {
+		t.Fatalf("detail prose change reported as new: %v", a.NewViolations)
 	}
 }
 
