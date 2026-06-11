@@ -51,6 +51,10 @@ func TestRunErrors(t *testing.T) {
 			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
 		{"review", "p", "b"}, // wrong arg count
 		{"verify-artifact", "/nonexistent/artifact.json", "p", "b", "br"},
+		// triage demands exactly one symptom flag: a silently-ignored second
+		// symptom would mis-scope an incident hunt.
+		{"triage", "--frame", "GetUser", "--table", "users",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json"},
 		// verify blocks on the skip branch (new violation).
 		{"verify", "../../testdata/groundwork/policies/layeredsvc.json",
 			"../../testdata/groundwork/goldens/layeredsvc.graph.json",

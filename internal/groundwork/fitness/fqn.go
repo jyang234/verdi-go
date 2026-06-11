@@ -5,7 +5,13 @@
 // per-route I/O budget. Every finding names the exact edge or symbol it fires on.
 package fitness
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+)
 
 // PkgOf returns the import path of the package that declares the function named
 // by an ssa-style FQN. It handles the two shapes flowmap emits:
@@ -75,4 +81,32 @@ func matchAny(s string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// expandFroms expands a rule's From selectors against the graph: the
+// "entrypoint:*" selector matches every graph source, anything else is an FQN
+// exact-or-prefix pattern. This is the ONE selector language for every
+// From-bearing rule kind (must_not_reach, must_pass_through, and any future
+// rule) — a selector private to one check is how a policy author writes a
+// rule that silently matches nothing. The union is sorted and de-duplicated.
+func expandFroms(ix *graph.Index, patterns []string) []string {
+	var pats []string
+	entry := false
+	for _, p := range patterns {
+		if p == policy.EntrypointSelector {
+			entry = true
+		} else {
+			pats = append(pats, p)
+		}
+	}
+	set := map[string]bool{}
+	if entry {
+		for _, s := range ix.Sources() {
+			set[s] = true
+		}
+	}
+	for _, fqn := range matchNodes(ix, pats) {
+		set[fqn] = true
+	}
+	return setutil.SortedKeys(set)
 }

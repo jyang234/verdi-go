@@ -30,7 +30,7 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 		var blindEv evidence
 		blind := false
 
-		for _, from := range passFroms(ix, rule.From) {
+		for _, from := range expandFroms(ix, rule.From) {
 			if matchAny(from, rule.Through) {
 				continue // the source IS the waypoint: trivially guarded
 			}
@@ -89,36 +89,6 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			})
 		}
 	}
-}
-
-// passFroms expands a rule's From selectors: "entrypoint:*" matches every graph
-// source, anything else is an FQN exact-or-prefix pattern. The union is sorted
-// and de-duplicated.
-func passFroms(ix *graph.Index, patterns []string) []string {
-	var pats []string
-	entry := false
-	for _, p := range patterns {
-		if p == policy.EntrypointSelector {
-			entry = true
-		} else {
-			pats = append(pats, p)
-		}
-	}
-	set := map[string]bool{}
-	if entry {
-		for _, s := range ix.Sources() {
-			set[s] = true
-		}
-	}
-	for _, fqn := range matchNodes(ix, pats) {
-		set[fqn] = true
-	}
-	out := make([]string, 0, len(set))
-	for fqn := range set {
-		out = append(out, fqn)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // guardedWalk is a forward BFS from one source that never enters a

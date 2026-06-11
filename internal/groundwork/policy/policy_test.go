@@ -75,6 +75,14 @@ func TestValidateErrors(t *testing.T) {
 			Service: "s", Version: 1,
 			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}}},
 		},
+		"selector in reach to": {
+			Service: "s", Version: 1,
+			MustNotReach: []ReachRule{{Name: "r", From: []string{"a"}, To: []string{EntrypointSelector}}},
+		},
+		"selector in pass through": {
+			Service: "s", Version: 1,
+			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}, Through: []string{EntrypointSelector}}},
+		},
 		"pass allow both empty": {
 			Service: "s", Version: 1,
 			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}, Through: []string{"c"},

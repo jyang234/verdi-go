@@ -60,3 +60,24 @@ func TestObligationsSatisfiedIsSilent(t *testing.T) {
 		}
 	}
 }
+
+// RF-1: fail closed on vocabulary drift. A status this groundwork does not
+// recognize must surface as a caution, never read as a pass.
+func TestUnknownObligationStatusIsCaution(t *testing.T) {
+	g := loadGraph(t, "obligsvc.graph.json")
+	g.Obligations = append(g.Obligations, graph.Obligation{
+		Rule: "tx-must-close", Kind: "must-release",
+		Fn: "example.com/obligsvc/internal/app.Transfer", Site: "internal/app/app.go:99",
+		Status: "CANT-PROVE-OWNERSHIP", // a future producer-side refinement
+	})
+	res := Check(&policy.Policy{Service: "obligsvc", Version: 1}, graph.NewIndex(g))
+	found := false
+	for _, c := range res.Cautions() {
+		if strings.Contains(c.Summary, `status "CANT-PROVE-OWNERSHIP" is not understood`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unknown status produced no caution; findings: %v", res.Findings)
+	}
+}

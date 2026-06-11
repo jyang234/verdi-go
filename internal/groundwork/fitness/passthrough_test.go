@@ -142,3 +142,29 @@ func TestPassThroughDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// RF-1: entrypoint:* is one selector language for every From position. In a
+// must_not_reach rule it expands to the graph sources instead of silently
+// matching nothing (which read as proof of absence).
+func TestEntrypointSelectorInMustNotReach(t *testing.T) {
+	g := loadGraph(t, "layeredsvc.graph.json")
+	p := &policy.Policy{Service: "layeredsvc", Version: 1, MustNotReach: []policy.ReachRule{{
+		Name: "no-entrypoint-reads",
+		From: []string{policy.EntrypointSelector},
+		To:   []string{"boundary:db SELECT"},
+	}}}
+	res := Check(p, graph.NewIndex(g))
+	if v := res.Violations(); len(v) != 1 || v[0].Rule != "must_not_reach" {
+		t.Fatalf("entrypoint:* must bind in must_not_reach (GetUser reaches SELECT users); got %v", res.Findings)
+	}
+
+	// And on a blind graph with require_proof, unprovability fails closed
+	// instead of silently passing over an empty from-set.
+	blind := loadGraph(t, "blindsvc.graph.json")
+	p.MustNotReach[0].To = []string{"boundary:db DELETE"}
+	p.MustNotReach[0].RequireProof = true
+	res = Check(p, graph.NewIndex(blind))
+	if v := res.Violations(); len(v) != 1 {
+		t.Fatalf("require_proof over a blind frontier must fail closed; got %v", res.Findings)
+	}
+}

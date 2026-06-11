@@ -234,6 +234,9 @@ func (p *Policy) Validate() error {
 		if len(r.From) == 0 || len(r.To) == 0 {
 			return fmt.Errorf("must_not_reach[%d] (%s): from and to are both required", i, r.Name)
 		}
+		if err := noSelector("must_not_reach", r.Name, "to", r.To); err != nil {
+			return err
+		}
 	}
 	for i, r := range p.NoConcurrentReach {
 		if strings.TrimSpace(r.Name) == "" {
@@ -241,6 +244,9 @@ func (p *Policy) Validate() error {
 		}
 		if len(r.To) == 0 {
 			return fmt.Errorf("no_concurrent_reach[%d] (%s): to is required", i, r.Name)
+		}
+		if err := noSelector("no_concurrent_reach", r.Name, "to", r.To); err != nil {
+			return err
 		}
 	}
 	for i, r := range p.MustPassThrough {
@@ -254,6 +260,12 @@ func (p *Policy) Validate() error {
 			if a.From == "" && a.To == "" {
 				return fmt.Errorf("must_pass_through[%d] (%s): allow[%d] must declare from and/or to", i, r.Name, j)
 			}
+		}
+		if err := noSelector("must_pass_through", r.Name, "to", r.To); err != nil {
+			return err
+		}
+		if err := noSelector("must_pass_through", r.Name, "through", r.Through); err != nil {
+			return err
 		}
 	}
 	if p.IOBudget != nil && p.IOBudget.MaxWritesPerRoute < 0 {
@@ -316,3 +328,17 @@ func (p *Policy) LayerNames() []string {
 }
 
 func hasPrefix(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+
+// noSelector rejects the entrypoint:* selector in a position where it has no
+// defined meaning. Selectors are only valid where a rule kind explicitly
+// expands them (From positions); accepting one anywhere else would make the
+// pattern match nothing — a rule that silently binds nothing, the inert-
+// guardrail failure mode. Fail at load, not at match time.
+func noSelector(kind, rule, field string, patterns []string) error {
+	for _, p := range patterns {
+		if p == EntrypointSelector {
+			return fmt.Errorf("%s (%s): %q is not valid in %s — selectors are only defined for from", kind, rule, EntrypointSelector, field)
+		}
+	}
+	return nil
+}

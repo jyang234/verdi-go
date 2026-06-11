@@ -44,6 +44,11 @@ type Graph struct {
 // a gate-failing finding, CANT-PROVE and UNMATCHED are disclosed abstentions,
 // SATISFIED is the proof and produces no finding. Identity is (rule, fn, site);
 // detail is presentation only.
+//
+// Status is an open vocabulary across the trust boundary: flowmap and
+// groundwork decode this section independently and on purpose, so the judge
+// MUST fail closed on a status it does not recognize (surface a caution,
+// never fall through) — the convention for every graph-carried enum.
 type Obligation struct {
 	Rule   string `json:"rule"`
 	Kind   string `json:"kind"`

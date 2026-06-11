@@ -113,6 +113,16 @@ func cmdTriage(args []string) error {
 	}
 	ix := graph.NewIndex(g)
 
+	set := 0
+	for _, v := range []string{*frame, *table, *event, *peer} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 1 {
+		// A symptom silently ignored mis-scopes an incident hunt; demand one.
+		return fmt.Errorf("triage: exactly one of --frame, --table, --event, --peer is required (got %d)", set)
+	}
 	var res impact.Resolution
 	switch {
 	case *frame != "":
@@ -123,8 +133,6 @@ func cmdTriage(args []string) error {
 		res = impact.ResolveEvent(ix, *event)
 	case *peer != "":
 		res = impact.ResolvePeer(ix, *peer)
-	default:
-		return fmt.Errorf("triage: one of --frame, --table, --event, --peer is required")
 	}
 	if len(res.Matches) == 0 && len(res.Possible) == 0 {
 		return fmt.Errorf("triage: symptom resolved to nothing in this graph")

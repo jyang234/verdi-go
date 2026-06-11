@@ -14,6 +14,7 @@ const (
 	obligationViolated  = "VIOLATED"
 	obligationCantProve = "CANT-PROVE"
 	obligationUnmatched = "UNMATCHED"
+	obligationSatisfied = "SATISFIED"
 )
 
 // checkObligations judges the path-obligation verdicts flowmap computed from
@@ -51,6 +52,21 @@ func checkObligations(_ *policy.Policy, ix *graph.Index, r *Result) {
 				Severity: Caution,
 				Summary:  fmt.Sprintf("%s: rule matches nothing — inert guardrail", o.Rule),
 				Detail:   o.Detail,
+			})
+		case obligationSatisfied:
+			// The desired state: the universal proof. No finding.
+		default:
+			// Fail closed on vocabulary drift: a status this judge does not
+			// recognize must never read as a pass. flowmap and groundwork decode
+			// the graph independently (deliberately, across the trust boundary),
+			// so a renamed or added status on the producer side arrives here as
+			// an arbitrary string — surface it instead of falling through.
+			r.add(Finding{
+				Rule:     "obligation",
+				Severity: Caution,
+				Summary:  fmt.Sprintf("%s: status %q is not understood by this groundwork — upgrade or investigate", o.Rule, o.Status),
+				From:     o.Fn,
+				To:       o.Site,
 			})
 		}
 	}

@@ -26,7 +26,7 @@ const (
 // (no path, but a blind frontier) is a Caution naming where the graph went blind.
 func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	for _, rule := range p.MustNotReach {
-		froms := matchNodes(ix, rule.From)
+		froms := expandFroms(ix, rule.From)
 		v, ev := evalReach(ix, froms, rule.To)
 		switch v {
 		case reachable:
