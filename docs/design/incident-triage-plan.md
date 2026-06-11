@@ -133,6 +133,15 @@ answers: fault at C → effects with C in `before` are *possibly committed*;
 Like `obligations`, this is a lockstep schema change (graphio emit + groundwork
 strict decode + golden regen in one commit), omitted entirely when empty.
 
+Two implementation notes from scoping (record so IT-3 starts warm): the
+computation belongs in **graphio's Build loop**, not the obligations package —
+that is the one place where boundary labels, their `ssa` call sites, and the
+callee signatures coexist per call-graph edge; and the fixture needs
+`classify.busPublish`/`db` hints added to obligsvc's `.flowmap.yaml` (it has
+none today, so its publishes are currently unlabeled) plus a
+`DisburseAndCharge` shape: audit → publish → fallible charge, where failing
+the charge must report the publish as possibly-committed.
+
 ## 6. Build order
 
 - **Phase IT-0 — impact engine.** `internal/groundwork/impact`: card assembly
