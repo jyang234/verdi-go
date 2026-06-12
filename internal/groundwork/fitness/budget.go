@@ -22,27 +22,65 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 		return
 	}
 	max := p.IOBudget.MaxWritesPerRoute
+	routes := RouteWrites(p, ix)
+	// Carried on the Result so review's route-delta section reuses this exact
+	// computation instead of repeating the per-route BFS.
+	r.RouteWrites = routes
+	for _, src := range setutil.SortedKeys(routes) {
+		writes := routes[src].Writes
+		if len(writes) > max {
+			r.add(Finding{
+				Rule:     "io_budget",
+				Severity: Violation,
+				Summary:  fmt.Sprintf("%s reaches %d write(s) over a budget of %d: %s", ShortName(src), len(writes), max, strings.Join(writes, ", ")),
+				From:     src,
+			})
+		}
+	}
+}
+
+// RouteIO is one route's external write surface: the sorted distinct write
+// targets (sans "boundary:") reachable from it, and whether the route's cone
+// touches a blind spot — in which case Writes is a lower bound, not a count.
+type RouteIO struct {
+	Writes []string
+	Blind  bool
+}
+
+// RouteWrites computes the write surface of every route (non-root entrypoint),
+// with checkIOBudget's exact semantics — one computation, shared with the
+// review artifact's per-route delta section so the two surfaces can never
+// disagree about what a route writes.
+func RouteWrites(p *policy.Policy, ix *graph.Index) map[string]RouteIO {
 	roots := p.RootPackages()
+	out := map[string]RouteIO{}
 	for _, src := range ix.Sources() {
 		if isRootPkg(roots, PkgOf(src)) {
 			continue // the composition root (main) is an entrypoint but not a route
 		}
 		cone := append([]string{src}, ix.Reachable(src)...)
+		effects := ix.Effects(cone...)
 		writes := map[string]bool{}
-		for _, e := range ix.Effects(cone...) {
-			if IsWrite(e) {
-				writes[strings.TrimPrefix(e.To, "boundary:")] = true
+		for _, e := range effects {
+			if label, ok := WriteLabel(e); ok {
+				writes[label] = true
 			}
 		}
-		if len(writes) > max {
-			r.add(Finding{
-				Rule:     "io_budget",
-				Severity: Violation,
-				Summary:  fmt.Sprintf("%s reaches %d write(s) over a budget of %d: %s", ShortName(src), len(writes), max, strings.Join(setutil.SortedKeys(writes), ", ")),
-				From:     src,
-			})
-		}
+		_, blind := frontierBlindSiteWith(ix, cone, effects)
+		out[src] = RouteIO{Writes: setutil.SortedKeys(writes), Blind: blind}
 	}
+	return out
+}
+
+// WriteLabel returns the effect label (sans "boundary:") of an external write,
+// and whether e is one — the single extraction point for the write surface.
+// The budget, the effect-ratchet audit, and the review's new-target diff all
+// label writes through here, so they cannot disagree about the format.
+func WriteLabel(e graph.Edge) (string, bool) {
+	if !IsWrite(e) {
+		return "", false
+	}
+	return strings.TrimPrefix(e.To, "boundary:"), true
 }
 
 // IsWrite reports whether a boundary effect mutates external state. The effect

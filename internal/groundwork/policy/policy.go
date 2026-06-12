@@ -28,6 +28,7 @@ type Policy struct {
 	NoConcurrentReach []ConcurrentRule  `json:"no_concurrent_reach,omitempty"`
 	IOBudget          *IOBudget         `json:"io_budget,omitempty"`
 	BlindSpotRatchet  *BlindSpotRatchet `json:"blind_spot_ratchet,omitempty"`
+	EffectRatchet     *EffectRatchet    `json:"effect_ratchet,omitempty"`
 }
 
 // Layer names an architectural tier and the import-path prefixes that belong to
@@ -181,6 +182,51 @@ func (p *Policy) GatesBlindSpots() bool {
 	return p.BlindSpotRatchet != nil && p.BlindSpotRatchet.Gate
 }
 
+// EffectRatchet is the drift ratchet on the external write surface: no new
+// boundary write target base→branch without a reviewed allow-list entry. The
+// sibling of BlindSpotRatchet with the same lifecycle — review always reports
+// new (unallowed) write targets; Gate makes them merge-blocking only when Gate
+// is true, so adopters observe first and gate once the baseline is clean.
+//
+// The ratchet sees new effect LABELS, not new uses of an existing label —
+// that residual is the route-delta section's job. Its soundness against
+// dynamic laundering (routing a new write through dynamic dispatch so the
+// label collapses to an existing <dynamic>) leans on the blind-spot ratchet:
+// the new dispatch site is what fires. Gate this ratchet without gating
+// blind_spot_ratchet and that escape stays open.
+type EffectRatchet struct {
+	Gate  bool              `json:"gate,omitempty"`
+	Allow []EffectException `json:"allow,omitempty"`
+}
+
+// EffectException is one reviewed-and-accepted write target. Target matches the
+// effect label (sans "boundary:", e.g. "db INSERT audit_log") exactly or by
+// prefix; empty targets are rejected at load (a "" would allow every write).
+type EffectException struct {
+	Target string `json:"target"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Allows reports whether a write-effect label is covered by an allow-list
+// entry. A nil ratchet allows nothing (every new write target is reported —
+// just never gated).
+func (r *EffectRatchet) Allows(label string) bool {
+	if r == nil {
+		return false
+	}
+	for _, a := range r.Allow {
+		if label == a.Target || hasPrefix(label, a.Target) {
+			return true
+		}
+	}
+	return false
+}
+
+// GatesEffects reports whether new write targets block the pre-flight gate.
+func (p *Policy) GatesEffects() bool {
+	return p.EffectRatchet != nil && p.EffectRatchet.Gate
+}
+
 // Load decodes and validates a policy from JSON. Unknown fields are rejected so a
 // typo'd or stale key is a load error, not a silently-ignored rule.
 func Load(path string) (*Policy, error) {
@@ -312,6 +358,13 @@ func (p *Policy) Validate() error {
 		for i, a := range p.BlindSpotRatchet.Allow {
 			if strings.TrimSpace(a.Site) == "" {
 				return fmt.Errorf("blind_spot_ratchet.allow[%d]: site is required", i)
+			}
+		}
+	}
+	if p.EffectRatchet != nil {
+		for i, a := range p.EffectRatchet.Allow {
+			if strings.TrimSpace(a.Target) == "" {
+				return fmt.Errorf("effect_ratchet.allow[%d]: target is required — an empty entry allows every write", i)
 			}
 		}
 	}

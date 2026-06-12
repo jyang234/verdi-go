@@ -105,6 +105,32 @@ func Exceptions(p *policy.Policy, ix *graph.Index) []ExceptionStatus {
 		}
 	}
 
+	// An effect-ratchet entry is live while the graph still carries a matching
+	// write label — same present-fact test as a blind-spot exception (the
+	// ratchet's findings live in review, not fitness, so suppressed-set
+	// attribution does not apply).
+	if p.EffectRatchet != nil {
+		var writeLabels []string
+		for _, e := range ix.Edges() {
+			if label, ok := WriteLabel(e); ok {
+				writeLabels = append(writeLabels, label)
+			}
+		}
+		for _, a := range p.EffectRatchet.Allow {
+			one := &policy.EffectRatchet{Allow: []policy.EffectException{a}}
+			live := false
+			for _, l := range writeLabels {
+				if one.Allows(l) {
+					live = true
+					break
+				}
+			}
+			out = append(out, ExceptionStatus{
+				Source: "effect_ratchet", Site: a.Target, Reason: a.Reason, Dead: !live,
+			})
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Source != b.Source {

@@ -61,10 +61,14 @@ type Artifact struct {
 	NewViolations []Violation      `json:"new_violations,omitempty"`
 	Contract      []ContractChange `json:"contract_changes,omitempty"`
 	Effects       []EffectChange   `json:"io_effects,omitempty"`
-	Reach         []string         `json:"reachable_from,omitempty"`
-	NewCautions   []Violation      `json:"new_cautions,omitempty"`
-	NewBlindSpots []BlindSpotDelta `json:"new_blind_spots,omitempty"`
-	Digest        string           `json:"digest"`
+	// RouteIO attributes write-surface movement to routes; NewWriteTargets is
+	// the effect ratchet's drift (write labels new to the whole graph).
+	RouteIO         []RouteIODelta   `json:"route_io_deltas,omitempty"`
+	NewWriteTargets []string         `json:"new_write_targets,omitempty"`
+	Reach           []string         `json:"reachable_from,omitempty"`
+	NewCautions     []Violation      `json:"new_cautions,omitempty"`
+	NewBlindSpots   []BlindSpotDelta `json:"new_blind_spots,omitempty"`
+	Digest          string           `json:"digest"`
 }
 
 // PkgDelta is the node add/remove count for one touched package.
@@ -211,6 +215,19 @@ func (a Artifact) Render() string {
 			}
 			fmt.Fprintf(&b, "- %s %s%s\n", e.Op, e.Effect, tag)
 		}
+		b.WriteString("\n")
+	}
+
+	if len(a.NewWriteTargets) > 0 {
+		fmt.Fprintf(&b, "🧾 %d new external write target(s) — ratcheted surface growth\n", len(a.NewWriteTargets))
+		for _, t := range a.NewWriteTargets {
+			fmt.Fprintf(&b, "- %s\n", t)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(a.RouteIO) > 0 {
+		b.WriteString(renderRouteIO(a.RouteIO))
 		b.WriteString("\n")
 	}
 

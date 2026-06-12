@@ -464,7 +464,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "exceptions",
-			"description": "Audit every policy allow-list entry against a loaded graph; DEAD entries suppress nothing and should be deleted. Requires the service to be started with --policy.",
+			"description": "Audit every policy allow-list entry and rule pattern against a loaded graph; DEAD entries suppress or bind nothing and should be fixed or deleted. Requires the service to be started with --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
@@ -711,14 +711,18 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 			return toolError("the server was started without --policy; exceptions needs one")
 		}
 		xs := fitness.Exceptions(p, ix)
-		if len(xs) == 0 {
-			return withStale(toolText("no allow-list entries configured"))
+		ls := fitness.Liveness(p, ix)
+		if len(xs) == 0 && len(ls) == 0 {
+			return withStale(toolText("no allow-list entries or pattern-bearing rules configured"))
 		}
 		var b strings.Builder
 		for _, x := range xs {
 			fmt.Fprintln(&b, x)
 		}
-		fmt.Fprintf(&b, "\n%d dead exception(s)\n", fitness.DeadCount(xs))
+		for _, l := range ls {
+			fmt.Fprintln(&b, l)
+		}
+		fmt.Fprintf(&b, "\n%d dead exception(s), %d dead rule pattern(s)\n", fitness.DeadCount(xs), fitness.DeadPatternCount(ls))
 		return withStale(toolText(b.String()))
 	default:
 		return toolError("unknown tool: " + name)

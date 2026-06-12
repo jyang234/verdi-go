@@ -22,6 +22,7 @@ type GateResult struct {
 	ScopeEscapes     []string         `json:"scope_escapes,omitempty"`
 	BreakingContract []ContractChange `json:"breaking_contract,omitempty"`
 	NewBlindSpots    []BlindSpotDelta `json:"new_blind_spots,omitempty"`
+	NewWriteTargets  []string         `json:"new_write_targets,omitempty"`
 	Digest           string           `json:"digest"`
 }
 
@@ -32,7 +33,7 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string) GateResul
 	baseIx, branchIx := graph.NewIndex(base), graph.NewIndex(branch)
 	d := diffGraphs(base, branch)
 
-	newViolations, _ := newFindings(p, baseIx, branchIx)
+	newViolations, _, _, _ := newFindings(p, baseIx, branchIx)
 
 	var breaking []ContractChange
 	for _, c := range contractChanges(d, baseIx, branchIx) {
@@ -51,14 +52,22 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string) GateResul
 		blindSpots = newBlindSpots(p, base, branch)
 	}
 
+	// Same policy-controlled gating for the effect ratchet: new write targets
+	// block only when effect_ratchet.gate is set.
+	var writeTargets []string
+	if p.GatesEffects() {
+		writeTargets = newWriteTargets(p, base, branch)
+	}
+
 	g := GateResult{
 		Service:          p.Service,
 		NewViolations:    newViolations,
 		ScopeEscapes:     escapes,
 		BreakingContract: breaking,
 		NewBlindSpots:    blindSpots,
+		NewWriteTargets:  writeTargets,
 	}
-	g.Pass = len(newViolations) == 0 && len(escapes) == 0 && len(breaking) == 0 && len(blindSpots) == 0
+	g.Pass = len(newViolations) == 0 && len(escapes) == 0 && len(breaking) == 0 && len(blindSpots) == 0 && len(writeTargets) == 0
 	g.Digest = gateDigest(g)
 	return g
 }
@@ -134,6 +143,12 @@ func (g GateResult) Render() string {
 		fmt.Fprintf(&b, "🕳️  %d new blind spot(s) — gated by blind_spot_ratchet; allow-list with a reason or remove the dynamic construct\n", len(g.NewBlindSpots))
 		for _, s := range g.NewBlindSpots {
 			fmt.Fprintf(&b, "- %s %s\n", s.Kind, s.Site)
+		}
+	}
+	if len(g.NewWriteTargets) > 0 {
+		fmt.Fprintf(&b, "🧾 %d new external write target(s) — gated by effect_ratchet; allow-list with a reason or drop the write\n", len(g.NewWriteTargets))
+		for _, t := range g.NewWriteTargets {
+			fmt.Fprintf(&b, "- %s\n", t)
 		}
 	}
 	return b.String()
