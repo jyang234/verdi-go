@@ -26,11 +26,17 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 		rule := &p.MustPassThrough[i]
 		throughLabel := shortPatterns(rule.Through)
 
+		froms := expandFroms(ix, rule.From)
+		if len(froms) == 0 {
+			r.add(inertRuleFinding("must_pass_through", rule.Name, rule.RequireProof))
+			continue
+		}
+
 		bypassed := false
 		var blindEv evidence
 		blind := false
 
-		for _, from := range expandFroms(ix, rule.From) {
+		for _, from := range froms {
 			if matchAny(from, rule.Through) {
 				continue // the source IS the waypoint: trivially guarded
 			}

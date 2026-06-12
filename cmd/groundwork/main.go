@@ -630,29 +630,43 @@ func cmdExceptions(args []string) error {
 	if err != nil {
 		return err
 	}
-	xs := fitness.Exceptions(p, graph.NewIndex(g))
+	ix := graph.NewIndex(g)
+	xs := fitness.Exceptions(p, ix)
 	if xs == nil {
 		xs = []fitness.ExceptionStatus{} // canonical [] rather than null
 	}
+	ls := fitness.Liveness(p, ix)
+	if ls == nil {
+		ls = []fitness.PatternLiveness{}
+	}
 	if asJSON {
-		b, err := canonjson.Marshal(xs)
+		b, err := canonjson.Marshal(struct {
+			Exceptions   []fitness.ExceptionStatus `json:"exceptions"`
+			RuleLiveness []fitness.PatternLiveness `json:"rule_liveness"`
+		}{xs, ls})
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(b))
 		return nil
 	}
-	if len(xs) == 0 {
-		fmt.Println("no allow-list entries configured")
+	if len(xs) == 0 && len(ls) == 0 {
+		fmt.Println("no allow-list entries or pattern-bearing rules configured")
 		return nil
 	}
 	for _, x := range xs {
 		fmt.Println(x)
 	}
+	for _, l := range ls {
+		fmt.Println(l)
+	}
 	if dead := fitness.DeadCount(xs); dead > 0 {
 		fmt.Printf("\n%d dead exception(s) — delete them: a stale excuse can silently cover a future violation\n", dead)
-	} else {
+	} else if len(xs) > 0 {
 		fmt.Printf("\nall %d exception(s) live and justified\n", len(xs))
+	}
+	if dead := fitness.DeadPatternCount(ls); dead > 0 {
+		fmt.Printf("%d dead rule pattern(s) — fix or delete them: a rule that binds nothing guards nothing\n", dead)
 	}
 	return nil
 }
@@ -799,6 +813,13 @@ func cmdPolicyCheck(args []string) error {
 			mode = "gating"
 		}
 		fmt.Printf("  blind_spot_ratchet: %s, %d allow-listed exception(s)\n", mode, len(r.Allow))
+	}
+	if r := p.EffectRatchet; r != nil {
+		mode := "observe-only"
+		if r.Gate {
+			mode = "gating"
+		}
+		fmt.Printf("  effect_ratchet: %s, %d allow-listed target(s)\n", mode, len(r.Allow))
 	}
 	return nil
 }

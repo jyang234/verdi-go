@@ -27,6 +27,10 @@ const (
 func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	for _, rule := range p.MustNotReach {
 		froms := expandFroms(ix, rule.From)
+		if len(froms) == 0 {
+			r.add(inertRuleFinding("must_not_reach", rule.Name, rule.RequireProof))
+			continue
+		}
 		v, ev := evalReach(ix, froms, rule.To)
 		switch v {
 		case reachable:
@@ -53,6 +57,26 @@ func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 		case provenAbsent:
 			// A real proof: nothing to report. Absence is the desired state.
 		}
+	}
+}
+
+// inertRuleFinding discloses a rule whose From binds nothing in this graph —
+// the guard quietly stopped existing (a typo'd FQN, or a package renamed out
+// from under the pattern), and the zero-seed walk would otherwise report it as
+// a clean provenAbsent pass forever. A Caution by default; require_proof
+// escalates to Violation — a rule that cannot even be evaluated is the
+// strongest form of unprovability. A To that binds nothing is deliberately NOT
+// inert here ("the forbidden thing does not exist" is the success state); the
+// liveness audit lists it as INFO instead.
+func inertRuleFinding(kind, name string, requireProof bool) Finding {
+	sev, note := Caution, "inert rule"
+	if requireProof {
+		sev, note = Violation, "require_proof is set and an inert rule guards nothing"
+	}
+	return Finding{
+		Rule:     kind,
+		Severity: sev,
+		Summary:  fmt.Sprintf("%s: from binds nothing in this graph — %s", name, note),
 	}
 }
 

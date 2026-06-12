@@ -28,19 +28,23 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 	effects := ioEffects(d)
 	reach := reachExisting(d, baseIx, branchIx)
 	blindSpots := newBlindSpots(p, base, branch)
+	routeIO := routeIODeltas(p, baseIx, branchIx)
+	writeTargets := newWriteTargets(p, base, branch)
 
 	a := Artifact{
-		Service:       p.Service,
-		Shape:         d.shape(),
-		Touches:       d.pkgDeltas(),
-		NewViolations: newViolations,
-		Contract:      contract,
-		Effects:       effects,
-		Reach:         reach,
-		NewCautions:   newCautions,
-		NewBlindSpots: blindSpots,
+		Service:         p.Service,
+		Shape:           d.shape(),
+		Touches:         d.pkgDeltas(),
+		NewViolations:   newViolations,
+		Contract:        contract,
+		Effects:         effects,
+		RouteIO:         routeIO,
+		NewWriteTargets: writeTargets,
+		Reach:           reach,
+		NewCautions:     newCautions,
+		NewBlindSpots:   blindSpots,
 	}
-	a.Verdict = verdict(p, d, newViolations, contract, newCautions, blindSpots)
+	a.Verdict = verdict(p, d, newViolations, contract, newCautions, blindSpots, writeTargets)
 	a.Digest = digestOf(a)
 	return a
 }
@@ -53,14 +57,17 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 // body-only edits, and NO-STRUCTURAL-SIGNAL's render says "the graph has
 // nothing to say" — which must never hide a new caution or disclosure. Any
 // future finding source is covered automatically by the hasSignal form.
-func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, cautions []Violation, blindSpots []BlindSpotDelta) Verdict {
+func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, cautions []Violation, blindSpots []BlindSpotDelta, writeTargets []string) Verdict {
 	if len(violations) > 0 || anyBreaking(contract) {
 		return Block
 	}
 	if p.GatesBlindSpots() && len(blindSpots) > 0 {
 		return Block
 	}
-	hasSignal := !d.empty() || len(cautions) > 0 || len(blindSpots) > 0
+	if p.GatesEffects() && len(writeTargets) > 0 {
+		return Block
+	}
+	hasSignal := !d.empty() || len(cautions) > 0 || len(blindSpots) > 0 || len(writeTargets) > 0
 	if !hasSignal {
 		return NoStructuralSignal
 	}

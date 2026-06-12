@@ -1,6 +1,11 @@
 # policy coverage extensions: pressure-tested plan
 
-**Status:** plan-of-record. Companion to
+**Status:** PC-1, PC-2, and PC-3 implemented (rule liveness in fitness + the
+exceptions audit; `route_io_deltas` and `new_write_targets` in the review
+artifact and gate; `effect_ratchet` in the policy schema). PC-4 stays parked
+on its named trigger — the first legitimately over-budget route. Kept as the
+design record: the pressure test in §2 is why the shipped shapes differ from
+the first sketches. Companion to
 [`guardrail-extensions-plan.md`](guardrail-extensions-plan.md); follows its
 extension recipe (declare / analyze / disclose / judge / prove / validate) and
 its acceptance criterion: every check is a pure function of (graph(s), policy)

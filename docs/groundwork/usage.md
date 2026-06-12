@@ -137,7 +137,7 @@ own homework — so it is declarative and validated strictly on load.
 }
 ```
 
-It declares six invariant families:
+It declares seven invariant families:
 
 - **`layers`** — ordered top→bottom; a call may stay within a layer or descend
   one, never skip a layer or call upward. `roots` exempts the composition root
@@ -174,6 +174,22 @@ It declares six invariant families:
   (even with no ratchet configured); `gate: true` additionally makes them
   block `verify` — observe first, gate once the baseline is clean. The ratchet
   is one-directional: pre-existing and removed blind spots never fire it.
+- **`effect_ratchet`** — the drift ratchet on the external *write surface*: no
+  new boundary write target (a new table written, a new outbound POST, a new
+  publish) base→branch without a reviewed `allow` entry. Same lifecycle as the
+  blind-spot ratchet: always reported, `gate: true` to block. It sees new
+  effect *labels*, not new uses of an existing label (the per-route delta
+  section covers that); its soundness against laundering a write through
+  dynamic dispatch leans on `blind_spot_ratchet` catching the new dispatch
+  site — gate them together.
+
+Rules whose `from` binds nothing in the graph (a typo'd FQN, or a package
+renamed out from under the pattern) are disclosed as a **caution** — "from
+binds nothing — inert rule" — instead of passing silently as proven-absent;
+`require_proof` escalates that to a violation, since a rule that cannot be
+evaluated guards nothing. A `to` that matches nothing is deliberately *not*
+inert (for a negative invariant, "the forbidden thing does not exist" is the
+success state); the `exceptions` audit lists it as INFO.
 
 Validate one with `policy-check`:
 
@@ -278,6 +294,20 @@ edge — *same description, different computed verdict.* The artifact also repor
 shape, touched packages, contract movement (additive vs breaking), I/O effect
 changes, and which existing entrypoints the change is now live behind. Add
 `--json` to emit the canonical artifact for archival or `verify-artifact`.
+
+Two sections attribute write-surface movement beyond the global effect diff:
+
+- **`route_io_deltas`** — every route whose distinct-write-target set changed,
+  with both sides' counts and the targets added/removed. The load-bearing case
+  is the **lost write**: a route that reached `db INSERT audit_log` in base
+  and no longer does, while the global effect set is unchanged because another
+  route still writes it — invisible to every other section. Counts are static
+  write *targets*, not runtime volume; a side counted over a blind frontier is
+  marked, since a delta against a blind side may be the graph's knowledge
+  shifting rather than the code's behavior. Disclosure only — it never gates.
+- **`new_write_targets`** — the effect ratchet's findings: write labels new to
+  the whole graph and not allow-listed. Reported always; blocking under
+  `effect_ratchet.gate: true`.
 
 ### `verify` — the fail-closed pre-flight gate
 
@@ -471,13 +501,25 @@ same-function orderings only — their absence is never an all-clear.
 
 ---
 
-## Suppression audit (`exceptions`)
+## Suppression and liveness audit (`exceptions`)
 
 Allow-lists accumulate. `groundwork exceptions <policy> <graph>` lists every
-active suppression (layering, `must_pass_through`, `blind_spot_ratchet`) with
-its reason, and flags **DEAD** entries — ones that no longer suppress anything
-in the current graph. Delete them: a stale excuse can silently cover a future
-violation. Read-only, exit 0; the measurable target is a dead count of zero.
+active suppression (layering, `must_pass_through`, `blind_spot_ratchet`,
+`effect_ratchet`) with its reason, and flags **DEAD** entries — ones that no
+longer suppress anything in the current graph. Delete them: a stale excuse can
+silently cover a future violation. Read-only, exit 0; the measurable target is
+a dead count of zero.
+
+The audit also lists **rule liveness**: every pattern of every `must_not_reach`,
+`must_pass_through`, and `no_concurrent_reach` rule, with its binding state
+against the graph. This surface is absolute (no base/branch diff), which is
+what keeps a *born-inert* rule visible — a rule added already-inert cautions
+identically on base and branch, so the review diff suppresses it forever; only
+this listing catches it. `from`/`through` patterns that bind nothing are
+**DEAD** (fix or delete); `to` patterns that match nothing are **INFO**, since
+that may be success (the forbidden thing is absent) or rot (a renamed target) —
+the reviewer judges. `--json` emits `{"exceptions": [...], "rule_liveness":
+[...]}`.
 
 ---
 
