@@ -642,6 +642,28 @@ func TestAssembleRecognizesAWSConsumerEntry(t *testing.T) {
 	}
 }
 
+// TestSynthesizedRootTriggerFromSpanMix: a synthesized root takes its trigger
+// from the parentless span mix — an event-only fragment (two parentless
+// consumers) is event-triggered, not the old unconditional HTTP default.
+func TestSynthesizedRootTriggerFromSpanMix(t *testing.T) {
+	spans := []capture.Span{
+		{TraceID: "B", ID: "c1", Kind: ir.KindConsumer,
+			Attrs: map[string]string{FlowKey: "f", serviceKey: "notifier", "messaging.destination.name": "q1"}},
+		{TraceID: "B", ID: "c2", Kind: ir.KindConsumer,
+			Attrs: map[string]string{FlowKey: "f", serviceKey: "notifier", "messaging.destination.name": "q2"}},
+	}
+	g := Group(spans)
+	if len(g) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(g))
+	}
+	if !g[0].Synthesized {
+		t.Fatal("two parentless spans must force a synthesized root")
+	}
+	if g[0].Flow.Trigger != capture.TriggerEvent {
+		t.Errorf("consumer-only fragment trigger = %q, want event", g[0].Flow.Trigger)
+	}
+}
+
 func services(g []FlowCapture) []string {
 	out := make([]string, len(g))
 	for i := range g {

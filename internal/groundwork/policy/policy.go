@@ -223,9 +223,22 @@ func (p *Policy) Validate() error {
 		if len(l.Packages) == 0 {
 			return fmt.Errorf("layer %q: at least one package prefix is required", l.Name)
 		}
+		if err := noEmptyPattern("layer", l.Name, "packages", l.Packages); err != nil {
+			return err
+		}
 	}
-	if p.Layering != nil && len(p.Layers) == 0 {
-		return fmt.Errorf("layering is configured but no layers are declared")
+	if p.Layering != nil {
+		if len(p.Layers) == 0 {
+			return fmt.Errorf("layering is configured but no layers are declared")
+		}
+		// An exception with both sides empty prefix-matches every edge — one
+		// such entry silently disables the whole layering invariant, the exact
+		// inert-guardrail failure mode this validator exists to catch.
+		for i, a := range p.Layering.Allow {
+			if a.From == "" && a.To == "" {
+				return fmt.Errorf("layering: allow[%d] must declare from and/or to — an empty entry exempts every edge", i)
+			}
+		}
 	}
 	for i, r := range p.MustNotReach {
 		if strings.TrimSpace(r.Name) == "" {
@@ -237,6 +250,12 @@ func (p *Policy) Validate() error {
 		if err := noSelector("must_not_reach", r.Name, "to", r.To); err != nil {
 			return err
 		}
+		if err := noEmptyPattern("must_not_reach", r.Name, "from", r.From); err != nil {
+			return err
+		}
+		if err := noEmptyPattern("must_not_reach", r.Name, "to", r.To); err != nil {
+			return err
+		}
 	}
 	for i, r := range p.NoConcurrentReach {
 		if strings.TrimSpace(r.Name) == "" {
@@ -246,6 +265,9 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("no_concurrent_reach[%d] (%s): to is required", i, r.Name)
 		}
 		if err := noSelector("no_concurrent_reach", r.Name, "to", r.To); err != nil {
+			return err
+		}
+		if err := noEmptyPattern("no_concurrent_reach", r.Name, "to", r.To); err != nil {
 			return err
 		}
 	}
@@ -273,6 +295,14 @@ func (p *Policy) Validate() error {
 		}
 		if err := noSelector("must_pass_through", r.Name, "through", r.Through); err != nil {
 			return err
+		}
+		for _, f := range [3]struct {
+			field string
+			pats  []string
+		}{{"from", r.From}, {"to", r.To}, {"through", r.Through}} {
+			if err := noEmptyPattern("must_pass_through", r.Name, f.field, f.pats); err != nil {
+				return err
+			}
 		}
 	}
 	if p.IOBudget != nil && p.IOBudget.MaxWritesPerRoute < 0 {
@@ -345,6 +375,20 @@ func noSelector(kind, rule, field string, patterns []string) error {
 	for _, p := range patterns {
 		if p == EntrypointSelector {
 			return fmt.Errorf("%s (%s): %q is not valid in %s — selectors are only defined for from", kind, rule, EntrypointSelector, field)
+		}
+	}
+	return nil
+}
+
+// noEmptyPattern rejects empty (or whitespace-only) elements in a pattern list.
+// Every matcher treats patterns as exact-or-prefix, so "" matches every symbol:
+// in a From/To/Through it binds or trips the rule everywhere, and in a layer's
+// packages it claims every package for that layer. Either way the policy stops
+// meaning what it says — fail at load, not at match time.
+func noEmptyPattern(kind, rule, field string, patterns []string) error {
+	for i, p := range patterns {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("%s (%s): %s[%d] is empty, which would prefix-match everything", kind, rule, field, i)
 		}
 	}
 	return nil

@@ -9,6 +9,13 @@ runs:
     - name: install binaries
       shell: bash
       run: |
-        go install github.com/jyang234/golang-code-graph/cmd/flowmap@${{ github.action_ref || 'latest' }}
-        go install github.com/jyang234/golang-code-graph/cmd/groundwork@${{ github.action_ref || 'latest' }}
+        # Fail closed when no ref resolved: floating to @latest would install
+        # gate binaries nobody reviewed, the opposite of this action's promise.
+        ref='${{ github.action_ref }}'
+        if [ -z "$ref" ]; then
+          echo "setup-groundwork: github.action_ref is empty; pin this action to a commit or tag" >&2
+          exit 1
+        fi
+        go install "github.com/jyang234/golang-code-graph/cmd/flowmap@$ref"
+        go install "github.com/jyang234/golang-code-graph/cmd/groundwork@$ref"
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"

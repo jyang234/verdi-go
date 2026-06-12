@@ -186,7 +186,6 @@ func assembleRoot(synthName string, spans []capture.Span) ([]capture.Span, *capt
 		}
 	}
 
-	trigger := capture.TriggerHTTP
 	if len(parentless) == 1 {
 		s := &spans[parentless[0]]
 		// Classify the entry by its EFFECTIVE kind: an AWS-SDK consumer roots its
@@ -199,6 +198,25 @@ func assembleRoot(synthName string, spans []capture.Span) ([]capture.Span, *capt
 		case ir.KindConsumer:
 			return spans, s, capture.TriggerEvent, false
 		}
+	}
+	// The synthesized root's trigger comes from the parentless span mix, by the
+	// same effective kinds: any server makes the fragment HTTP-triggered;
+	// otherwise any consumer makes it event-triggered. A fragment with neither
+	// (producer/internal-only) keeps the HTTP default — the trigger vocabulary
+	// has no "unknown", and Synthesized=true already discloses the entry as
+	// reconstructed rather than observed.
+	trigger := capture.TriggerHTTP
+	hasServer, hasConsumer := false, false
+	for _, i := range parentless {
+		switch opkey.EffectiveKind(spans[i].Kind, spans[i].Attrs) {
+		case ir.KindServer:
+			hasServer = true
+		case ir.KindConsumer:
+			hasConsumer = true
+		}
+	}
+	if !hasServer && hasConsumer {
+		trigger = capture.TriggerEvent
 	}
 	syn := capture.Span{
 		ID:    "flowmap-root:" + synthName,

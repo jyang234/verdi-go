@@ -635,6 +635,10 @@ route around.
 | `verify-artifact` | artifact tampered or stale | text status |
 | `reach`/`triage`/`ground`/`exceptions` | only on bad input | `--json` canonical cards |
 
+A failed verdict exits **1**; an operational failure (bad flags, unreadable
+inputs) exits **2** — so CI can tell "the change failed the gate" from "the
+gate failed to run". Both are non-zero: a plain pass/fail gate needs no change.
+
 Everything `--json` is canonical (sorted keys, stable bytes) and safe to diff,
 cache, or hash.
 

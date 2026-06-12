@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -81,6 +82,43 @@ func TestRunErrors(t *testing.T) {
 	for _, args := range cases {
 		if err := run(args); err == nil {
 			t.Errorf("run(%v) = nil, want error", args)
+		}
+	}
+}
+
+// Verdict failures and operational failures exit differently (1 vs 2) so CI
+// can tell "the change failed the gate" from "the gate failed to run". The
+// boundary is the error's type; main maps it to the exit code.
+func TestVerdictVsOperationalErrors(t *testing.T) {
+	verdicts := [][]string{
+		{"fitness", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
+		{"review", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
+		{"verify", "../../testdata/groundwork/policies/layeredsvc.json",
+			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
+		{"diff", "../../testdata/groundwork/goldens/layeredsvc.contract.json",
+			"../../testdata/groundwork/goldens/layeredsvc.branch.contract.json"},
+	}
+	for _, args := range verdicts {
+		err := run(args)
+		var v verdictError
+		if !errors.As(err, &v) {
+			t.Errorf("run(%v) = %v (%T), want a verdictError", args, err, err)
+		}
+	}
+	operational := [][]string{
+		{"bogus"},
+		{"fitness", "/nonexistent/policy.json", "../../testdata/groundwork/goldens/layeredsvc.graph.json"},
+		{"review", "p", "b"},
+	}
+	for _, args := range operational {
+		err := run(args)
+		var v verdictError
+		if err == nil || errors.As(err, &v) {
+			t.Errorf("run(%v) = %v (%T), want a non-verdict error", args, err, err)
 		}
 	}
 }
