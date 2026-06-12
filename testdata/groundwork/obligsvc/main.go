@@ -35,6 +35,9 @@ func main() {
 	// validates, so calling it first would entry-dominate everything after it
 	// in this block — the incidental-upstream-require hazard D-CX9 documents.
 	_ = app.DisburseViaHelper("id")
+	_ = app.TransferViaHelper(s)
+	_ = app.TransferMaybeHelper(s, true)
+	_ = app.TransferDeferHelper(s)
 	app.OpenSend()
 	_ = app.DispatchSend()
 	app.CallTaken()

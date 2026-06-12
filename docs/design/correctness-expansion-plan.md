@@ -1,16 +1,20 @@
 # correctness expansion: implementation plan
 
 **Status:** in progress — CX-0 (the summary engine), CX-2 (the must-precede
-lifts, `fromCallers`-gated per D-CX9), and CX-3 (derived effect sites with
-`via` provenance) shipped. The §10
+lifts, `fromCallers`-gated per D-CX9), CX-3 (derived effect sites with
+`via` provenance), and CX-1 (the must-release handoff credit) shipped; CX-4
+and CX-5 remain. The §10
 adversarial review ran before CX-2 merged and found four issues — F1 (a
 conditionally-releasing deferred closure earned ALWAYS through
 `deferReleases`' any-instruction scan), F2 (entry domination ignored
 unresolved invoke dispatch), F3 (the entry NEVER pole was not a proof; ED is
 now two-valued and per-edge dominance became a coverage walk), F4 (the
 `Unit.Callees` contract permitted unsound pre-filtering) — all fixed with
-locked reproductions, mirroring the v1 obligations review. CX-3, CX-1, CX-4,
-CX-5 remain, in the D-CX8 order. Companion to
+locked reproductions, mirroring the v1 obligations review. CX-4 and CX-5 remain, in the D-CX8 order. CX-1's walk splits in two — a leak
+hunt (an unknown handoff blocks the witness) and a proof hunt (an unknown
+handoff is transparent, so a later unconditional release still proves) — so
+the VIOLATED witness is never weaker than the intraprocedural one and an
+early maybe-release cannot force a false abstention. Companion to
 [`path-obligations-plan.md`](path-obligations-plan.md) (whose §4/§10
 "no interprocedural" limit D-CX2 supersedes, for *proven* summaries only) and
 [`guardrail-extensions-plan.md`](guardrail-extensions-plan.md) (whose §1

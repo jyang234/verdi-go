@@ -210,3 +210,55 @@ func DisburseViaHelper(id string) error {
 	publishApproved()
 	return billing.Charge(id)
 }
+
+// finishTx commits or rolls back on every path: an ALWAYS-release helper.
+func finishTx(tx *store.Tx, err error) error {
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// TransferViaHelper hands the open tx to finishTx — the release one frame
+// down earns handoff credit (SATISFIED, CX-1) without naming the helper as a
+// release ref.
+func TransferViaHelper(s *store.Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	return finishTx(tx, debit(tx))
+}
+
+// finishMaybe releases on one arm only: a handoff to it is beyond proof.
+func finishMaybe(tx *store.Tx, ok bool) {
+	if ok {
+		tx.Rollback()
+	}
+}
+
+// TransferMaybeHelper abstains (CANT-PROVE), naming finishMaybe: the walk can
+// claim neither the leak nor the proof past the handoff.
+func TransferMaybeHelper(s *store.Store, ok bool) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	finishMaybe(tx, ok)
+	return nil
+}
+
+// closeTx releases unconditionally; deferring it covers every later exit —
+// the deferReleases named-helper ceiling, lifted by the summary (SATISFIED).
+func closeTx(tx *store.Tx) { tx.Rollback() }
+
+// TransferDeferHelper defers the named helper.
+func TransferDeferHelper(s *store.Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	defer closeTx(tx)
+	return debit(tx)
+}

@@ -544,6 +544,7 @@ func TestLiftMonotonicity(t *testing.T) {
 		rules []config.ObligationRule
 	}{
 		{"lift", liftSrc, liftRules()},
+		{"release-lift", releaseLiftSrc, []config.ObligationRule{releaseLiftRule()}},
 		{"tx", txSrc, []config.ObligationRule{txRule()}},
 		{"discharge", dischargeSrc, []config.ObligationRule{
 			{Name: "tx-close", Acquire: "example.com/fix#BeginTx", Release: releaseTargets},
@@ -622,5 +623,169 @@ func quiet() {}
 		if got := s.AlwaysEffect(fnByName(t, fns, c.fn), label, sites); got != c.want {
 			t.Errorf("AlwaysEffect(%s) = %v, want %v", c.fn, got, c.want)
 		}
+	}
+}
+
+// ---- CX-1: the must-release handoff credit ---------------------------------------
+
+const releaseLiftSrc = `package fix
+
+type Tx struct{ closed bool }
+type Store struct{}
+
+func (s *Store) BeginTx() (*Tx, error) { return &Tx{}, nil }
+func (t *Tx) Commit() error            { t.closed = true; return nil }
+func (t *Tx) Rollback()                { t.closed = true }
+
+func debit(t *Tx) error { return nil }
+func log_()             {}
+
+// The release lives one frame down, on every path of the helper.
+func finish(t *Tx, err error) error {
+	if err != nil {
+		t.Rollback()
+		return err
+	}
+	return t.Commit()
+}
+func TransferHelper(s *Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	return finish(tx, debit(tx))
+}
+
+// The helper releases on one arm only: beyond proof.
+func finishMaybe(t *Tx, ok bool) {
+	if ok {
+		t.Rollback()
+	}
+}
+func TransferHelperLeaky(s *Store, ok bool) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	finishMaybe(tx, ok)
+	return nil
+}
+
+// A maybe-release followed by an unconditional release still proves: the
+// proof hunt walks through the unknown handoff.
+func TransferMaybeThenRelease(s *Store, ok bool) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	finishMaybe(tx, ok)
+	tx.Rollback()
+	return nil
+}
+
+// The worked example preserved: debit provably never releases, the leak and
+// its witness are unchanged.
+func TransferHelperNever(s *Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	return debit(tx)
+}
+
+// A non-handoff call earns nothing and blocks nothing.
+func TransferPlainLeak(s *Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	_ = tx
+	log_()
+	return nil
+}
+
+// Deferred named ALWAYS-release helper: the deferReleases ceiling, lifted.
+func closeTx(t *Tx) { t.Rollback() }
+func TransferDeferHelper(s *Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	defer closeTx(tx)
+	return debit(tx)
+}
+
+// Recursion in the handoff callee abstains.
+func recClose(t *Tx, n int) {
+	if n > 0 {
+		recClose(t, n-1)
+		return
+	}
+	t.Rollback()
+}
+func TransferRecursive(s *Store) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	recClose(tx, 1)
+	return nil
+}
+
+// A dynamic handoff is a frontier.
+func TransferDynamic(s *Store, f func(*Tx)) error {
+	tx, err := s.BeginTx()
+	if err != nil {
+		return err
+	}
+	f(tx)
+	return nil
+}
+`
+
+func releaseLiftRule() config.ObligationRule {
+	return config.ObligationRule{
+		Name:    "tx-must-close",
+		Acquire: "example.com/fix#BeginTx",
+		Release: []string{"example.com/fix#Commit", "example.com/fix#Rollback"},
+	}
+}
+
+func TestReleaseLift(t *testing.T) {
+	fns := buildProg(t, releaseLiftSrc)
+	sums := NewSummaries(testUnit(fns))
+	var pkgFns []*ssa.Function
+	for _, fn := range fns {
+		if fn.Pkg != nil && fn.Pkg.Pkg.Path() == "example.com/fix" && fn.Parent() == nil {
+			pkgFns = append(pkgFns, fn)
+		}
+	}
+	fs := Check([]config.ObligationRule{releaseLiftRule()}, pkgFns, "", sums)
+
+	rows := []struct {
+		fn   string
+		want Status
+	}{
+		{"TransferHelper", Satisfied},
+		{"TransferMaybeThenRelease", Satisfied},
+		{"TransferDeferHelper", Satisfied},
+		{"TransferHelperLeaky", CantProve},
+		{"TransferRecursive", CantProve},
+		{"TransferDynamic", CantProve},
+		{"TransferHelperNever", Violated},
+		{"TransferPlainLeak", Violated},
+	}
+	for _, r := range rows {
+		got := findingsOf(fs, "tx-must-close", r.fn)
+		if len(got) != 1 {
+			t.Errorf("%s: %d findings, want 1: %v", r.fn, len(got), got)
+			continue
+		}
+		if got[0].Status != r.want {
+			t.Errorf("%s = %s (%s), want %s", r.fn, got[0].Status, got[0].Detail, r.want)
+		}
+	}
+	if leaky := findingsOf(fs, "tx-must-close", "TransferHelperLeaky"); len(leaky) == 1 && !strings.Contains(leaky[0].Detail, "finishMaybe") {
+		t.Errorf("the abstention must name the unprovable callee, got %q", leaky[0].Detail)
 	}
 }
