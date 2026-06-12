@@ -62,8 +62,14 @@ func Compare(got *ir.CanonicalTrace, dir, name string, update bool) error {
 	if err != nil {
 		return fmt.Errorf("golden: %s is corrupt: %w", goldenPath, err)
 	}
-	gotBytes := canonicalBytes(got)
-	wantBytes := canonicalBytes(want)
+	gotBytes, err := canonicalBytes(got)
+	if err != nil {
+		return fmt.Errorf("golden: serializing the observed flow: %w", err)
+	}
+	wantBytes, err := canonicalBytes(want)
+	if err != nil {
+		return fmt.Errorf("golden: serializing %s: %w", goldenPath, err)
+	}
 	if string(gotBytes) != string(wantBytes) {
 		return fmt.Errorf("golden: %s does not match the observed flow (run -update to rebase if intended):\n%s",
 			goldenPath, changeSet(want, got, string(wantBytes), string(gotBytes)))
@@ -73,8 +79,8 @@ func Compare(got *ir.CanonicalTrace, dir, name string, update bool) error {
 
 // changeSet renders the prioritized structural diff (the authoritative,
 // reviewer-facing change set). It falls back to a line diff only when the
-// structural diff is empty yet the bytes differ — e.g. a flow-id or service-name
-// edit, which is not part of the behavioral tree.
+// structural diff is empty yet the bytes differ — an edit the differ does not
+// model, such as a span's owning-service label.
 func changeSet(want, got *ir.CanonicalTrace, wantBytes, gotBytes string) string {
 	changes := diff.Diff(want, got)
 	if len(changes) == 0 {
@@ -89,12 +95,12 @@ func changeSet(want, got *ir.CanonicalTrace, wantBytes, gotBytes string) string 
 
 // canonicalBytes serializes a trace with the Discards manifest zeroed, so
 // equality rests on flow structure alone and never on the review-only record of
-// what was dropped.
-func canonicalBytes(t *ir.CanonicalTrace) []byte {
+// what was dropped. A marshal failure must propagate: swallowed, both sides of
+// the assertion would serialize to "" and the gate would vacuously pass.
+func canonicalBytes(t *ir.CanonicalTrace) ([]byte, error) {
 	cp := *t
 	cp.Discards = ir.DiscardManifest{}
-	b, _ := cp.Marshal()
-	return b
+	return cp.Marshal()
 }
 
 // Slug turns a flow name into a stable file stem: a leading path or method is
@@ -119,8 +125,8 @@ func Slug(name string) string {
 
 // diffLines produces a compact line-oriented view of the first divergence
 // between two canonical JSON documents. It is only the fallback when the
-// structural diff is empty (a non-behavioral edit such as the flow id or service
-// name); the prioritized structural change set is the primary output.
+// structural diff is empty yet the bytes differ (an edit the differ does not
+// model); the prioritized structural change set is the primary output.
 func diffLines(want, got string) string {
 	wl := strings.Split(strings.TrimRight(want, "\n"), "\n")
 	gl := strings.Split(strings.TrimRight(got, "\n"), "\n")
