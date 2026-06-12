@@ -183,6 +183,68 @@ It declares seven invariant families:
   dynamic dispatch leans on `blind_spot_ratchet` catching the new dispatch
   site — gate them together.
 
+#### The sensitive-flow rule pack (correctness plan, CX-4)
+
+The data-safety bug classes — PII reaching a log sink, untrusted input
+reaching raw SQL unsanitized — need **no new rule family**: they are
+`must_not_reach` / `must_pass_through` instances with a curated vocabulary.
+Declared exactly like any other rule:
+
+```json
+"must_not_reach": [
+  {"name": "pii-never-logged",
+   "from": ["example.com/svc/internal/profile.LoadProfile",
+            "(*example.com/svc/internal/dispatch.Dispatcher).Deliver"],
+   "to":   ["example.com/svc/internal/log.Write"],
+   "require_proof": true}
+],
+"must_pass_through": [
+  {"name": "untrusted-input-sanitized",
+   "from": ["entrypoint:*"],
+   "to":   ["boundary:db"],
+   "through": ["example.com/svc/internal/sanitize.Clean"]}
+]
+```
+
+`from` names the PII-handling functions (human-curated — only you know where
+PII lives); `to` names the sinks. **Name functions and methods explicitly,
+in their FQN forms** (a method's FQN is receiver-qualified:
+`(*pkg.Type).Method`): rule patterns match by FQN prefix, so a bare package
+pattern binds the package's functions but *not* its methods — a partially
+bound PII rule is a guardrail you believe in that isn't fully there. After
+declaring, run `groundwork ground` on a function you expect the rule to
+cover and confirm it appears under *binding rules* — the card uses exactly
+the checks' matcher. The semantics are exactly the family's, stated here so
+the rule never claims more than it proves:
+
+- **A pass is the strong direction**: no call path from PII-handling code to
+  a sink exists, proven over all paths, modulo the disclosed blind spots —
+  the class testing covers worst. `require_proof` makes blindness fail
+  closed.
+- **A violation is a lead, not a proven flow**: a call path *can* carry the
+  data; whether it does on a feasible path is the reviewer's call, with the
+  same allow-list discipline as layering.
+- **The claim is call-reachability, not data flow**: the rule covers sinks
+  reachable *from* PII-handling code. PII returned up the stack and logged by
+  a distant caller is invisible to it — that caller belongs in `from` if it
+  handles PII. Argument-level taint is deliberately out of scope (it is value
+  semantics; see the correctness plan's D-CX4).
+
+**Shipping preconditions — checkable on the graph before the rule lands.**
+This pack is precise on clean graphs and pure noise on the wrong ones, and a
+noisy rule spends trust the whole framework runs on:
+
+- the graph's blind-spot count is low (a 0-blind-spot service makes the pass
+  a real proof; behind 100+ HighFanOut sites it mostly cautions);
+- PII handling is concentrated (a few packages/files to name in `from`);
+- the sink list is bounded. On a dense graph with no PII and dozens of log
+  sinks, the rule fires everywhere and proves nothing — **do not ship it
+  there**.
+
+No sanitizer functions yet? Ship the waypoint-less `must_not_reach` form
+first; introducing named scrubbers later *upgrades* the rule to
+`must_pass_through` — an adopter refactor, never a heuristic stand-in.
+
 Rules whose `from` binds nothing in the graph (a typo'd FQN, or a package
 renamed out from under the pattern) are disclosed as a **caution** — "from
 binds nothing — inert rule" — instead of passing silently as proven-absent;

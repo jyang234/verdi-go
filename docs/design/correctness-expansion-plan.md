@@ -2,8 +2,10 @@
 
 **Status:** in progress — CX-0 (the summary engine), CX-2 (the must-precede
 lifts, `fromCallers`-gated per D-CX9), CX-3 (derived effect sites with
-`via` provenance), and CX-1 (the must-release handoff credit) shipped; CX-4
-and CX-5 remain. The §10
+`via` provenance), CX-1 (the must-release handoff credit), and CX-4 (the
+sensitive-flow rule pack in usage.md, with its locking test) shipped. Only
+CX-5 remains, parked on the adopter gate (E-CX5) and the field measurement
+run (E-CX6). The §10
 adversarial review ran before CX-2 merged and found four issues — F1 (a
 conditionally-releasing deferred closure earned ALWAYS through
 `deferReleases`' any-instruction scan), F2 (entry domination ignored
