@@ -26,9 +26,8 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 		rule := &p.MustPassThrough[i]
 		throughLabel := shortPatterns(rule.Through)
 
-		froms := expandFroms(ix, rule.From)
-		if len(froms) == 0 {
-			r.add(inertRuleFinding("must_pass_through", rule.Name, rule.RequireProof))
+		froms := bindFroms(ix, r, "must_pass_through", rule.Name, rule.From, rule.RequireProof)
+		if froms == nil {
 			continue
 		}
 

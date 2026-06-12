@@ -34,14 +34,22 @@ type RouteIODelta struct {
 // A blind frontier means the count is a lower bound — a delta against a blind
 // side may be the graph's knowledge shifting, not the code's behavior.
 type RouteIOSide struct {
-	Writes   int    `json:"writes"`
-	Frontier string `json:"frontier"` // "resolved" | "blind"
+	Writes   int      `json:"writes"`
+	Frontier Frontier `json:"frontier"`
 }
 
+// Frontier states the epistemic ground a side's count stands on.
+type Frontier string
+
+const (
+	FrontierResolved Frontier = "resolved"
+	FrontierBlind    Frontier = "blind"
+)
+
 func routeSide(r fitness.RouteIO) *RouteIOSide {
-	f := "resolved"
+	f := FrontierResolved
 	if r.Blind {
-		f = "blind"
+		f = FrontierBlind
 	}
 	return &RouteIOSide{Writes: len(r.Writes), Frontier: f}
 }
@@ -50,9 +58,16 @@ func routeSide(r fitness.RouteIO) *RouteIOSide {
 // write targets, not runtime volume (an N+1 is the same target either way),
 // which is why this section discloses every delta rather than gating on any
 // threshold. Routes present on one side only get a row when they carry writes.
-func routeIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index) []RouteIODelta {
-	baseRW := fitness.RouteWrites(p, baseIx)
-	branchRW := fitness.RouteWrites(p, branchIx)
+//
+// The rw maps are the ones fitness.Check computed for the io_budget; they are
+// recomputed here only when the policy declares no budget and Check never did.
+func routeIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index, baseRW, branchRW map[string]fitness.RouteIO) []RouteIODelta {
+	if baseRW == nil {
+		baseRW = fitness.RouteWrites(p, baseIx)
+	}
+	if branchRW == nil {
+		branchRW = fitness.RouteWrites(p, branchIx)
+	}
 
 	var out []RouteIODelta
 	for route, b := range baseRW {
@@ -63,10 +78,13 @@ func routeIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index) []RouteIODel
 			}
 			continue
 		}
-		added, removed := diffStrings(b.Writes, br.Writes)
+		removed, added := diffStringSets(setutil.StringSet(b.Writes), setutil.StringSet(br.Writes))
 		if len(added) == 0 && len(removed) == 0 {
 			continue
 		}
+		// diffStringSets returns map order; the artifact requires determinism.
+		sort.Strings(added)
+		sort.Strings(removed)
 		out = append(out, RouteIODelta{
 			Route: route, Base: routeSide(b), Branch: routeSide(br),
 			Added: added, Removed: removed,
@@ -79,23 +97,6 @@ func routeIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index) []RouteIODel
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Route < out[j].Route })
 	return out
-}
-
-// diffStrings returns the elements only in b (added) and only in a (removed);
-// both inputs are sorted, both outputs are sorted.
-func diffStrings(a, b []string) (added, removed []string) {
-	as, bs := setutil.StringSet(a), setutil.StringSet(b)
-	for _, s := range b {
-		if !as[s] {
-			added = append(added, s)
-		}
-	}
-	for _, s := range a {
-		if !bs[s] {
-			removed = append(removed, s)
-		}
-	}
-	return added, removed
 }
 
 // renderRouteIO renders the per-route section grouped by effect, not by route:
@@ -142,7 +143,7 @@ func renderRouteIO(rows []RouteIODelta) string {
 }
 
 func blindTag(s *RouteIOSide) string {
-	if s.Frontier == "blind" {
+	if s.Frontier == FrontierBlind {
 		return " (frontier blind)"
 	}
 	return ""
@@ -157,8 +158,8 @@ func newWriteTargets(p *policy.Policy, base, branch *graph.Graph) []string {
 	labels := func(g *graph.Graph) map[string]bool {
 		m := map[string]bool{}
 		for _, e := range g.Edges {
-			if fitness.IsWrite(e) {
-				m[strings.TrimPrefix(e.To, "boundary:")] = true
+			if label, ok := fitness.WriteLabel(e); ok {
+				m[label] = true
 			}
 		}
 		return m

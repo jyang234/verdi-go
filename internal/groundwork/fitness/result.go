@@ -52,6 +52,12 @@ func (f Finding) Key() string {
 // Result is the full set of findings from evaluating a policy against a graph.
 type Result struct {
 	Findings []Finding
+	// RouteWrites is the per-route write surface checkIOBudget computed (nil
+	// when the policy declares no io_budget). A computed-fact carrier, never
+	// serialized: review's route-delta section reuses it so the two surfaces
+	// cannot disagree about what a route writes — and the per-route BFS is
+	// not paid twice.
+	RouteWrites map[string]RouteIO
 }
 
 // add appends a finding.

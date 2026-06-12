@@ -110,11 +110,17 @@ func Exceptions(p *policy.Policy, ix *graph.Index) []ExceptionStatus {
 	// ratchet's findings live in review, not fitness, so suppressed-set
 	// attribution does not apply).
 	if p.EffectRatchet != nil {
+		var writeLabels []string
+		for _, e := range ix.Edges() {
+			if label, ok := WriteLabel(e); ok {
+				writeLabels = append(writeLabels, label)
+			}
+		}
 		for _, a := range p.EffectRatchet.Allow {
 			one := &policy.EffectRatchet{Allow: []policy.EffectException{a}}
 			live := false
-			for _, e := range ix.Edges() {
-				if IsWrite(e) && one.Allows(strings.TrimPrefix(e.To, "boundary:")) {
+			for _, l := range writeLabels {
+				if one.Allows(l) {
 					live = true
 					break
 				}

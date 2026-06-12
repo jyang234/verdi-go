@@ -36,11 +36,24 @@ type PatternLiveness struct {
 // it matches a node or a boundary effect label. Deterministic and read-only;
 // like Exceptions, it informs review, it does not gate.
 func Liveness(p *policy.Policy, ix *graph.Index) []PatternLiveness {
+	// Rule-independent facts, hoisted once (the RF-7 discipline): the sorted
+	// node list and the deduped boundary labels do not change per pattern, so
+	// neither the Nodes() sort nor the edge scan is repeated inside the loops.
+	nodes := ix.Nodes()
+	var boundary []string
+	seen := map[string]bool{}
+	for _, e := range ix.Edges() {
+		if e.IsBoundary() && !seen[e.To] {
+			seen[e.To] = true
+			boundary = append(boundary, e.To)
+		}
+	}
+
 	nodeLive := func(pat string) bool {
 		if pat == policy.EntrypointSelector {
 			return len(ix.Sources()) > 0
 		}
-		for _, fqn := range ix.Nodes() {
+		for _, fqn := range nodes {
 			if matchAny(fqn, []string{pat}) {
 				return true
 			}
@@ -51,8 +64,8 @@ func Liveness(p *policy.Policy, ix *graph.Index) []PatternLiveness {
 		if nodeLive(pat) {
 			return true
 		}
-		for _, e := range ix.Edges() {
-			if e.IsBoundary() && matchAny(e.To, []string{pat}) {
+		for _, l := range boundary {
+			if matchAny(l, []string{pat}) {
 				return true
 			}
 		}

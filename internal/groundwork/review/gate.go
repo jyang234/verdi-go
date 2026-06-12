@@ -33,7 +33,7 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string) GateResul
 	baseIx, branchIx := graph.NewIndex(base), graph.NewIndex(branch)
 	d := diffGraphs(base, branch)
 
-	newViolations, _ := newFindings(p, baseIx, branchIx)
+	newViolations, _, _, _ := newFindings(p, baseIx, branchIx)
 
 	var breaking []ContractChange
 	for _, c := range contractChanges(d, baseIx, branchIx) {

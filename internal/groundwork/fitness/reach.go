@@ -26,9 +26,8 @@ const (
 // (no path, but a blind frontier) is a Caution naming where the graph went blind.
 func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	for _, rule := range p.MustNotReach {
-		froms := expandFroms(ix, rule.From)
-		if len(froms) == 0 {
-			r.add(inertRuleFinding("must_not_reach", rule.Name, rule.RequireProof))
+		froms := bindFroms(ix, r, "must_not_reach", rule.Name, rule.From, rule.RequireProof)
+		if froms == nil {
 			continue
 		}
 		v, ev := evalReach(ix, froms, rule.To)

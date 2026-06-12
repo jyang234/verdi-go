@@ -23,6 +23,9 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 	}
 	max := p.IOBudget.MaxWritesPerRoute
 	routes := RouteWrites(p, ix)
+	// Carried on the Result so review's route-delta section reuses this exact
+	// computation instead of repeating the per-route BFS.
+	r.RouteWrites = routes
 	for _, src := range setutil.SortedKeys(routes) {
 		writes := routes[src].Writes
 		if len(writes) > max {
@@ -59,14 +62,25 @@ func RouteWrites(p *policy.Policy, ix *graph.Index) map[string]RouteIO {
 		effects := ix.Effects(cone...)
 		writes := map[string]bool{}
 		for _, e := range effects {
-			if IsWrite(e) {
-				writes[strings.TrimPrefix(e.To, "boundary:")] = true
+			if label, ok := WriteLabel(e); ok {
+				writes[label] = true
 			}
 		}
 		_, blind := frontierBlindSiteWith(ix, cone, effects)
 		out[src] = RouteIO{Writes: setutil.SortedKeys(writes), Blind: blind}
 	}
 	return out
+}
+
+// WriteLabel returns the effect label (sans "boundary:") of an external write,
+// and whether e is one — the single extraction point for the write surface.
+// The budget, the effect-ratchet audit, and the review's new-target diff all
+// label writes through here, so they cannot disagree about the format.
+func WriteLabel(e graph.Edge) (string, bool) {
+	if !IsWrite(e) {
+		return "", false
+	}
+	return strings.TrimPrefix(e.To, "boundary:"), true
 }
 
 // IsWrite reports whether a boundary effect mutates external state. The effect

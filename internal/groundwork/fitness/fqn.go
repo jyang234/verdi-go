@@ -89,12 +89,26 @@ func matchAny(s string, patterns []string) bool {
 	return false
 }
 
+// bindFroms is the ONE entry by which a From-bearing rule kind
+// (must_not_reach, must_pass_through, and any future rule) binds its sources:
+// it expands the From selectors and, when the whole From binds nothing,
+// discloses the inert rule on the result and returns nil. Expansion and
+// disclosure are fused deliberately — a check that expands without the
+// disclosure is how a renamed package turns a safety rule into a silent
+// forever-pass, the inert-guardrail failure mode.
+func bindFroms(ix *graph.Index, r *Result, kind, name string, from []string, requireProof bool) []string {
+	froms := expandFroms(ix, from)
+	if len(froms) == 0 {
+		r.add(inertRuleFinding(kind, name, requireProof))
+		return nil
+	}
+	return froms
+}
+
 // expandFroms expands a rule's From selectors against the graph: the
 // "entrypoint:*" selector matches every graph source, anything else is an FQN
-// exact-or-prefix pattern. This is the ONE selector language for every
-// From-bearing rule kind (must_not_reach, must_pass_through, and any future
-// rule) — a selector private to one check is how a policy author writes a
-// rule that silently matches nothing. The union is sorted and de-duplicated.
+// exact-or-prefix pattern. The union is sorted and de-duplicated. Checks call
+// bindFroms, not this, so the inert-rule disclosure cannot be forgotten.
 func expandFroms(ix *graph.Index, patterns []string) []string {
 	var pats []string
 	entry := false

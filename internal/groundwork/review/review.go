@@ -23,51 +23,46 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 	baseIx, branchIx := graph.NewIndex(base), graph.NewIndex(branch)
 	d := diffGraphs(base, branch)
 
-	newViolations, newCautions := newFindings(p, baseIx, branchIx)
-	contract := contractChanges(d, baseIx, branchIx)
-	effects := ioEffects(d)
-	reach := reachExisting(d, baseIx, branchIx)
-	blindSpots := newBlindSpots(p, base, branch)
-	routeIO := routeIODeltas(p, baseIx, branchIx)
-	writeTargets := newWriteTargets(p, base, branch)
+	newViolations, newCautions, baseRW, branchRW := newFindings(p, baseIx, branchIx)
 
 	a := Artifact{
 		Service:         p.Service,
 		Shape:           d.shape(),
 		Touches:         d.pkgDeltas(),
 		NewViolations:   newViolations,
-		Contract:        contract,
-		Effects:         effects,
-		RouteIO:         routeIO,
-		NewWriteTargets: writeTargets,
-		Reach:           reach,
+		Contract:        contractChanges(d, baseIx, branchIx),
+		Effects:         ioEffects(d),
+		RouteIO:         routeIODeltas(p, baseIx, branchIx, baseRW, branchRW),
+		NewWriteTargets: newWriteTargets(p, base, branch),
+		Reach:           reachExisting(d, baseIx, branchIx),
 		NewCautions:     newCautions,
-		NewBlindSpots:   blindSpots,
+		NewBlindSpots:   newBlindSpots(p, base, branch),
 	}
-	a.Verdict = verdict(p, d, newViolations, contract, newCautions, blindSpots, writeTargets)
+	a.Verdict = verdict(p, d, &a)
 	a.Digest = digestOf(a)
 	return a
 }
 
 // verdict applies the three-valued rule: a new violation, a breaking contract
-// change, or (when the policy gates the blind-spot ratchet) a new blind spot
+// change, or a policy-gated ratchet finding (blind spots, write targets)
 // blocks; otherwise the artifact abstains only when it carries NO signal at
 // all. Abstention is a statement about the whole artifact, not the node/edge
 // delta: graph sections beyond structure (obligations, blind spots) change on
 // body-only edits, and NO-STRUCTURAL-SIGNAL's render says "the graph has
-// nothing to say" — which must never hide a new caution or disclosure. Any
-// future finding source is covered automatically by the hasSignal form.
-func verdict(p *policy.Policy, d graphDelta, violations []Violation, contract []ContractChange, cautions []Violation, blindSpots []BlindSpotDelta, writeTargets []string) Verdict {
-	if len(violations) > 0 || anyBreaking(contract) {
+// nothing to say" — which must never hide a new caution or disclosure. It
+// reads the assembled artifact by field name, so the next gated section needs
+// no signature change and cannot be transposed with an existing one.
+func verdict(p *policy.Policy, d graphDelta, a *Artifact) Verdict {
+	if len(a.NewViolations) > 0 || anyBreaking(a.Contract) {
 		return Block
 	}
-	if p.GatesBlindSpots() && len(blindSpots) > 0 {
+	if p.GatesBlindSpots() && len(a.NewBlindSpots) > 0 {
 		return Block
 	}
-	if p.GatesEffects() && len(writeTargets) > 0 {
+	if p.GatesEffects() && len(a.NewWriteTargets) > 0 {
 		return Block
 	}
-	hasSignal := !d.empty() || len(cautions) > 0 || len(blindSpots) > 0 || len(writeTargets) > 0
+	hasSignal := !d.empty() || len(a.NewCautions) > 0 || len(a.NewBlindSpots) > 0 || len(a.NewWriteTargets) > 0
 	if !hasSignal {
 		return NoStructuralSignal
 	}
@@ -102,9 +97,11 @@ func newBlindSpots(p *policy.Policy, base, branch *graph.Graph) []BlindSpotDelta
 	return out
 }
 
-// newFindings runs fitness on both graphs and returns the findings present on the
-// branch but not the base — the "report only newly-introduced" property.
-func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, cautions []Violation) {
+// newFindings runs fitness on both graphs and returns the findings present on
+// the branch but not the base — the "report only newly-introduced" property —
+// plus each side's computed route-write map (nil when the policy has no
+// io_budget), so the route-delta section reuses Check's per-route BFS.
+func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, cautions []Violation, baseRW, branchRW map[string]fitness.RouteIO) {
 	baseRes := fitness.Check(p, baseIx)
 	branchRes := fitness.Check(p, branchIx)
 
@@ -123,7 +120,7 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 			cautions = append(cautions, v)
 		}
 	}
-	return violations, cautions
+	return violations, cautions, baseRes.RouteWrites, branchRes.RouteWrites
 }
 
 // contractChanges reports inter-service surface movement: entrypoints (Sources)
