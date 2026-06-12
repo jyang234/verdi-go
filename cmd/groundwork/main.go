@@ -10,6 +10,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,10 +29,28 @@ import (
 
 var version = "dev"
 
+// verdictError marks a computed gate verdict — a BLOCK, invariant violations, a
+// breaking contract change, a tampered/stale artifact — as opposed to an
+// operational failure (bad flags, unreadable inputs). The two exit differently
+// so CI can tell "the change failed the gate" (exit 1) from "the gate failed to
+// run" (exit 2); both stay non-zero, so an existing pass/fail gate is unchanged.
+type verdictError struct{ msg string }
+
+func (e verdictError) Error() string { return e.msg }
+
+// verdictf builds a verdictError the way fmt.Errorf builds an error.
+func verdictf(format string, args ...any) error {
+	return verdictError{msg: fmt.Sprintf(format, args...)}
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "groundwork:", err)
-		os.Exit(1)
+		var v verdictError
+		if errors.As(err, &v) {
+			os.Exit(1)
+		}
+		os.Exit(2)
 	}
 }
 
@@ -101,6 +120,10 @@ usage:
 
 The graph must be produced by trusted CI (flowmap graph <service>); groundwork
 only ever reads it.
+
+exit codes: 0 clean; 1 a computed verdict failed the gate (violation, BLOCK,
+breaking change, tampered/stale artifact); 2 operational error (bad flags,
+unreadable inputs).
 `)
 }
 
@@ -325,7 +348,7 @@ func cmdFitness(args []string) error {
 		}
 		fmt.Println(string(b))
 		if !res.OK() {
-			return fmt.Errorf("%d invariant violation(s)", len(res.Violations()))
+			return verdictf("%d invariant violation(s)", len(res.Violations()))
 		}
 		return nil
 	}
@@ -337,7 +360,7 @@ func cmdFitness(args []string) error {
 		printFinding("⚠️ ", f)
 	}
 	if !res.OK() {
-		return fmt.Errorf("%d invariant violation(s)", len(violations))
+		return verdictf("%d invariant violation(s)", len(violations))
 	}
 	// The summary reports what Check actually evaluated: policy rules PLUS the
 	// graph-carried obligation verdicts. "0 invariant(s)" while obligations
@@ -408,7 +431,7 @@ func cmdReview(args []string) error {
 		fmt.Print(art.Render())
 	}
 	if art.Verdict == review.Block {
-		return fmt.Errorf("review verdict: BLOCK")
+		return verdictf("review verdict: BLOCK")
 	}
 	return nil
 }
@@ -455,7 +478,7 @@ func cmdVerify(args []string) error {
 		fmt.Print(g.Render())
 	}
 	if !g.Pass {
-		return fmt.Errorf("verify: BLOCK")
+		return verdictf("verify: BLOCK")
 	}
 	return nil
 }
@@ -491,7 +514,7 @@ func cmdDiff(args []string) error {
 		fmt.Printf("%s %s %s%s\n", c.Op, c.Surface, c.Name, tag)
 	}
 	if d.Breaking() {
-		return fmt.Errorf("diff: breaking contract change(s)")
+		return verdictf("diff: breaking contract change(s)")
 	}
 	return nil
 }
@@ -527,7 +550,7 @@ func cmdVerifyArtifact(args []string) error {
 	res := review.VerifyArtifact(art, p, base, branch)
 	fmt.Printf("%s — %s\n", res.Status, res.Detail)
 	if !res.OK() {
-		return fmt.Errorf("artifact is %s", res.Status)
+		return verdictf("artifact is %s", res.Status)
 	}
 	return nil
 }
