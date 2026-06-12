@@ -264,6 +264,9 @@ func nodeTier(ext *features.Extractor, fn *ssa.Function, isRoot bool, outEdges [
 
 func sortGraph(g *Graph) {
 	sort.Slice(g.Nodes, func(i, j int) bool { return g.Nodes[i].FQN < g.Nodes[j].FQN })
+	// Total order over every Edge field: a comparator that ignored Boundary and
+	// Concurrent left equal-keyed edges in build order — deterministic only as
+	// long as the pre-sort slice happened to be, a latent output-stability trap.
 	sort.Slice(g.Edges, func(i, j int) bool {
 		a, b := g.Edges[i], g.Edges[j]
 		if a.From != b.From {
@@ -272,7 +275,13 @@ func sortGraph(g *Graph) {
 		if a.To != b.To {
 			return a.To < b.To
 		}
-		return a.Tier < b.Tier
+		if a.Tier != b.Tier {
+			return a.Tier < b.Tier
+		}
+		if a.Boundary != b.Boundary {
+			return a.Boundary < b.Boundary
+		}
+		return !a.Concurrent && b.Concurrent
 	})
 	g.Edges = dedupEdges(g.Edges)
 }
