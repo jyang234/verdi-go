@@ -78,8 +78,11 @@ type Finding struct {
 
 // Check evaluates every rule against every function, returning findings sorted
 // by (rule, fn, site). baseDir anchors site paths (the service directory);
-// empty means bare file names. The result is a pure function of its inputs.
-func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string) []Finding {
+// empty means bare file names. sums is the interprocedural summary engine
+// (correctness plan CX-2); nil keeps every verdict intraprocedural — the
+// summaries-off half of the O-CX2 monotonicity check. The result is a pure
+// function of its inputs.
+func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string, sums *Summaries) []Finding {
 	var out []Finding
 	for i := range rules {
 		rule := &rules[i]
@@ -92,7 +95,7 @@ func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string) [
 			if rule.Kind() == config.KindMustRelease {
 				fs = checkRelease(rule, fn, baseDir)
 			} else {
-				fs = checkPrecede(rule, fn, baseDir)
+				fs = checkPrecede(rule, fn, baseDir, sums)
 			}
 			if len(fs) > 0 {
 				matched = true
@@ -550,7 +553,7 @@ func isNil(v ssa.Value) bool {
 
 // ---- must-precede -----------------------------------------------------------
 
-func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string) []Finding {
+func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string, sums *Summaries) []Finding {
 	require := parseRef(rule.Require)
 	before := parseRef(rule.Before)
 
@@ -567,9 +570,15 @@ func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 				continue
 			}
 			// A Require site must be a plain call: a deferred A runs at exit,
-			// AFTER the B it is supposed to precede.
-			if _, plain := in.(*ssa.Call); plain && require.matchesCall(call) {
-				aSites = append(aSites, sited{call, b, i})
+			// AFTER the B it is supposed to precede. A derived A — a plain
+			// call that provably executes the require on every path before
+			// returning (CX-2) — counts the same way, for every rule: it
+			// widens A-site recognition, not the rule's scope (D-CX9).
+			if _, plain := in.(*ssa.Call); plain {
+				if require.matchesCall(call) ||
+					(sums != nil && sums.DerivedRequire(in.(*ssa.Call), rule.Require)) {
+					aSites = append(aSites, sited{call, b, i})
+				}
 			}
 			// A Before site is ANY call form: a deferred or spawned B still
 			// happens and still needs its A. The registration/spawn point is
@@ -598,9 +607,26 @@ func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 				break
 			}
 		}
-		if dominated {
+		switch {
+		case dominated:
 			f.Status = Satisfied
-		} else {
+		case sums != nil && rule.FromCallers:
+			// The guard-intent lift (D-CX7/D-CX9): the require may run in
+			// callers; consult entry domination. Trust-monotone by
+			// construction — the intraprocedural verdict here was VIOLATED,
+			// and the lift can only prove it away or abstain legibly. There
+			// is no interprocedural VIOLATED: "provably require-less entry"
+			// would overclaim (adversarial review F3), and the rule author
+			// opted into caller context, so unprovable entries abstain.
+			sum, note := sums.EntryDominatedNote(fn, rule.Require)
+			if sum == SummaryAlways {
+				f.Status = Satisfied
+				f.Detail = fmt.Sprintf("require-covered at every entry; %s", note)
+			} else {
+				f.Status = CantProve
+				f.Detail = fmt.Sprintf("no call to %s dominates this call to %s in this function; %s", rule.Require, rule.Before, note)
+			}
+		default:
 			f.Status = Violated
 			f.Detail = fmt.Sprintf("no call to %s dominates this call to %s", rule.Require, rule.Before)
 		}

@@ -69,6 +69,16 @@ type ObligationRule struct {
 	Release []string `yaml:"release,omitempty"`
 	Require string   `yaml:"require,omitempty"`
 	Before  string   `yaml:"before,omitempty"`
+
+	// FromCallers opts a must-precede rule into the interprocedural entry-
+	// domination lift (correctness plan, D-CX7/D-CX9): a Before site with no
+	// dominating Require in its own function is SATISFIED when every entry
+	// into that function is require-dominated, CANT-PROVE when the entries are
+	// beyond proof, VIOLATED (with the entering caller named) when a provably
+	// require-less entry exists. Guard-intent rules (auth, validation) want
+	// this; pairing-intent rules (an audit per publish) usually do not — an
+	// incidental upstream require would satisfy them, so the default is off.
+	FromCallers bool `yaml:"fromCallers,omitempty"`
 }
 
 // Obligation kinds, inferred from a rule's populated field set.
@@ -297,6 +307,9 @@ func (c *Config) validate() error {
 		if release {
 			if r.Acquire == "" || len(r.Release) == 0 {
 				return fmt.Errorf("flowmap config: obligations[%d] (%s): acquire and at least one release are both required", i, r.Name)
+			}
+			if r.FromCallers {
+				return fmt.Errorf("flowmap config: obligations[%d] (%s): fromCallers applies only to require/before rules", i, r.Name)
 			}
 			for _, ref := range append([]string{r.Acquire}, r.Release...) {
 				if err := validRef(ref); err != nil {

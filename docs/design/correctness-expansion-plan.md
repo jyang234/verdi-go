@@ -1,8 +1,15 @@
 # correctness expansion: implementation plan
 
-**Status:** in progress — CX-0 (the summary engine, both directions,
-unit-tabled) shipped; CX-1 through CX-5 not started. The §10 adversarial
-review pass on the engine is owed before CX-2 merges. Companion to
+**Status:** in progress — CX-0 (the summary engine) and CX-2 (the
+must-precede lifts, `fromCallers`-gated per D-CX9) shipped. The §10
+adversarial review ran before CX-2 merged and found four issues — F1 (a
+conditionally-releasing deferred closure earned ALWAYS through
+`deferReleases`' any-instruction scan), F2 (entry domination ignored
+unresolved invoke dispatch), F3 (the entry NEVER pole was not a proof; ED is
+now two-valued and per-edge dominance became a coverage walk), F4 (the
+`Unit.Callees` contract permitted unsound pre-filtering) — all fixed with
+locked reproductions, mirroring the v1 obligations review. CX-3, CX-1, CX-4,
+CX-5 remain, in the D-CX8 order. Companion to
 [`path-obligations-plan.md`](path-obligations-plan.md) (whose §4/§10
 "no interprocedural" limit D-CX2 supersedes, for *proven* summaries only) and
 [`guardrail-extensions-plan.md`](guardrail-extensions-plan.md) (whose §1
@@ -78,6 +85,27 @@ Scope decisions made when this plan was cut:
   validation provably runs one frame up). That case needs a top-down **entry
   domination** summary (§5). Both lifts obey D-CX2: upgrade-or-abstain, never
   a new VIOLATED.
+- **D-CX9 — the entry-domination lift is opt-in per rule (`fromCallers`),
+  because must-precede carries two intents the lift must not conflate.**
+  Building the fixture exposed it: the obligsvc `main` exercises every shape,
+  so `main`'s early call to the always-auditing `Disburse` entry-dominated
+  `DisburseRacy` — the canonical VIOLATED would have flipped SATISFIED off an
+  *incidental upstream require*. That proof is real for the letter of the
+  lifted semantics and wrong for the rule's intent. The split: **guard**
+  intent (auth, validation — the field's `validate-before-publish`) wants
+  chain domination, exactly what the lift proves; **pairing** intent (an
+  audit per publish, outbox ordering) wants operation-scoped domination,
+  which whole-chain entry domination guts. So the rule author declares the
+  intent: `fromCallers: true` opts a require/before rule into the lift;
+  default off preserves today's semantics exactly. Derived-A recognition is
+  unconditional for every rule — it widens which calls count as A sites
+  *within the same function*, not the rule's scope. Two engine soundness
+  lessons land with it, both caught by fixtures before any field run: the
+  summary universe must be the whole built program, not the call graph's
+  node set, because package initializers run before main and can take a
+  function's address or call into the service without being RTA-rooted; and
+  the entry-domination guard is only sound because address-taking anywhere
+  in that universe forces abstention.
 - **D-CX8 — build order follows the field evidence (supersedes this plan's
   first-draft order, the D-GX1 precedent).** CX-0 → CX-2 → CX-3 → CX-1 →
   CX-5; CX-4 in parallel, **on clean graphs only** (§7). Rationale, all
@@ -277,14 +305,20 @@ to mint a new VIOLATED:
   genuinely executed the require first. Flips the wrapped-audit
   false-VIOLATED.
 - **Entry domination (top-down).** For a B site with no dominating A in its
-  own function, consult ENTRY-DOMINATED(fn) (§3): every entry into fn has the
-  require behind it ⇒ SATISFIED, with a witness entry chain in `detail`
-  (`"every entry dominated; e.g. via doPublish (event.go:141)"`). UNKNOWN
-  (SCC, blind-spot edge into fn, fn is a graph source) ⇒ CANT-PROVE with the
-  reason. A *proven* A-less entry keeps today's VIOLATED — now with the
-  entering caller named in the witness, a strictly better finding. Verdict
-  mapping is monotone by construction (D-CX2): the lift can only confirm,
-  abstain legibly, or sharpen the existing violation's witness.
+  own function (and a rule opted in via `fromCallers`, D-CX9), consult
+  ENTRY-DOMINATED(fn) (§3): every entry into fn has the require behind it ⇒
+  SATISFIED, with a witness entry in `detail`; anything unprovable ⇒
+  CANT-PROVE with the reason. *Amended by the adversarial review (F3):* the
+  draft's third outcome — "a proven A-less entry keeps VIOLATED with a
+  sharper witness" — was not a proof (per-site non-domination is not
+  avoidability, and graph sources are not provably require-less: package
+  initializers and out-of-unit callers exist), so ENTRY-DOMINATED has **no
+  NEVER pole**: the consumer keeps its own intraprocedural VIOLATED rather
+  than borrowing a witness the engine cannot back. The same review replaced
+  per-edge *dominance* with a **coverage walk** (every caller-entry→site path
+  passes an A) — strictly more precise: two requires on the arms of a branch
+  cover the join without either dominating it. Verdict mapping is monotone by
+  construction (D-CX2): the lift can only confirm or abstain legibly.
 
 The **B-side detection stays intraprocedural** in this slice, disclosed in
 the kind's doc comment: deriving B sites from callees that *may* reach a B
@@ -417,9 +451,10 @@ the proof):
 | `TransferDynamic` | handoff through an unresolved interface value | CANT-PROVE (blind frontier) |
 | `DisburseWrapped` | `auditAndLog()` (ALWAYS-Require) dominates the publish | must-precede SATISFIED |
 | `DisburseWrappedRacy` | the wrapper requires on one arm only | must-precede VIOLATED — unchanged (B undominated by any proven A) |
-| `PublishSplit` | A in the caller, B in the callee; every entry into the callee dominated — the field's `doPublish`→`publishWithFanout` shape | must-precede SATISFIED via entry domination |
-| `PublishSplitOpen` | same, plus one additional caller with no A | must-precede VIOLATED — unchanged, witness names the A-less entering caller |
-| `PublishSplitDynamic` | the B-holding helper is also the target of an unresolved edge | CANT-PROVE (entry set unprovable) |
+| `sendFanout` (rule opts in via `fromCallers`, D-CX9) | A in the caller, B in the callee; every entry into the callee dominated — the field's `doPublish`→`publishWithFanout` shape | must-precede SATISFIED via entry domination, witness names the dominated entry |
+| `sendFanoutOpen` | same, but its only entry chain never requires | must-precede VIOLATED — unchanged, witness names the A-less entering caller |
+| `sendFanoutTaken` | the B-holding helper's address is taken (`var hook = …` in a package initializer) | CANT-PROVE (an unseen dynamic caller may exist) |
+| `DisburseRacy` (rule does NOT opt in) | the D-CX9 hazard shape: an incidental upstream require exists in `main` | must-precede VIOLATED — unchanged, because pairing-intent rules never consult callers |
 | `ApproveViaHelper` | publish inside an ALWAYS-effect helper, charge call after | CX-3: derived effect_order row with `via` |
 | `FanOutDual` | two publishes in one helper, a fallible call between them — the field's partial-fan-out incident shape | CX-3: two derived rows; the fault card answers "first topic published, second not" |
 | `OutboxPair` | two DELETEs in a `RunInTx` closure, on every path | ALWAYS-effect facts for both + bracketing `must_pass_through` SATISFIED (§8's decomposition, end-to-end) |

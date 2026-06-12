@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
@@ -182,11 +183,42 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 				fns = append(fns, n.Func)
 			}
 		}
-		g.Obligations = obligations.Check(rules, fns, base)
+		g.Obligations = obligations.Check(rules, fns, base, obligationSummaries(res))
 	}
 
 	sortGraph(g)
 	return g, nil
+}
+
+// obligationSummaries adapts the program into the obligation engine's unit
+// (CX-2). The universe is every BUILT function, not just the call graph's
+// reachable set: package initializers run before main and can take a
+// function's address (`var hook = fn`) or call into the service — facts the
+// entry-domination guard is unsound without, and the RTA node set does not
+// root init. Call sites resolve through the graph's edges (the same
+// over-approximation every other check trusts); sites the graph has no edges
+// for fall back to their static callee inside the engine and anything else is
+// a frontier. NewSummaries sorts the universe, so map iteration order here is
+// harmless. Built only when obligation rules exist; rule-free services pay
+// nothing.
+func obligationSummaries(res *analyze.Result) *obligations.Summaries {
+	all := ssautil.AllFunctions(res.Program.Prog)
+	fns := make([]*ssa.Function, 0, len(all))
+	for fn := range all {
+		fns = append(fns, fn)
+	}
+	bySite := map[ssa.CallInstruction][]*ssa.Function{}
+	for _, n := range res.Graph.Nodes {
+		for _, e := range n.Out {
+			if e.Site != nil {
+				bySite[e.Site] = append(bySite[e.Site], e.Callee.Func)
+			}
+		}
+	}
+	return obligations.NewSummaries(&obligations.Unit{
+		Fns:     fns,
+		Callees: func(site ssa.CallInstruction) []*ssa.Function { return bySite[site] },
+	})
 }
 
 // Marshal renders the graph as canonical JSON (non-gated, but still deterministic).

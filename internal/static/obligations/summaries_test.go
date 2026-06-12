@@ -6,10 +6,13 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+
+	"github.com/jyang234/golang-code-graph/internal/config"
 )
 
 // buildProg compiles one inline source file and returns every function in the
@@ -164,6 +167,23 @@ func RunInTx(t *Tx, fn func(*Tx) error) error {
 
 // A frontier with no visible target: the cone is open, so not NEVER.
 func dynOnly(fn func()) { fn() }
+
+// Adversarial review F1: a deferred closure that releases CONDITIONALLY must
+// not earn ALWAYS — the closure is judged by its own all-paths summary.
+func finishMaybe(t *Tx, ok bool) error {
+	defer func() {
+		if ok {
+			t.Rollback()
+		}
+	}()
+	return nil
+}
+
+// The unconditional deferred closure keeps its credit the same way.
+func finishClosure(t *Tx) error {
+	defer func() { t.Rollback() }()
+	return nil
+}
 `
 
 func TestDischarges(t *testing.T) {
@@ -185,6 +205,8 @@ func TestDischarges(t *testing.T) {
 		{"finishRecover", SummaryUnknown},
 		{"finishPanics", SummaryUnknown},
 		{"dynOnly", SummaryUnknown},
+		{"finishMaybe", SummaryUnknown},  // F1: conditional deferred closure
+		{"finishClosure", SummaryAlways}, // the closure's own summary credits
 	}
 	for _, c := range cases {
 		if got := s.Discharges(fnByName(t, fns, c.fn), releaseTargets); got != c.want {
@@ -246,7 +268,8 @@ func doPublish() {
 	}
 }
 
-// One additional caller with no require behind it: a proven open entry.
+// One additional caller with no require on the path: the entries are beyond
+// proof (F3: there is no NEVER pole — out-of-unit or init callers may exist).
 func pfOpen() { Publish() }
 func doPublishOpen() {
 	if ValidatePayload() == nil {
@@ -254,6 +277,34 @@ func doPublishOpen() {
 	}
 }
 func openCaller() { pfOpen() }
+
+// F3a: two requires on the arms of a branch cover the join without either
+// dominating it — coverage, not dominance, is the property execution has.
+func pfBoth() { Publish() }
+func callerBoth(c bool) {
+	if c {
+		_ = ValidatePayload()
+	} else {
+		_ = ValidatePayload()
+	}
+	pfBoth()
+}
+
+// F2: an unresolved invoke of Do exists (Hidden has no implementation in the
+// universe), so any method named Do has a possible unseen entry.
+type Doer struct{}
+
+func (Doer) Do() { Publish() }
+
+func directDo(d Doer) {
+	if ValidatePayload() == nil {
+		d.Do()
+	}
+}
+
+type Hidden interface{ Do(int) }
+
+func hiddenDo(h Hidden) { h.Do(1) }
 
 // Dominated one level up: the caller's own entries are all dominated.
 func pfChain() { Publish() }
@@ -305,15 +356,26 @@ func TestEntryDominated(t *testing.T) {
 		{"pfDominated", SummaryAlways},
 		{"pfChain", SummaryAlways},
 		{"pfDerived", SummaryAlways},
-		{"pfOpen", SummaryNever},        // openCaller is a source with no require
-		{"pfDeferredReq", SummaryNever}, // a deferred require does not precede
-		{"doPublish", SummaryNever},     // a graph source is entered bare
+		{"pfBoth", SummaryAlways},         // F3a: branch-covering requires
+		{"pfOpen", SummaryUnknown},        // F3: no NEVER pole — beyond proof
+		{"pfDeferredReq", SummaryUnknown}, // a deferred require does not precede
+		{"doPublish", SummaryUnknown},     // a graph source: entries beyond proof
 		{"pfTaken", SummaryUnknown},
 		{"pfRec", SummaryUnknown},
 	}
 	for _, c := range cases {
 		if got := s.EntryDominated(fnByName(t, fns, c.fn), requireRef); got != c.want {
 			t.Errorf("EntryDominated(%s) = %s, want %s", c.fn, got, c.want)
+		}
+	}
+
+	// F2: (Doer).Do is entered only via a covered static call, but the
+	// unresolved invoke of a same-named method forces abstention.
+	for _, fn := range fns {
+		if fn.Name() == "Do" && fn.Signature.Recv() != nil && fn.Synthetic == "" {
+			if got, note := s.EntryDominatedNote(fn, requireRef); got != SummaryUnknown || !strings.Contains(note, "unresolved interface dispatch") {
+				t.Errorf("EntryDominated((Doer).Do) = %s (%s), want UNKNOWN via the F2 guard", got, note)
+			}
 		}
 	}
 }
@@ -351,6 +413,166 @@ func TestSummariesOrderIndependence(t *testing.T) {
 		ga, gb := ea.EntryDominated(fn, requireRef), eb.EntryDominated(fn, requireRef)
 		if ga != gb {
 			t.Errorf("EntryDominated(%s): %s with sorted input, %s with reversed", fn.Name(), ga, gb)
+		}
+	}
+}
+
+// ---- CX-2: the must-precede lift through Check ---------------------------------
+
+const liftSrc = `package fix
+
+func Validate() error { return nil }
+func Send(s string)   {}
+
+// The field doPublish→publishWithFanout split: B sites one frame below the
+// validation, every entry dominated.
+func fanout()   { Send("a"); Send("b") }
+func dispatch() {
+	if Validate() == nil {
+		fanout()
+	}
+}
+
+// A second helper entered require-less from a graph source.
+func fanoutOpen() { Send("a") }
+func open()       { fanoutOpen() }
+
+// Address taken: an unseen dynamic caller may exist.
+func fanoutTaken() { Send("a") }
+
+var hook = fanoutTaken
+
+// Derived A: validateAll ALWAYS-calls the require, so its call site dominates.
+func validateAll()     { _ = Validate() }
+func fanoutDerived()   { Send("a") }
+func dispatchDerived() {
+	validateAll()
+	fanoutDerived()
+}
+
+// Intraprocedural shapes must be untouched by the lift.
+func direct() {
+	_ = Validate()
+	Send("x")
+}
+func directRacy(b bool) {
+	if b {
+		_ = Validate()
+	}
+	Send("x")
+}
+`
+
+func liftRules() []config.ObligationRule {
+	return []config.ObligationRule{
+		{Name: "guard", Require: "example.com/fix#Validate", Before: "example.com/fix#Send", FromCallers: true},
+		{Name: "pairing", Require: "example.com/fix#Validate", Before: "example.com/fix#Send"},
+	}
+}
+
+func findingsOf(fs []Finding, rule, fn string) []Finding {
+	var out []Finding
+	for _, f := range fs {
+		if f.Rule == rule && strings.HasSuffix(f.Fn, "."+fn) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func TestPrecedeLift(t *testing.T) {
+	fns := buildProg(t, liftSrc)
+	sums := NewSummaries(testUnit(fns))
+	var pkgFns []*ssa.Function
+	for _, fn := range fns {
+		if fn.Pkg != nil && fn.Pkg.Pkg.Path() == "example.com/fix" && fn.Parent() == nil {
+			pkgFns = append(pkgFns, fn)
+		}
+	}
+	fs := Check(liftRules(), pkgFns, "", sums)
+
+	type row struct {
+		rule, fn string
+		n        int
+		want     Status
+	}
+	rows := []row{
+		// The guard rule (fromCallers): the lift applies.
+		{"guard", "fanout", 2, Satisfied},     // entry-covered via dispatch
+		{"guard", "fanoutOpen", 1, CantProve}, // F3: entries beyond proof, never a borrowed witness
+		{"guard", "fanoutTaken", 1, CantProve},
+		{"guard", "fanoutDerived", 1, Satisfied}, // derived A covers in dispatchDerived
+		{"guard", "direct", 1, Satisfied},
+		{"guard", "directRacy", 1, CantProve}, // a graph source: the rule opted into caller context
+		// The pairing rule (no fromCallers): today's semantics exactly.
+		{"pairing", "fanout", 2, Violated},
+		{"pairing", "fanoutOpen", 1, Violated},
+		{"pairing", "fanoutTaken", 1, Violated},
+		{"pairing", "fanoutDerived", 1, Violated},
+		{"pairing", "direct", 1, Satisfied},
+		{"pairing", "directRacy", 1, Violated},
+	}
+	for _, r := range rows {
+		got := findingsOf(fs, r.rule, r.fn)
+		if len(got) != r.n {
+			t.Errorf("%s/%s: %d findings, want %d: %v", r.rule, r.fn, len(got), r.n, got)
+			continue
+		}
+		for _, f := range got {
+			if f.Status != r.want {
+				t.Errorf("%s/%s = %s (%s), want %s", r.rule, r.fn, f.Status, f.Detail, r.want)
+			}
+		}
+	}
+
+	// The witnesses are part of the disclosure contract.
+	if open := findingsOf(fs, "guard", "fanoutOpen"); len(open) == 1 && !strings.Contains(open[0].Detail, "open") {
+		t.Errorf("fanoutOpen detail should name the unproven entry, got %q", open[0].Detail)
+	}
+	if taken := findingsOf(fs, "guard", "fanoutTaken"); len(taken) == 1 && !strings.Contains(taken[0].Detail, "address is taken") {
+		t.Errorf("fanoutTaken detail should disclose the address-taken abstention, got %q", taken[0].Detail)
+	}
+}
+
+// O-CX2, the trust-monotonicity invariant as a committed test: across the
+// fixture corpus, enabling summaries must never mint a VIOLATED that the
+// intraprocedural run did not already report (D-CX2).
+func TestLiftMonotonicity(t *testing.T) {
+	corpora := []struct {
+		name  string
+		src   string
+		rules []config.ObligationRule
+	}{
+		{"lift", liftSrc, liftRules()},
+		{"tx", txSrc, []config.ObligationRule{txRule()}},
+		{"discharge", dischargeSrc, []config.ObligationRule{
+			{Name: "tx-close", Acquire: "example.com/fix#BeginTx", Release: releaseTargets},
+			{Name: "guard", Require: "example.com/fix#Commit", Before: "example.com/fix#Rollback", FromCallers: true},
+		}},
+		{"entry", entrySrc, []config.ObligationRule{
+			{Name: "guard", Require: requireRef, Before: "example.com/fix#Publish", FromCallers: true},
+		}},
+	}
+	for _, c := range corpora {
+		fns := buildProg(t, c.src)
+		var pkgFns []*ssa.Function
+		for _, fn := range fns {
+			if fn.Pkg != nil && fn.Pkg.Pkg.Path() == "example.com/fix" && fn.Parent() == nil {
+				pkgFns = append(pkgFns, fn)
+			}
+		}
+		off := Check(c.rules, pkgFns, "", nil)
+		on := Check(c.rules, pkgFns, "", NewSummaries(testUnit(fns)))
+		wasViolated := map[string]bool{}
+		for _, f := range off {
+			if f.Status == Violated {
+				wasViolated[f.Rule+"|"+f.Fn+"|"+f.Site] = true
+			}
+		}
+		for _, f := range on {
+			if f.Status == Violated && !wasViolated[f.Rule+"|"+f.Fn+"|"+f.Site] {
+				t.Errorf("%s: lift minted a new VIOLATED: %+v", c.name, f)
+			}
 		}
 	}
 }

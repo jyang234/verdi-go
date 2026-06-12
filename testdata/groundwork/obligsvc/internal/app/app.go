@@ -6,6 +6,8 @@ import (
 	"example.com/obligsvc/internal/audit"
 	"example.com/obligsvc/internal/billing"
 	"example.com/obligsvc/internal/bus"
+	"example.com/obligsvc/internal/gate"
+	"example.com/obligsvc/internal/outbound"
 	"example.com/obligsvc/internal/store"
 )
 
@@ -158,3 +160,38 @@ func DisburseAndChargeRisky(id string, approved bool) error {
 	}
 	return billing.Charge(id)
 }
+
+// sendFanout holds its Before sites one frame below the validation — the
+// doPublish→publishWithFanout split the fromCallers lift exists for. Every
+// entry is require-dominated (SATISFIED via entry domination, CX-2).
+func sendFanout() {
+	outbound.Send("loan.approved.v1")
+	outbound.Send("loan.approved.v2")
+}
+
+// DispatchSend is the guard intent: validate, then fan out.
+func DispatchSend() error {
+	if err := gate.Validate(); err != nil {
+		return err
+	}
+	sendFanout()
+	return nil
+}
+
+// sendFanoutOpen is entered only via OpenSend, which never validates. The
+// lift has no NEVER pole (out-of-unit or init callers could exist), so the
+// rule author's opt-in turns the undominated B into a disclosed abstention
+// (CANT-PROVE naming the unproven entry), never a borrowed witness.
+func sendFanoutOpen() { outbound.Send("loan.approved.v1") }
+
+// OpenSend skips the validation.
+func OpenSend() { sendFanoutOpen() }
+
+// sendFanoutTaken's address is taken (sendHook): an unseen dynamic caller may
+// exist, so its entries are beyond proof (CANT-PROVE).
+func sendFanoutTaken() { outbound.Send("loan.approved.v1") }
+
+var sendHook = sendFanoutTaken
+
+// CallTaken keeps sendFanoutTaken reachable alongside the taken address.
+func CallTaken() { sendFanoutTaken() }

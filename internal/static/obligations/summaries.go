@@ -13,17 +13,20 @@
 //     cone, or a body the unit cannot see.
 //   - EntryDominated (top-down, D-CX7): has a plain call to the require
 //     target already executed on every entry into this function? ALWAYS when
-//     every call edge in is dominated in its caller by a require site (a
-//     direct match or a derived-A: a call whose callees all Discharge ALWAYS)
-//     or arrives from a caller that is itself entry-dominated; NEVER when a
-//     provably require-less entry chain exists (a graph source reaches the
-//     function undominated); UNKNOWN otherwise — including any function whose
-//     address is taken, because an invisible dynamic caller may exist.
+//     every call edge in is require-covered in its caller (every caller-entry
+//     →site path passes a require: a direct match or a derived-A — a call
+//     whose callees all Discharge ALWAYS) or arrives from a caller that is
+//     itself entry-dominated; UNKNOWN otherwise — including any function
+//     whose address is taken, any method a frontier invoke could dispatch,
+//     and any graph source, because unseen or out-of-unit entries may exist.
+//     EntryDominated deliberately has no NEVER pole (adversarial review F3):
+//     "provably require-less" would overclaim, so the consumer keeps its own
+//     intraprocedural verdict instead.
 //
 // Trust monotonicity (D-CX2) is the consumers' contract, enabled here by
-// construction: ALWAYS and the ED poles are only ever proofs, NEVER only ever
-// follows from over-approximated reachability, and everything unprovable is
-// UNKNOWN — never silently treated as either pole.
+// construction: ALWAYS and entry-domination are only ever proofs, NEVER only
+// ever follows from over-approximated reachability, and everything unprovable
+// is UNKNOWN — never silently treated as either pole.
 //
 // Determinism: the universe is sorted at construction, SCCs are computed over
 // the sorted adjacency (members of any cyclic SCC are UNKNOWN for ALWAYS — no
@@ -62,13 +65,23 @@ func (s Summary) String() string {
 	}
 }
 
-// Unit is the slice of the call graph the summary engine reads. Fns is the
-// analyzed universe; Callees must enumerate every possible in-universe callee
-// of a site per the call graph's over-approximation (RTA/CHA candidates for
-// invoke-mode calls, the static callee otherwise). A site Callees cannot
-// enumerate — a dynamic function value, an unresolved invoke — is a frontier:
-// it blocks NEVER and earns no ALWAYS credit. Calls resolving outside Fns are
-// frontiers too; the unit's edge is the proof's edge.
+// Unit is the slice of the call graph the summary engine reads. Two adapter
+// obligations are load-bearing for soundness (adversarial review F4):
+//
+//   - Fns must be the COMPLETE built universe — anonymous functions,
+//     synthetic wrappers, and package initializers included. Address-taking
+//     and call edges in code Fns omits are invisible, and invisible means
+//     unsound, not conservative.
+//   - Callees must enumerate every possible callee of a site per the call
+//     graph's over-approximation (RTA/CHA candidates for invoke-mode calls,
+//     the static callee otherwise), INCLUDING callees outside Fns — the
+//     engine classifies those as frontiers itself. Returning a pre-filtered
+//     set makes a partially-resolvable site look fully resolved: a false
+//     proof, not a missed one.
+//
+// A site Callees cannot enumerate — a dynamic function value, an unresolved
+// invoke — is a frontier: it blocks NEVER, earns no ALWAYS credit, and (by
+// method name) abstains entry-domination for same-named methods.
 type Unit struct {
 	Fns     []*ssa.Function
 	Callees func(site ssa.CallInstruction) []*ssa.Function
@@ -83,13 +96,21 @@ type Summaries struct {
 
 	sccOf  map[*ssa.Function]int
 	cyclic map[int]bool
+	sccFns map[int][]*ssa.Function
 
-	taken   map[*ssa.Function]bool        // lazily built: address-taken functions
-	inEdges map[*ssa.Function][]entryEdge // lazily built: resolver-visible call edges in
-	targets map[string][]ref              // interned target sets by key
-	disch   map[summaryKey]Summary        // Discharges memo
-	edom    map[summaryKey]Summary        // EntryDominated memo
-	aSites  map[summaryKey][]domSite      // per (require, caller): A sites for dominance
+	taken    map[*ssa.Function]bool                  // lazily built: address-taken functions
+	inEdges  map[*ssa.Function][]entryEdge           // lazily built: resolver-visible call edges in
+	dynInvok map[string]bool                         // lazily built (with inEdges): method names at unresolved invoke sites
+	targets  map[string][]ref                        // interned target sets by key
+	disch    map[summaryKey]Summary                  // Discharges memo
+	nev      map[summaryKey]bool                     // never memo, SCC-shared
+	edom     map[summaryKey]edomResult               // EntryDominated memo (verdict + witness note)
+	aInstrs  map[summaryKey]map[ssa.Instruction]bool // per (require, caller): A-site instructions
+}
+
+type edomResult struct {
+	sum  Summary
+	note string
 }
 
 type summaryKey struct {
@@ -100,11 +121,6 @@ type summaryKey struct {
 type entryEdge struct {
 	caller *ssa.Function
 	site   ssa.CallInstruction
-}
-
-type domSite struct {
-	block *ssa.BasicBlock
-	index int
 }
 
 // NewSummaries builds the engine over one unit: sorts the universe (input
@@ -125,8 +141,9 @@ func NewSummaries(u *Unit) *Summaries {
 		callees: u.Callees,
 		targets: map[string][]ref{},
 		disch:   map[summaryKey]Summary{},
-		edom:    map[summaryKey]Summary{},
-		aSites:  map[summaryKey][]domSite{},
+		nev:     map[summaryKey]bool{},
+		edom:    map[summaryKey]edomResult{},
+		aInstrs: map[summaryKey]map[ssa.Instruction]bool{},
 	}
 	for _, fn := range fns {
 		s.member[fn] = true
@@ -146,17 +163,38 @@ func (s *Summaries) Discharges(fn *ssa.Function, targets []string) Summary {
 // EntryDominated answers the top-down question (D-CX7): has a plain call to
 // require executed before every entry into fn?
 func (s *Summaries) EntryDominated(fn *ssa.Function, require string) Summary {
+	res, _ := s.EntryDominatedNote(fn, require)
+	return res
+}
+
+// EntryDominatedNote is EntryDominated plus a deterministic witness note for
+// the finding's detail: the first satisfied entry for ALWAYS, the abstention
+// reason otherwise. Presentation only — never part of a finding's identity
+// (D-OB6).
+func (s *Summaries) EntryDominatedNote(fn *ssa.Function, require string) (Summary, string) {
 	key := s.intern([]string{require})
 	if !s.member[fn] {
-		return SummaryUnknown
+		return SummaryUnknown, "the function is outside the analyzed unit"
 	}
+	return s.entryDominatedMemo(fn, key)
+}
+
+func (s *Summaries) entryDominatedMemo(fn *ssa.Function, key string) (Summary, string) {
 	k := summaryKey{fn, key}
 	if v, ok := s.edom[k]; ok {
-		return v
+		return v.sum, v.note
 	}
-	res := s.entryDominated(fn, key)
-	s.edom[k] = res
-	return res
+	sum, note := s.entryDominated(fn, key)
+	s.edom[k] = edomResult{sum, note}
+	return sum, note
+}
+
+// DerivedRequire reports whether a plain call provably executes the require on
+// every path before returning — a derived A site (D-CX7). Unconditional for
+// every must-precede rule: it widens the recognition of A sites within the
+// same function, not the rule's scope (D-CX9).
+func (s *Summaries) DerivedRequire(call *ssa.Call, require string) bool {
+	return s.creditCall(call, s.intern([]string{require}))
 }
 
 func (s *Summaries) intern(targets []string) string {
@@ -198,49 +236,86 @@ func (s *Summaries) dischargeKey(fn *ssa.Function, key string) Summary {
 
 // never reports whether no target-matching call is reachable in fn's
 // transitive cone, with the cone fully visible (no frontier, no bodyless
-// member). Sound under the call graph's over-approximation.
+// member). Sound under the call graph's over-approximation. Computed per SCC
+// over the condensation and memoized — cones overlap heavily, and a per-query
+// BFS would be quadratic on a whole-program universe.
 func (s *Summaries) never(fn *ssa.Function, key string) bool {
+	k := summaryKey{fn, key}
+	if v, ok := s.nev[k]; ok {
+		return v
+	}
 	refs := s.targets[key]
-	seen := map[*ssa.Function]bool{fn: true}
-	queue := []*ssa.Function{fn}
-	for len(queue) > 0 {
-		f := queue[0]
-		queue = queue[1:]
-		if len(f.Blocks) == 0 {
-			return false // body invisible: the cone is open
+	id := s.sccOf[fn]
+	members := s.sccFns[id]
+
+	// The whole component shares one answer: every member reaches every other.
+	clean := true
+	var ext []*ssa.Function // out-of-component successors, deduped
+	seen := map[*ssa.Function]bool{}
+	for _, m := range members {
+		if len(m.Blocks) == 0 {
+			clean = false // body invisible: the cone is open
+			break
 		}
-		for _, b := range f.Blocks {
+		for _, b := range m.Blocks {
 			for _, in := range b.Instrs {
 				site, ok := in.(ssa.CallInstruction)
 				if !ok {
 					continue
 				}
 				if anyRef(refs, site) {
-					return false // a target is reachable (go/defer included)
+					clean = false // a target is reachable (go/defer included)
+					break
 				}
 				cands, frontier := s.resolve(site)
 				if frontier {
-					return false
+					clean = false
+					break
 				}
 				for _, c := range cands {
-					if !seen[c] {
+					if s.sccOf[c] != id && !seen[c] {
 						seen[c] = true
-						queue = append(queue, c)
+						ext = append(ext, c)
 					}
 				}
 			}
+			if !clean {
+				break
+			}
+		}
+		if !clean {
+			break
 		}
 	}
-	return true
+	// The recursion below steps strictly down the condensation DAG (an
+	// external successor's cone cannot re-enter this component), so it
+	// terminates and never observes a half-computed answer.
+	res := clean
+	if res {
+		for _, c := range ext {
+			if !s.never(c, key) {
+				res = false
+				break
+			}
+		}
+	}
+	for _, m := range members {
+		s.nev[summaryKey{m, key}] = res
+	}
+	return res
 }
 
 // alwaysWalk mirrors leakPath from the function's entry: is any exit (return,
 // explicit panic) reachable without coverage? Coverage is a direct target
-// call, a defer covering later exits (deferReleases' rules, plus the D-CX7
-// named-helper lift), or a call/defer whose resolved callees all Discharge
-// ALWAYS. Goroutine spawns never credit (concurrent discharge is out of
-// scope); implicit runtime panics are ignored, as the intraprocedural walk
-// ignores them.
+// call, a deferred target, or a call/defer whose resolved callees all
+// Discharge ALWAYS — which is how a deferred named helper OR anonymous
+// closure earns credit: by its own all-paths summary. deferReleases'
+// any-instruction closure scan is deliberately NOT reused here (adversarial
+// review F1): it accepts a release under an `if` inside the closure, which is
+// fine for the intraprocedural verdict's documented idiom but would mint a
+// portable ALWAYS the closure cannot back. Goroutine spawns never credit
+// (concurrent discharge is out of scope); implicit runtime panics are
+// ignored, as the intraprocedural walk ignores them.
 func (s *Summaries) alwaysWalk(fn *ssa.Function, key string) bool {
 	refs := s.targets[key]
 	visited := map[*ssa.BasicBlock]bool{}
@@ -253,7 +328,7 @@ func (s *Summaries) alwaysWalk(fn *ssa.Function, key string) bool {
 					return false // covered: this path discharges
 				}
 			case *ssa.Defer:
-				if deferReleases(in, refs) || s.creditCall(in, key) {
+				if anyRef(refs, in) || s.creditCall(in, key) {
 					return false // registered discharge covers every later exit
 				}
 			case *ssa.Return:
@@ -319,102 +394,131 @@ func (s *Summaries) resolve(site ssa.CallInstruction) (cands []*ssa.Function, fr
 
 // ---- top-down: EntryDominated --------------------------------------------------
 
-func (s *Summaries) entryDominated(fn *ssa.Function, key string) Summary {
+// entryDominated proves at most one pole (adversarial review F3): ALWAYS, or
+// a disclosed UNKNOWN. It never claims NEVER — "provably require-less entry"
+// would have to reason about package initializers, out-of-unit callers, and
+// require-avoiding paths it cannot enumerate; the consumer keeps its own
+// intraprocedural VIOLATED instead of borrowing a witness the engine cannot
+// back.
+func (s *Summaries) entryDominated(fn *ssa.Function, key string) (Summary, string) {
 	if s.addressTaken(fn) {
-		return SummaryUnknown // an invisible dynamic caller may exist
+		return SummaryUnknown, "its address is taken — an unseen dynamic caller may exist"
+	}
+	if fn.Signature.Recv() != nil && s.dynamicInvokeName(fn.Name()) {
+		// Adversarial review F2: an interface method is entered by dispatch
+		// without its address ever being an SSA operand, so an unresolved
+		// invoke of this name anywhere is a possible unseen entry.
+		return SummaryUnknown, "an unresolved interface dispatch of " + fn.Name() + " exists — an unseen entry may exist"
 	}
 	edges := s.entries(fn)
 	if len(edges) == 0 {
-		return SummaryNever // a graph source is entered with nothing behind it
+		return SummaryUnknown, "no callers in the unit — its entries are beyond proof"
 	}
-	allDominated, provenOpen := true, false
+	var firstGood, firstUnknown *ssa.Function
 	for _, e := range edges {
-		if s.dominatedEntry(e, key) {
+		if s.entryCovered(e, key) {
+			if firstGood == nil {
+				firstGood = e.caller
+			}
 			continue
 		}
-		var st Summary
-		if s.sccOf[e.caller] == s.sccOf[fn] {
-			st = SummaryUnknown // recursion: abstain, no fixed point
-		} else {
-			st = s.EntryDominated(e.caller, s.requireOf(key))
+		st := SummaryUnknown
+		if s.sccOf[e.caller] != s.sccOf[fn] { // recursion abstains, no fixed point
+			st, _ = s.entryDominatedMemo(e.caller, key)
 		}
-		switch st {
-		case SummaryAlways:
-			// dominated at every entry to the caller — so before this site too
-		case SummaryNever:
-			provenOpen = true
-			allDominated = false
-		default:
-			allDominated = false
+		if st == SummaryAlways {
+			// covered at every entry to the caller — so before this site too
+			if firstGood == nil {
+				firstGood = e.caller
+			}
+			continue
+		}
+		if firstUnknown == nil {
+			firstUnknown = e.caller
 		}
 	}
-	switch {
-	case allDominated:
-		return SummaryAlways
-	case provenOpen:
-		return SummaryNever
-	default:
-		return SummaryUnknown
+	if firstUnknown == nil {
+		return SummaryAlways, "e.g. entered via " + firstGood.RelString(nil)
 	}
+	return SummaryUnknown, "entry via " + firstUnknown.RelString(nil) + " is beyond proof"
 }
 
-// requireOf recovers the single-target form for the recursive consult; an
-// EntryDominated key is always a one-element set.
-func (s *Summaries) requireOf(key string) string { return key }
-
-// dominatedEntry reports whether the edge's call site is dominated in its
-// caller by a require site: a plain call matching the target (a deferred
-// require runs at exit, after the entry it must precede — checkPrecede's
-// rule), or a derived-A — a plain call whose callees all Discharge ALWAYS.
-func (s *Summaries) dominatedEntry(e entryEdge, key string) bool {
-	sb := e.site.Block()
-	if sb == nil {
+// entryCovered reports whether every path from the caller's entry to the
+// edge's call site passes a require site first — a coverage walk, not a
+// dominance query (adversarial review F3a): two A sites on the arms of a
+// branch cover the join without either dominating it, and coverage is the
+// property execution actually has. Conservative everywhere it must be: a
+// caller using recover has an untrustworthy CFG, and reaching the site
+// uncovered on any modeled path refuses the edge.
+func (s *Summaries) entryCovered(e entryEdge, key string) bool {
+	caller := e.caller
+	if len(caller.Blocks) == 0 || usesRecover(caller) {
 		return false
 	}
-	si := -1
-	for i, in := range sb.Instrs {
-		if in == e.site {
-			si = i
-			break
+	as := s.requireSites(caller, key)
+	visited := map[*ssa.BasicBlock]bool{}
+	var walk func(b *ssa.BasicBlock, from int) bool // true: site reachable uncovered
+	walk = func(b *ssa.BasicBlock, from int) bool {
+		for i := from; i < len(b.Instrs); i++ {
+			in := b.Instrs[i]
+			if in == e.site {
+				return true // reached the entry with no require behind it
+			}
+			if as[in] {
+				return false // a require covers everything past this point
+			}
 		}
-	}
-	for _, a := range s.requireSites(e.caller, key) {
-		if (a.block == sb && a.index < si) || (a.block != sb && a.block.Dominates(sb)) {
-			return true
+		for _, next := range b.Succs {
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			if walk(next, 0) {
+				return true
+			}
 		}
+		return false
 	}
-	return false
+	return !walk(caller.Blocks[0], 0)
 }
 
-func (s *Summaries) requireSites(caller *ssa.Function, key string) []domSite {
+// requireSites collects the caller's A-site instructions: plain calls
+// matching the require (a deferred require runs at exit, after the entry it
+// must precede — checkPrecede's rule), and derived-A calls — plain calls
+// whose callees all Discharge ALWAYS.
+func (s *Summaries) requireSites(caller *ssa.Function, key string) map[ssa.Instruction]bool {
 	k := summaryKey{caller, key}
-	if v, ok := s.aSites[k]; ok {
+	if v, ok := s.aInstrs[k]; ok {
 		return v
 	}
 	refs := s.targets[key]
-	sites := []domSite{}
+	sites := map[ssa.Instruction]bool{}
 	for _, b := range caller.Blocks {
-		for i, in := range b.Instrs {
+		for _, in := range b.Instrs {
 			call, ok := in.(*ssa.Call) // plain calls only
 			if !ok {
 				continue
 			}
 			if anyRef(refs, call) || s.creditCall(call, key) {
-				sites = append(sites, domSite{b, i})
+				sites[in] = true
 			}
 		}
 	}
-	s.aSites[k] = sites
+	s.aInstrs[k] = sites
 	return sites
 }
 
 // entries returns every resolver-visible call edge into fn, built once for
 // the whole unit in universe order (deterministic). Frontier sites add no
-// edges; the addressTaken guard is what keeps that sound — a dynamic value
-// can only dispatch to a function whose address was taken.
+// edges; two guards keep that sound — a dynamic function value can only
+// dispatch to a function whose address was taken (addressTaken), and an
+// unresolved invoke can only dispatch to a method whose name it carries
+// (dynamicInvokeName, adversarial review F2). The same pass collects those
+// unresolved invoke names.
 func (s *Summaries) entries(fn *ssa.Function) []entryEdge {
 	if s.inEdges == nil {
 		s.inEdges = map[*ssa.Function][]entryEdge{}
+		s.dynInvok = map[string]bool{}
 		for _, caller := range s.fns {
 			for _, b := range caller.Blocks {
 				for _, in := range b.Instrs {
@@ -422,7 +526,10 @@ func (s *Summaries) entries(fn *ssa.Function) []entryEdge {
 					if !ok {
 						continue
 					}
-					cands, _ := s.resolve(site)
+					cands, frontier := s.resolve(site)
+					if frontier && site.Common().IsInvoke() {
+						s.dynInvok[site.Common().Method.Name()] = true
+					}
 					for _, c := range cands {
 						s.inEdges[c] = append(s.inEdges[c], entryEdge{caller, site})
 					}
@@ -431,6 +538,16 @@ func (s *Summaries) entries(fn *ssa.Function) []entryEdge {
 		}
 	}
 	return s.inEdges[fn]
+}
+
+// dynamicInvokeName reports whether any unresolved invoke-mode call site in
+// the unit dispatches a method of this name — a possible unseen entry into
+// any same-named method.
+func (s *Summaries) dynamicInvokeName(name string) bool {
+	if s.dynInvok == nil {
+		s.entries(nil) // build the edge/name indexes
+	}
+	return s.dynInvok[name]
 }
 
 // addressTaken reports whether fn is ever used as a value — stored, captured,
@@ -528,6 +645,7 @@ func (s *Summaries) computeSCC() {
 	// Pass 2: components over reversed edges, in reverse finish order.
 	s.sccOf = make(map[*ssa.Function]int, len(s.fns))
 	s.cyclic = map[int]bool{}
+	s.sccFns = map[int][]*ssa.Function{}
 	next := 0
 	for i := len(order) - 1; i >= 0; i-- {
 		root := order[i]
@@ -537,7 +655,7 @@ func (s *Summaries) computeSCC() {
 		id := next
 		next++
 		s.sccOf[root] = id
-		size := 1
+		s.sccFns[id] = append(s.sccFns[id], root)
 		stack := []*ssa.Function{root}
 		for len(stack) > 0 {
 			f := stack[len(stack)-1]
@@ -545,12 +663,12 @@ func (s *Summaries) computeSCC() {
 			for _, p := range pred[f] {
 				if _, done := s.sccOf[p]; !done {
 					s.sccOf[p] = id
-					size++
+					s.sccFns[id] = append(s.sccFns[id], p)
 					stack = append(stack, p)
 				}
 			}
 		}
-		s.cyclic[id] = size > 1
+		s.cyclic[id] = len(s.sccFns[id]) > 1
 	}
 	for fn, out := range succ {
 		for _, c := range out {

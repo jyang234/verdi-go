@@ -36,9 +36,12 @@ func TestObligationsJudged(t *testing.T) {
 		}
 	}
 
+	// CX-2: the fromCallers shapes land as cautions — the lift abstains
+	// (sendFanoutOpen's unproven entry, sendFanoutTaken's taken address)
+	// rather than minting or borrowing verdicts.
 	c := res.Cautions()
-	if len(c) != 3 {
-		t.Fatalf("want 3 obligation cautions (2x CANT-PROVE, UNMATCHED), got %v", c)
+	if len(c) != 5 {
+		t.Fatalf("want 5 obligation cautions (4x CANT-PROVE, UNMATCHED), got %v", c)
 	}
 	var inert, cantProve bool
 	for _, f := range c {

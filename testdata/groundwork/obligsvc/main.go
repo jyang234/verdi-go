@@ -31,6 +31,12 @@ func main() {
 	app.DeferredPublishAudited()
 	_ = app.DisburseAndCharge("id")
 	_ = app.DisburseAndChargeRisky("id", true)
+	// OpenSend runs BEFORE DispatchSend on purpose: DispatchSend always
+	// validates, so calling it first would entry-dominate everything after it
+	// in this block — the incidental-upstream-require hazard D-CX9 documents.
+	app.OpenSend()
+	_ = app.DispatchSend()
+	app.CallTaken()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/transfer", func(w http.ResponseWriter, r *http.Request) {
