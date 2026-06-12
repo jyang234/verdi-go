@@ -140,6 +140,19 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		base = abs
 	}
 
+	// Lazily-shared summary engine (CX-2/CX-3): obligations and derived
+	// effect sites consult the same instance, and rule-free, effect-free
+	// services never construct it.
+	var sums *obligations.Summaries
+	summaries := func() *obligations.Summaries {
+		if sums == nil {
+			sums = obligationSummaries(res)
+		}
+		return sums
+	}
+
+	directEffects := map[*ssa.Function][]obligations.EffectSite{}
+	labelSites := map[string]map[ssa.Instruction]bool{}
 	for _, n := range res.Graph.Nodes {
 		fn := n.Func
 		if !scope[fn] {
@@ -151,16 +164,16 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		// collected in the same pass — this is the one place where the boundary
 		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
-		var effectSites []obligations.EffectSite
 		for _, e := range n.Out {
 			edges := edgeOf(ext, hints, e, scope)
 			nodeEdges = append(nodeEdges, edges...)
 			if entry == "" && e.Site != nil && len(edges) == 1 && committedEffect(edges[0].To) {
-				effectSites = append(effectSites, obligations.EffectSite{Label: edges[0].To, Site: e.Site})
+				directEffects[fn] = append(directEffects[fn], obligations.EffectSite{Label: edges[0].To, Site: e.Site})
+				if labelSites[edges[0].To] == nil {
+					labelSites[edges[0].To] = map[ssa.Instruction]bool{}
+				}
+				labelSites[edges[0].To][e.Site] = true
 			}
-		}
-		if entry == "" {
-			g.EffectOrder = append(g.EffectOrder, obligations.OrderFacts(fn, effectSites, base)...)
 		}
 		g.Nodes = append(g.Nodes, Node{
 			FQN:      fn.RelString(nil),
@@ -169,6 +182,39 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 			Fallible: fallible(fn),
 		})
 		g.Edges = append(g.Edges, nodeEdges...)
+	}
+
+	// Effect-order pass (IT-3, extended by CX-3). It runs after every label's
+	// site set is complete: a call to a first-party callee that performs a
+	// labeled effect on EVERY path (an ALWAYS-effect summary) is a derived
+	// effect site at the call instruction, carrying the callee in `via`. The
+	// derivation is proof-only — a some-paths effect derives nothing, so a
+	// fault card never cites an effect that might not have happened.
+	if entry == "" && len(labelSites) > 0 {
+		labels := make([]string, 0, len(labelSites))
+		for l := range labelSites {
+			labels = append(labels, l)
+		}
+		sort.Strings(labels)
+		for _, n := range res.Graph.Nodes {
+			fn := n.Func
+			if !scope[fn] {
+				continue
+			}
+			sites := directEffects[fn]
+			for _, e := range n.Out {
+				callee := e.Callee.Func
+				if e.Site == nil || !scope[callee] {
+					continue
+				}
+				for _, l := range labels {
+					if summaries().AlwaysEffect(callee, l, labelSites[l]) {
+						sites = append(sites, obligations.EffectSite{Label: l, Site: e.Site, Via: callee.RelString(nil)})
+					}
+				}
+			}
+			g.EffectOrder = append(g.EffectOrder, obligations.OrderFacts(fn, sites, base)...)
+		}
 	}
 
 	// Obligations are a whole-service disclosure (a level-2 slice of the FULL
@@ -183,7 +229,7 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 				fns = append(fns, n.Func)
 			}
 		}
-		g.Obligations = obligations.Check(rules, fns, base, obligationSummaries(res))
+		g.Obligations = obligations.Check(rules, fns, base, summaries())
 	}
 
 	sortGraph(g)

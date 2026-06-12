@@ -101,7 +101,8 @@ type Summaries struct {
 	taken    map[*ssa.Function]bool                  // lazily built: address-taken functions
 	inEdges  map[*ssa.Function][]entryEdge           // lazily built: resolver-visible call edges in
 	dynInvok map[string]bool                         // lazily built (with inEdges): method names at unresolved invoke sites
-	targets  map[string][]ref                        // interned target sets by key
+	targets  map[string][]ref                        // interned ref target sets by key
+	siteSets map[string]map[ssa.Instruction]bool     // interned instruction target sets by key (effects, CX-3)
 	disch    map[summaryKey]Summary                  // Discharges memo
 	nev      map[summaryKey]bool                     // never memo, SCC-shared
 	edom     map[summaryKey]edomResult               // EntryDominated memo (verdict + witness note)
@@ -158,6 +159,24 @@ func NewSummaries(u *Unit) *Summaries {
 // form and must be well-formed (config validation owns that).
 func (s *Summaries) Discharges(fn *ssa.Function, targets []string) Summary {
 	return s.dischargeKey(fn, s.intern(targets))
+}
+
+// AlwaysEffect reports whether fn performs the labeled committed effect on
+// every path from entry to every exit (CX-3): a call site classified under
+// the label (sites — the label's instruction set across the unit), or a
+// call/defer to a callee that itself AlwaysEffect. A deferred effect runs
+// before the frame exits, so it counts; a spawned one does not. The label
+// keys the memo, so repeated queries for one label share all work; sites must
+// be the same set on every call for a given label.
+func (s *Summaries) AlwaysEffect(fn *ssa.Function, label string, sites map[ssa.Instruction]bool) bool {
+	key := "\x00effect:" + label // refs join on "pkg#Sym" forms; no collision
+	if _, ok := s.siteSets[key]; !ok {
+		if s.siteSets == nil {
+			s.siteSets = map[string]map[ssa.Instruction]bool{}
+		}
+		s.siteSets[key] = sites
+	}
+	return s.dischargeKey(fn, key) == SummaryAlways
 }
 
 // EntryDominated answers the top-down question (D-CX7): has a plain call to
@@ -244,7 +263,6 @@ func (s *Summaries) never(fn *ssa.Function, key string) bool {
 	if v, ok := s.nev[k]; ok {
 		return v
 	}
-	refs := s.targets[key]
 	id := s.sccOf[fn]
 	members := s.sccFns[id]
 
@@ -263,7 +281,7 @@ func (s *Summaries) never(fn *ssa.Function, key string) bool {
 				if !ok {
 					continue
 				}
-				if anyRef(refs, site) {
+				if s.hits(key, site) {
 					clean = false // a target is reachable (go/defer included)
 					break
 				}
@@ -317,18 +335,17 @@ func (s *Summaries) never(fn *ssa.Function, key string) bool {
 // (concurrent discharge is out of scope); implicit runtime panics are
 // ignored, as the intraprocedural walk ignores them.
 func (s *Summaries) alwaysWalk(fn *ssa.Function, key string) bool {
-	refs := s.targets[key]
 	visited := map[*ssa.BasicBlock]bool{}
 	var walk func(b *ssa.BasicBlock, from int) bool // true: uncovered exit reachable
 	walk = func(b *ssa.BasicBlock, from int) bool {
 		for i := from; i < len(b.Instrs); i++ {
 			switch in := b.Instrs[i].(type) {
 			case *ssa.Call:
-				if anyRef(refs, in) || s.creditCall(in, key) {
+				if s.hits(key, in) || s.creditCall(in, key) {
 					return false // covered: this path discharges
 				}
 			case *ssa.Defer:
-				if anyRef(refs, in) || s.creditCall(in, key) {
+				if s.hits(key, in) || s.creditCall(in, key) {
 					return false // registered discharge covers every later exit
 				}
 			case *ssa.Return:
@@ -364,6 +381,16 @@ func (s *Summaries) creditCall(site ssa.CallInstruction, key string) bool {
 		}
 	}
 	return true
+}
+
+// hits reports whether one call instruction matches the key's targets — a
+// ref match (rule anchors) or membership in the key's instruction set
+// (classified effect sites, CX-3).
+func (s *Summaries) hits(key string, in ssa.CallInstruction) bool {
+	if set := s.siteSets[key]; set != nil && set[in] {
+		return true
+	}
+	return anyRef(s.targets[key], in)
 }
 
 // resolve classifies one call site: its in-universe callees, and whether the
@@ -491,7 +518,6 @@ func (s *Summaries) requireSites(caller *ssa.Function, key string) map[ssa.Instr
 	if v, ok := s.aInstrs[k]; ok {
 		return v
 	}
-	refs := s.targets[key]
 	sites := map[ssa.Instruction]bool{}
 	for _, b := range caller.Blocks {
 		for _, in := range b.Instrs {
@@ -499,7 +525,7 @@ func (s *Summaries) requireSites(caller *ssa.Function, key string) map[ssa.Instr
 			if !ok {
 				continue
 			}
-			if anyRef(refs, call) || s.creditCall(call, key) {
+			if s.hits(key, call) || s.creditCall(call, key) {
 				sites[in] = true
 			}
 		}

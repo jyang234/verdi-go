@@ -195,3 +195,18 @@ var sendHook = sendFanoutTaken
 
 // CallTaken keeps sendFanoutTaken reachable alongside the taken address.
 func CallTaken() { sendFanoutTaken() }
+
+// publishApproved audits and publishes on its every path: an ALWAYS-effect
+// (and ALWAYS-require) helper. Callers inherit a derived effect site (CX-3).
+func publishApproved() {
+	audit.Write("loan.approved")
+	bus.Publish("loan.approved")
+}
+
+// DisburseViaHelper is the field's same-function miss, fixed: the publish is
+// one frame down, the charge can still fault — the fault card needs "the
+// publish already happened", which only the derived site can give it.
+func DisburseViaHelper(id string) error {
+	publishApproved()
+	return billing.Charge(id)
+}

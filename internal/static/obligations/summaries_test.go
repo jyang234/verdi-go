@@ -576,3 +576,51 @@ func TestLiftMonotonicity(t *testing.T) {
 		}
 	}
 }
+
+// ---- CX-3: ALWAYS-effect summaries ----------------------------------------------
+
+// Derivation is proof-only (O-CX6): a some-paths effect earns nothing.
+func TestAlwaysEffect(t *testing.T) {
+	src := `package fix
+
+func Send(s string) {}
+
+func emit()        { Send("a") }
+func wrap()        { emit() }
+func maybe(b bool) {
+	if b {
+		Send("a")
+	}
+}
+func quiet() {}
+`
+	fns := buildProg(t, src)
+	sites := map[ssa.Instruction]bool{}
+	for _, fn := range fns {
+		for _, b := range fn.Blocks {
+			for _, in := range b.Instrs {
+				if c, ok := in.(ssa.CallInstruction); ok {
+					if sc := c.Common().StaticCallee(); sc != nil && sc.Name() == "Send" {
+						sites[in] = true
+					}
+				}
+			}
+		}
+	}
+	s := NewSummaries(testUnit(fns))
+	const label = "boundary:test SEND x"
+	cases := []struct {
+		fn   string
+		want bool
+	}{
+		{"emit", true},
+		{"wrap", true}, // composed through the ALWAYS callee
+		{"maybe", false},
+		{"quiet", false},
+	}
+	for _, c := range cases {
+		if got := s.AlwaysEffect(fnByName(t, fns, c.fn), label, sites); got != c.want {
+			t.Errorf("AlwaysEffect(%s) = %v, want %v", c.fn, got, c.want)
+		}
+	}
+}

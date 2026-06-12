@@ -1,7 +1,8 @@
 # correctness expansion: implementation plan
 
-**Status:** in progress — CX-0 (the summary engine) and CX-2 (the
-must-precede lifts, `fromCallers`-gated per D-CX9) shipped. The §10
+**Status:** in progress — CX-0 (the summary engine), CX-2 (the must-precede
+lifts, `fromCallers`-gated per D-CX9), and CX-3 (derived effect sites with
+`via` provenance) shipped. The §10
 adversarial review ran before CX-2 merged and found four issues — F1 (a
 conditionally-releasing deferred closure earned ALWAYS through
 `deferReleases`' any-instruction scan), F2 (entry domination ignored
@@ -342,6 +343,14 @@ partial-effect answers ("the publish had already happened when the charge
 faulted") get strictly more coverage and zero wrong rows. MAY-effects are not
 derived — an existential fact built on an over-approximated cone would put a
 maybe into a fault card that responders treat as ground truth.
+
+*Implementation note (observed on the fixture):* every derived row is true,
+but volume concentrates in orchestrator-shaped functions — the fixture's
+sequential `main` accrues a derived site per ALWAYS-effect callee, multiplied
+by its later fallible calls. Real handlers have few callees, so the bet is
+that fact counts stay proportionate outside composition roots; the E-CX6
+field run measures exactly this, and a scoping knob (e.g. exclude graph
+sources from derivation) is the prepared fallback, deterministic either way.
 
 This phase is what makes CX-5 possible: cross-service chains compose
 *proven* per-service ordering facts, and same-function-only facts are too
