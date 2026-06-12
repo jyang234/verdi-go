@@ -83,12 +83,19 @@ type Result struct {
 	BlindSpots []BlindSpot
 }
 
-// Funcs returns just the root functions, in Result.Roots order — the input RTA
-// and the other algorithms expect.
+// Funcs returns the distinct root functions, in Result.Roots order — the input
+// RTA and the other algorithms expect. Distinct because two routes may share one
+// handler function (each is its own Root), while the graph algorithms root at
+// functions.
 func (r *Result) Funcs() []*ssa.Function {
-	fns := make([]*ssa.Function, len(r.Roots))
-	for i, rt := range r.Roots {
-		fns[i] = rt.Func
+	fns := make([]*ssa.Function, 0, len(r.Roots))
+	seen := make(map[*ssa.Function]bool, len(r.Roots))
+	for _, rt := range r.Roots {
+		if seen[rt.Func] {
+			continue
+		}
+		seen[rt.Func] = true
+		fns = append(fns, rt.Func)
 	}
 	return fns
 }
@@ -131,13 +138,22 @@ func chiRegistrars() []Registrar {
 // exported functions (library mode).
 func Discover(prog *ssabuild.Program, registrars []Registrar) *Result {
 	res := &Result{}
-	seen := make(map[*ssa.Function]bool)
+	// Identity is the full (fn, kind, name) triple, not the function alone: two
+	// routes may register one handler function, and each must survive as its own
+	// root — dropping one would silently erase an entrypoint from the gated
+	// contract, with the survivor picked by map iteration order.
+	type rootKey struct {
+		fn   *ssa.Function
+		kind Kind
+		name string
+	}
+	seen := make(map[rootKey]bool)
 
 	add := func(fn *ssa.Function, kind Kind, name string) {
-		if fn == nil || seen[fn] {
+		if fn == nil || seen[rootKey{fn, kind, name}] {
 			return
 		}
-		seen[fn] = true
+		seen[rootKey{fn, kind, name}] = true
 		res.Roots = append(res.Roots, Root{Func: fn, Kind: kind, Name: name})
 	}
 

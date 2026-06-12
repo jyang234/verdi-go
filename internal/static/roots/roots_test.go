@@ -140,6 +140,88 @@ func main() {
 	}
 }
 
+// TestDiscoverSharedHandlerKeepsEveryRoute synthesizes a module where two routes
+// register the same handler function: both must survive as roots. Dedupe keyed
+// on the function alone dropped one route from the gated contract, with the
+// survivor picked by map iteration order.
+func TestDiscoverSharedHandlerKeepsEveryRoute(t *testing.T) {
+	res := discoverShared(t)
+
+	got := make(map[string]string, len(res.Roots))
+	for _, r := range res.Roots {
+		if r.Kind == roots.KindHTTP {
+			got[r.Name] = r.FQN()
+		}
+	}
+	for _, route := range []string{"GET /health", "GET /ready"} {
+		if got[route] != "dyn.ok" {
+			t.Errorf("route %q: got handler %q, want dyn.ok", route, got[route])
+		}
+	}
+	// The shared handler must still be a single graph root.
+	fns := res.Funcs()
+	seen := make(map[string]bool, len(fns))
+	for _, fn := range fns {
+		if seen[fn.String()] {
+			t.Errorf("Funcs returned duplicate root function %q", fn)
+		}
+		seen[fn.String()] = true
+	}
+}
+
+// TestDiscoverSharedHandlerDeterministic re-discovers the shared-handler module:
+// the registrations live in two different functions, so a survivor chosen during
+// AllFunctions map iteration would differ between runs.
+func TestDiscoverSharedHandlerDeterministic(t *testing.T) {
+	first := discoverShared(t)
+	for i := 0; i < 5; i++ {
+		again := discoverShared(t)
+		if len(again.Roots) != len(first.Roots) {
+			t.Fatalf("root count drifted: %d vs %d", len(again.Roots), len(first.Roots))
+		}
+		for j := range first.Roots {
+			if first.Roots[j].Name != again.Roots[j].Name || first.Roots[j].FQN() != again.Roots[j].FQN() {
+				t.Fatalf("root %d drifted: %+v vs %+v", j, first.Roots[j], again.Roots[j])
+			}
+		}
+	}
+}
+
+// discoverShared builds a module whose two HTTP routes share one handler,
+// registered from two separate functions.
+func discoverShared(t *testing.T) *roots.Result {
+	t.Helper()
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module dyn\n\ngo 1.24\n")
+	write(t, dir, "reg/reg.go", `package reg
+type Handler func()
+func Register(route string, h Handler) {}
+`)
+	write(t, dir, "main.go", `package main
+import "dyn/reg"
+func ok() {}
+func registerHealth() { reg.Register("GET /health", ok) }
+func registerReady()  { reg.Register("GET /ready", ok) }
+func main() {
+	registerHealth()
+	registerReady()
+}
+`)
+
+	svc, err := loader.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	prog, err := ssabuild.Build(svc)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return roots.Discover(prog, []roots.Registrar{
+		{PkgPath: "dyn/reg", Name: "Register", Kind: roots.KindHTTP, NameArg: 0, HandlerArg: 1},
+	})
+}
+
 func write(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	p := filepath.Join(dir, rel)
