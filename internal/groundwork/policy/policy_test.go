@@ -95,6 +95,35 @@ func TestValidateErrors(t *testing.T) {
 			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}, Through: []string{"c"},
 				Allow: []Exception{{Reason: "no sides"}}}},
 		},
+		// An all-empty layering exception prefix-matches every edge and would
+		// silently disable the whole invariant.
+		"layering allow both empty": {
+			Service: "s", Version: 1,
+			Layers:   []Layer{{Name: "a", Packages: []string{"p"}}},
+			Layering: &Layering{Allow: []Exception{{Reason: "tbd"}}},
+		},
+		// "" prefix-matches everything; an empty element makes a rule (or a
+		// layer's package claim) mean something other than what it says.
+		"empty pattern in reach from": {
+			Service: "s", Version: 1,
+			MustNotReach: []ReachRule{{Name: "r", From: []string{""}, To: []string{"b"}}},
+		},
+		"empty pattern in reach to": {
+			Service: "s", Version: 1,
+			MustNotReach: []ReachRule{{Name: "r", From: []string{"a"}, To: []string{" "}}},
+		},
+		"empty pattern in concurrent to": {
+			Service: "s", Version: 1,
+			NoConcurrentReach: []ConcurrentRule{{Name: "r", To: []string{""}}},
+		},
+		"empty pattern in pass through": {
+			Service: "s", Version: 1,
+			MustPassThrough: []PassRule{{Name: "r", From: []string{"a"}, To: []string{"b"}, Through: []string{""}}},
+		},
+		"empty layer package": {
+			Service: "s", Version: 1,
+			Layers: []Layer{{Name: "a", Packages: []string{""}}},
+		},
 	}
 	for name, p := range cases {
 		if err := p.Validate(); err == nil {
@@ -152,8 +181,10 @@ func TestBlindSpotRatchetAllows(t *testing.T) {
 func TestValidateAccepts(t *testing.T) {
 	p := &Policy{
 		Service: "s", Version: 1,
-		Layers:   []Layer{{Name: "h", Packages: []string{"p/h"}}, {Name: "s", Packages: []string{"p/s"}}},
-		Layering: &Layering{Roots: []string{"p"}},
+		Layers: []Layer{{Name: "h", Packages: []string{"p/h"}}, {Name: "s", Packages: []string{"p/s"}}},
+		// A one-sided exception is the documented shape: the declared side
+		// narrows the match, the empty side means "any".
+		Layering: &Layering{Roots: []string{"p"}, Allow: []Exception{{From: "p/h", Reason: "reviewed"}}},
 		IOBudget: &IOBudget{MaxWritesPerRoute: 0},
 	}
 	if err := p.Validate(); err != nil {
