@@ -181,9 +181,18 @@ func (f *Flow) Run(t TB, app *harness.App) {
 
 	// Determinism self-test: every run must canonicalize byte-identically before
 	// the snapshot is trusted (canon §5).
-	base := marshal(traces[0])
+	base, err := marshal(traces[0])
+	if err != nil {
+		t.Fatalf("flow %q: marshal failed: %v", f.name, err)
+		return
+	}
 	for i := 1; i < len(traces); i++ {
-		if marshal(traces[i]) != base {
+		cur, err := marshal(traces[i])
+		if err != nil {
+			t.Fatalf("flow %q: marshal failed on run %d: %v", f.name, i+1, err)
+			return
+		}
+		if cur != base {
 			t.Fatalf("flow %q: non-deterministic capture — run %d differs from run 1; "+
 				"the flow or its test data is not yet deterministic", f.name, i+1)
 			return
@@ -250,9 +259,12 @@ func (f *Flow) configSearchDir() (string, bool) {
 	return config.Discover(wd)
 }
 
-func marshal(t *ir.CanonicalTrace) string {
-	b, _ := t.Marshal()
-	return string(b)
+// marshal renders the canonical bytes the determinism self-test compares. The
+// error must propagate: swallowed, every run would serialize to "" and the
+// self-test would pass vacuously.
+func marshal(t *ir.CanonicalTrace) (string, error) {
+	b, err := t.Marshal()
+	return string(b), err
 }
 
 // countOp returns how many times op occurs in the tree and whether any
