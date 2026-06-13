@@ -1,5 +1,7 @@
 # groundwork: implementation plan
 
+> **`DESIGN RECORD`** · plan-of-record; built · _reviewed 2026-06-13_
+
 This is the plan-of-record for building `groundwork` on top of flowmap. It is
 grounded in flowmap's *actual* graph output (verified against the
 `testdata/fixtures/loansvc` fixture, not just the design docs) and folds in the

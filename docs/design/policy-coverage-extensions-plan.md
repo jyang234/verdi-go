@@ -1,5 +1,7 @@
 # policy coverage extensions: pressure-tested plan
 
+> **`DESIGN RECORD`** · implemented (PC-4 parked); kept as design record · _reviewed 2026-06-13_
+
 **Status:** PC-1, PC-2, and PC-3 implemented (rule liveness in fitness + the
 exceptions audit; `route_io_deltas` and `new_write_targets` in the review
 artifact and gate; `effect_ratchet` in the policy schema). PC-4 stays parked

@@ -1,5 +1,7 @@
 # Integrating flowmap with an out-of-process e2e suite
 
+> **`ACTIVE`** · integration reference · _reviewed 2026-06-13_
+
 Reference material for tapping an existing OTel collector and feeding captured
 traces to `flowmap behavior ingest` (the post-hoc path — see
 `docs/design/post-hoc-behavioral-ingestion.md`). Nothing here is imported by

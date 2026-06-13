@@ -1,5 +1,7 @@
 # MCP expansion: tiers 2–3 — plan-of-record
 
+> **`DESIGN RECORD`** · implemented; kept as design record · _reviewed 2026-06-13_
+
 **Status:** all three tiers are built. Tier 1: entrypoints, fitness, reload +
 staleness flagging, --log transcript. Tier 2: `--service` fleet serving with
 the optional `service` arg on every tool, the fleet-wide prefixed

@@ -1,5 +1,7 @@
 # Rule anchoring: keep `require` and `before` on the same resolved side of a dispatch boundary
 
+> **`ACTIVE`** · authoring guide · _reviewed 2026-06-13_
+
 **Audience:** anyone authoring a `must-precede` obligation (`require` + `before`)
 in `.flowmap.yaml`.
 **Source:** this is the field-facing answer to ask #2 from the second

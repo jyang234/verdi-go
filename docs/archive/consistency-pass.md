@@ -1,5 +1,7 @@
 # Design Consistency Pass
 
+> **`HISTORICAL`** · superseded — findings folded into the specs · _reviewed 2026-06-13_
+
 A pass over the seven component specs and four runnable demos to verify the shared contracts hold. Findings are grouped: what's confirmed consistent, the inconsistencies/gaps found (each with a resolution), the one authoritative definition that supersedes the drift, and open decisions later specs already settled.
 
 ---

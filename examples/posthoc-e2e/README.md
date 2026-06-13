@@ -63,7 +63,7 @@ Everything that matters is in `service/main.go`, marked (1)–(3):
    nothing is selectable** — the single most common adoption failure.
 
 The collector side is `otel-collector.yaml` (the self-contained form of the
-additive blocks in `../../docs/integration/otel-collector.flowmap.yaml`):
+additive blocks in `../../docs/guides/integration/otel-collector.flowmap.yaml`):
 `tail_sampling` keyed on the `flowmap.flow` attribute → `file` exporter as
 OTLP/JSON.
 

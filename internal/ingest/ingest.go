@@ -25,7 +25,7 @@ import (
 )
 
 // FlowKey is the span attribute (promoted from baggage by a per-service
-// baggagecopy processor, see docs/integration) that tags a span as belonging to
+// baggagecopy processor, see docs/guides/integration) that tags a span as belonging to
 // a named flow and supplies the golden's slug.
 const FlowKey = "flowmap.flow"
 

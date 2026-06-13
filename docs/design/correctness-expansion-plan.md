@@ -1,5 +1,7 @@
 # correctness expansion: implementation plan
 
+> **`ACTIVE`** · plan in progress — CX-5 parked at the adopter gate · _reviewed 2026-06-13_
+
 **Status:** in progress — CX-0 (the summary engine), CX-2 (the must-precede
 lifts, `fromCallers`-gated per D-CX9), CX-3 (derived effect sites with
 `via` provenance), CX-1 (the must-release handoff credit), and CX-4 (the

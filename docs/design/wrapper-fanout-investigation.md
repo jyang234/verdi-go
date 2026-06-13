@@ -1,5 +1,7 @@
 # Investigation: the HTTP-wrapper HighFanOut that gates the CX lifts (D-CX10)
 
+> **`ACTIVE`** · open investigation — owner decision pending · _reviewed 2026-06-13_
+
 **Status:** investigated, measured, recommendation below. No engine change shipped
 yet — the deeper fix is a framework-wide decision for the owner (§4).
 
@@ -108,7 +110,7 @@ boundary the analysis genuinely cannot prove what precedes the handler.
    dispatch boundary (the handler body and below), not spanning
    `doPublish`→`publishWithFanout` through the wrapper. This is authoring
    guidance + a documented limit, **no engine change** — and it is what to tell
-   the field. **Shipped:** `docs/rule-anchoring.md` (field-facing).
+   the field. **Shipped:** `docs/guides/rule-anchoring.md` (field-facing).
 2. **Expose `--algo` on `flowmap graph` — keep, but demoted.** VTA's 22→10 is a
    real precision win (it removes spurious candidates, helps blind-spot *noise*
    and any check that counts callees) and is cheap. But it is **not** a lift

@@ -1,5 +1,7 @@
 # groundwork — usage
 
+> **`ACTIVE`** · usage guide · _reviewed 2026-06-13_
+
 `groundwork` is a deterministic verification layer over a Go service's static
 call graph. It turns architectural facts that normally live in someone's head —
 "the handler layer must not touch storage directly", "this route may do at most

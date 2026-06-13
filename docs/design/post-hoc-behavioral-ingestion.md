@@ -1,5 +1,7 @@
 # Post-hoc behavioral ingestion (`ModePostHoc`) — design brief
 
+> **`DESIGN RECORD`** · shipped (stages 1–2); kept as design record · _reviewed 2026-06-13_
+
 **Status:** stages 1 and 2 landed (non-gated coverage view + opt-in,
 no-new-effects gate). Implements the deferred Phase 10 (`implementation_plan.md`)
 and extends the determinism contract (`trace-canonicalization-spec.md §1`) to
@@ -46,7 +48,7 @@ Deferred: the optional per-flow `expectations.yaml` for opt-in cardinality
 (D-PH5).
 
 **Audience:** the flowmap team (the build asks below) and adopting service teams
-(the conventions in §4 and `docs/integration/`).
+(the conventions in §4 and `docs/guides/integration/`).
 
 ---
 
@@ -276,7 +278,7 @@ a multi-service async flow reads as what it is:
 ### [P10.4] Tagging + collector conventions (a short spec, not code we import)
 The `flowmap.flow` key, the recommended collector `tail_sampling`+file-export
 config, the **"flowmap-tagged flows are 100% sampled"** rule, and the
-**baggage→span-attribute** requirement (§4). Shipped as `docs/integration/`.
+**baggage→span-attribute** requirement (§4). Shipped as `docs/guides/integration/`.
 
 ---
 
@@ -317,7 +319,7 @@ distinct directories.
 4. **File export is additive.** A second exporter on the traces pipeline; the
    `otlp/jaeger` and `debug` exporters are untouched.
 
-See `docs/integration/` for a ready-to-copy collector config and `withFlow`
+See `docs/guides/integration/` for a ready-to-copy collector config and `withFlow`
 helper.
 
 ---

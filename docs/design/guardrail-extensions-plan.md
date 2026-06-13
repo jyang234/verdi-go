@@ -1,5 +1,7 @@
 # deterministic guardrail extensions: implementation plan
 
+> **`DESIGN RECORD`** · implemented; kept as design record · _reviewed 2026-06-13_
+
 **Status:** implemented — GX-1 through GX-5 all shipped. Kept as the design
 record: the extension recipe (§1) is the standing framework policy for every
 future check, and D-GX1 records the execution order. Companion to

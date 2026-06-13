@@ -1,5 +1,7 @@
 # Deterministic MR review artifacts
 
+> **`DESIGN RECORD`** · shipped; kept for rationale · _reviewed 2026-06-13_
+
 ## The problem in 100%-agent development
 
 When Claude Code writes 100% of the code, the bottleneck moves to the human

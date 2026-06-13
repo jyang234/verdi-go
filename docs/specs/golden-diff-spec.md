@@ -1,5 +1,7 @@
 # Golden Files & Behavioral Diff — Specification
 
+> **`ACTIVE`** · component specification (source of truth) · _reviewed 2026-06-13_
+
 This closes the behavioral loop. The golden is the committed canonical IR (the snapshot); the diff engine compares observed-vs-golden and produces the change set a reviewer reads. This is where the product's "verify PRs faster" payoff is realized — so the diff has to be *semantic and prioritized*, not a raw text delta.
 
 ---
