@@ -55,15 +55,23 @@ func OrderFacts(fn *ssa.Function, effects []EffectSite, baseDir string) []Effect
 		fqn   string
 	}
 	var fallible []callSite
-	effectInstrs := map[ssa.Instruction]bool{}
+	directInstrs := map[ssa.Instruction]bool{}
 	for _, e := range effects {
-		effectInstrs[e.Site] = true
+		// Only DIRECT effect sites leave the fault-site list. A derived
+		// site's carrier call (CX-3) is still a fault site for OTHER effects:
+		// excluding it deleted true pre-existing facts (the loansvc
+		// regression — the call to an ALWAYS-publish helper is exactly where
+		// a fault surfaces after the direct publishes above it). Its pairing
+		// with itself is skipped below instead.
+		if e.Via == "" {
+			directInstrs[e.Site] = true
+		}
 	}
 	for _, b := range fn.Blocks {
 		for _, in := range b.Instrs {
 			c, ok := in.(ssa.CallInstruction)
-			if !ok || effectInstrs[in] {
-				continue // an effect is not its own fault site
+			if !ok || directInstrs[in] {
+				continue // a direct effect is not its own fault site
 			}
 			sig := c.Common().Signature()
 			if sig == nil || sig.Results().Len() == 0 {
@@ -82,6 +90,9 @@ func OrderFacts(fn *ssa.Function, effects []EffectSite, baseDir string) []Effect
 	var out []EffectOrder
 	for _, e := range effects {
 		for _, c := range fallible {
+			if e.Site == c.instr {
+				continue // a derived effect is not its own fault site either
+			}
 			can, always := precedes(e.Site, c.instr)
 			if !can {
 				continue

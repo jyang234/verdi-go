@@ -789,3 +789,55 @@ func TestReleaseLift(t *testing.T) {
 		t.Errorf("the abstention must name the unprovable callee, got %q", leaky[0].Detail)
 	}
 }
+
+// member and sccOf must cover the identical key set after construction — the
+// inUnit doc comment's invariant, asserted so the two structures cannot
+// silently drift.
+func TestUniverseMembershipMatchesCondensation(t *testing.T) {
+	fns := buildProg(t, dischargeSrc)
+	s := NewSummaries(testUnit(fns))
+	if len(s.member) != len(s.sccOf) {
+		t.Fatalf("member has %d keys, condensation %d", len(s.member), len(s.sccOf))
+	}
+	for fn := range s.member {
+		if _, ok := s.sccOf[fn]; !ok {
+			t.Errorf("%s in member but not in condensation", fn)
+		}
+	}
+}
+
+// Re-binding an effect label with the SAME site set is fine (the production
+// adapter passes the same map per label); a DIFFERENT set must fail loudly —
+// memoized verdicts were computed against the first binding, and a silent
+// stale answer is the exact failure the typed-key change exists to prevent.
+func TestAlwaysEffectRebindAsserts(t *testing.T) {
+	fns := buildProg(t, dischargeSrc)
+	s := NewSummaries(testUnit(fns))
+	sites := map[ssa.Instruction]bool{}
+	for _, fn := range fns {
+		for _, b := range fn.Blocks {
+			for _, in := range b.Instrs {
+				if c, ok := in.(ssa.CallInstruction); ok {
+					if sc := c.Common().StaticCallee(); sc != nil && sc.Name() == "Rollback" {
+						sites[in] = true
+					}
+				}
+			}
+		}
+	}
+	const label = "boundary:test REBIND"
+	_ = s.AlwaysEffect(fnByName(t, fns, "cleanup"), label, sites)
+
+	same := map[ssa.Instruction]bool{}
+	for k, v := range sites {
+		same[k] = v
+	}
+	_ = s.AlwaysEffect(fnByName(t, fns, "cleanup"), label, same) // equal set: fine
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("re-binding the label with a different site set must panic")
+		}
+	}()
+	_ = s.AlwaysEffect(fnByName(t, fns, "cleanup"), label, map[ssa.Instruction]bool{})
+}

@@ -39,6 +39,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 // Summary is the three-valued answer to one interprocedural question.
@@ -101,8 +102,8 @@ type Summaries struct {
 	taken    map[*ssa.Function]bool                  // lazily built: address-taken functions
 	inEdges  map[*ssa.Function][]entryEdge           // lazily built: resolver-visible call edges in
 	dynInvok map[string]bool                         // lazily built (with inEdges): method names at unresolved invoke sites
-	targets  map[string][]ref                        // interned ref target sets by key
-	siteSets map[string]map[ssa.Instruction]bool     // interned instruction target sets by key (effects, CX-3)
+	targets  map[targetKey][]ref                     // interned ref target sets
+	siteSets map[targetKey]map[ssa.Instruction]bool  // interned effect-site sets (CX-3)
 	disch    map[summaryKey]Summary                  // Discharges memo
 	nev      map[summaryKey]bool                     // never memo, SCC-shared
 	edom     map[summaryKey]edomResult               // EntryDominated memo (verdict + witness note)
@@ -114,14 +115,40 @@ type edomResult struct {
 	note string
 }
 
+// targetKey identifies one interned target set. kind separates rule-ref sets
+// from effect-label sets structurally, so the two families can never collide
+// by string convention (code-review finding: replaces the former
+// "\x00effect:" namespace packing).
+type targetKey struct {
+	kind byte // 'r': rule refs; 'e': effect label
+	name string
+}
+
 type summaryKey struct {
 	fn  *ssa.Function
-	key string
+	key targetKey
 }
 
 type entryEdge struct {
 	caller *ssa.Function
 	site   ssa.CallInstruction
+}
+
+// NewProgramSummaries is the production constructor: the universe is every
+// function of the BUILT program — package initializers, anonymous functions,
+// and wrappers included — so the F4 completeness precondition holds by
+// construction instead of by an adapter's discipline (code-review finding).
+// callees supplies the call graph's over-approximation per site; sites it
+// has no entry for fall back to their static callee inside the engine, and
+// everything else is a frontier. The remaining adapter obligation (never
+// pre-filter the candidate set) still rests on the caller.
+func NewProgramSummaries(prog *ssa.Program, callees func(site ssa.CallInstruction) []*ssa.Function) *Summaries {
+	all := ssautil.AllFunctions(prog)
+	fns := make([]*ssa.Function, 0, len(all))
+	for fn := range all {
+		fns = append(fns, fn)
+	}
+	return NewSummaries(&Unit{Fns: fns, Callees: callees}) // NewSummaries sorts
 }
 
 // NewSummaries builds the engine over one unit: sorts the universe (input
@@ -137,20 +164,32 @@ func NewSummaries(u *Unit) *Summaries {
 		return a.Pos() < b.Pos() // generic instantiations can share a name
 	})
 	s := &Summaries{
-		fns:     fns,
-		member:  make(map[*ssa.Function]bool, len(fns)),
-		callees: u.Callees,
-		targets: map[string][]ref{},
-		disch:   map[summaryKey]Summary{},
-		nev:     map[summaryKey]bool{},
-		edom:    map[summaryKey]edomResult{},
-		aInstrs: map[summaryKey]map[ssa.Instruction]bool{},
+		fns:      fns,
+		member:   make(map[*ssa.Function]bool, len(fns)),
+		callees:  u.Callees,
+		targets:  map[targetKey][]ref{},
+		siteSets: map[targetKey]map[ssa.Instruction]bool{},
+		disch:    map[summaryKey]Summary{},
+		nev:      map[summaryKey]bool{},
+		edom:     map[summaryKey]edomResult{},
+		aInstrs:  map[summaryKey]map[ssa.Instruction]bool{},
 	}
 	for _, fn := range fns {
 		s.member[fn] = true
 	}
 	s.computeSCC()
 	return s
+}
+
+// inUnit reports universe membership. member looks redundant with sccOf
+// presence, but it is NOT derivable from it: resolve() consults membership
+// while computeSCC is still BUILDING sccOf (the adjacency pass), and an empty
+// membership there marks every candidate a frontier — erasing self-loops from
+// the condensation and unleashing unbounded creditCall recursion. The
+// separate map is the bootstrap order made explicit; a post-construction
+// assertion that the two key sets agree lives in the unit tests.
+func (s *Summaries) inUnit(fn *ssa.Function) bool {
+	return s.member[fn]
 }
 
 // Discharges answers the bottom-up question: does fn, on every path from
@@ -169,14 +208,30 @@ func (s *Summaries) Discharges(fn *ssa.Function, targets []string) Summary {
 // keys the memo, so repeated queries for one label share all work; sites must
 // be the same set on every call for a given label.
 func (s *Summaries) AlwaysEffect(fn *ssa.Function, label string, sites map[ssa.Instruction]bool) bool {
-	key := "\x00effect:" + label // refs join on "pkg#Sym" forms; no collision
-	if _, ok := s.siteSets[key]; !ok {
-		if s.siteSets == nil {
-			s.siteSets = map[string]map[ssa.Instruction]bool{}
+	key := targetKey{'e', label}
+	if prev, ok := s.siteSets[key]; ok {
+		// Memoized answers were computed against the first binding; a caller
+		// re-binding the label to a DIFFERENT set would silently get stale
+		// verdicts. That is an API-contract bug, so it fails loudly.
+		if !sameSites(prev, sites) {
+			panic("obligations: AlwaysEffect re-bound label " + label + " with a different site set")
 		}
+	} else {
 		s.siteSets[key] = sites
 	}
 	return s.dischargeKey(fn, key) == SummaryAlways
+}
+
+func sameSites(a, b map[ssa.Instruction]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // EntryDominated answers the top-down question (D-CX7): has a plain call to
@@ -192,13 +247,13 @@ func (s *Summaries) EntryDominated(fn *ssa.Function, require string) Summary {
 // (D-OB6).
 func (s *Summaries) EntryDominatedNote(fn *ssa.Function, require string) (Summary, string) {
 	key := s.intern([]string{require})
-	if !s.member[fn] {
+	if !s.inUnit(fn) {
 		return SummaryUnknown, "the function is outside the analyzed unit"
 	}
 	return s.entryDominatedMemo(fn, key)
 }
 
-func (s *Summaries) entryDominatedMemo(fn *ssa.Function, key string) (Summary, string) {
+func (s *Summaries) entryDominatedMemo(fn *ssa.Function, key targetKey) (Summary, string) {
 	k := summaryKey{fn, key}
 	if v, ok := s.edom[k]; ok {
 		return v.sum, v.note
@@ -216,8 +271,8 @@ func (s *Summaries) DerivedRequire(call *ssa.Call, require string) bool {
 	return s.creditCall(call, s.intern([]string{require}))
 }
 
-func (s *Summaries) intern(targets []string) string {
-	key := strings.Join(targets, "\x00")
+func (s *Summaries) intern(targets []string) targetKey {
+	key := targetKey{'r', strings.Join(targets, "\x00")}
 	if _, ok := s.targets[key]; !ok {
 		s.targets[key] = parseRefs(targets)
 	}
@@ -226,8 +281,8 @@ func (s *Summaries) intern(targets []string) string {
 
 // ---- bottom-up: Discharges ----------------------------------------------------
 
-func (s *Summaries) dischargeKey(fn *ssa.Function, key string) Summary {
-	if !s.member[fn] {
+func (s *Summaries) dischargeKey(fn *ssa.Function, key targetKey) Summary {
+	if !s.inUnit(fn) {
 		return SummaryUnknown
 	}
 	k := summaryKey{fn, key}
@@ -258,7 +313,7 @@ func (s *Summaries) dischargeKey(fn *ssa.Function, key string) Summary {
 // member). Sound under the call graph's over-approximation. Computed per SCC
 // over the condensation and memoized — cones overlap heavily, and a per-query
 // BFS would be quadratic on a whole-program universe.
-func (s *Summaries) never(fn *ssa.Function, key string) bool {
+func (s *Summaries) never(fn *ssa.Function, key targetKey) bool {
 	k := summaryKey{fn, key}
 	if v, ok := s.nev[k]; ok {
 		return v
@@ -334,7 +389,7 @@ func (s *Summaries) never(fn *ssa.Function, key string) bool {
 // portable ALWAYS the closure cannot back. Goroutine spawns never credit
 // (concurrent discharge is out of scope); implicit runtime panics are
 // ignored, as the intraprocedural walk ignores them.
-func (s *Summaries) alwaysWalk(fn *ssa.Function, key string) bool {
+func (s *Summaries) alwaysWalk(fn *ssa.Function, key targetKey) bool {
 	visited := map[*ssa.BasicBlock]bool{}
 	var walk func(b *ssa.BasicBlock, from int) bool // true: uncovered exit reachable
 	walk = func(b *ssa.BasicBlock, from int) bool {
@@ -370,7 +425,7 @@ func (s *Summaries) alwaysWalk(fn *ssa.Function, key string) bool {
 
 // creditCall reports whether a call site provably discharges via its callees:
 // the site has no frontier and every resolved callee Discharges ALWAYS.
-func (s *Summaries) creditCall(site ssa.CallInstruction, key string) bool {
+func (s *Summaries) creditCall(site ssa.CallInstruction, key targetKey) bool {
 	cands, frontier := s.resolve(site)
 	if frontier || len(cands) == 0 {
 		return false
@@ -386,7 +441,7 @@ func (s *Summaries) creditCall(site ssa.CallInstruction, key string) bool {
 // hits reports whether one call instruction matches the key's targets — a
 // ref match (rule anchors) or membership in the key's instruction set
 // (classified effect sites, CX-3).
-func (s *Summaries) hits(key string, in ssa.CallInstruction) bool {
+func (s *Summaries) hits(key targetKey, in ssa.CallInstruction) bool {
 	if set := s.siteSets[key]; set != nil && set[in] {
 		return true
 	}
@@ -410,7 +465,7 @@ func (s *Summaries) resolve(site ssa.CallInstruction) (cands []*ssa.Function, fr
 		}
 	}
 	for _, c := range raw {
-		if !s.member[c] || len(c.Blocks) == 0 {
+		if !s.inUnit(c) || len(c.Blocks) == 0 {
 			frontier = true
 			continue
 		}
@@ -427,7 +482,7 @@ func (s *Summaries) resolve(site ssa.CallInstruction) (cands []*ssa.Function, fr
 // require-avoiding paths it cannot enumerate; the consumer keeps its own
 // intraprocedural VIOLATED instead of borrowing a witness the engine cannot
 // back.
-func (s *Summaries) entryDominated(fn *ssa.Function, key string) (Summary, string) {
+func (s *Summaries) entryDominated(fn *ssa.Function, key targetKey) (Summary, string) {
 	if s.addressTaken(fn) {
 		return SummaryUnknown, "its address is taken — an unseen dynamic caller may exist"
 	}
@@ -477,7 +532,7 @@ func (s *Summaries) entryDominated(fn *ssa.Function, key string) (Summary, strin
 // property execution actually has. Conservative everywhere it must be: a
 // caller using recover has an untrustworthy CFG, and reaching the site
 // uncovered on any modeled path refuses the edge.
-func (s *Summaries) entryCovered(e entryEdge, key string) bool {
+func (s *Summaries) entryCovered(e entryEdge, key targetKey) bool {
 	caller := e.caller
 	if len(caller.Blocks) == 0 || usesRecover(caller) {
 		return false
@@ -513,7 +568,7 @@ func (s *Summaries) entryCovered(e entryEdge, key string) bool {
 // matching the require (a deferred require runs at exit, after the entry it
 // must precede — checkPrecede's rule), and derived-A calls — plain calls
 // whose callees all Discharge ALWAYS.
-func (s *Summaries) requireSites(caller *ssa.Function, key string) map[ssa.Instruction]bool {
+func (s *Summaries) requireSites(caller *ssa.Function, key targetKey) map[ssa.Instruction]bool {
 	k := summaryKey{caller, key}
 	if v, ok := s.aInstrs[k]; ok {
 		return v

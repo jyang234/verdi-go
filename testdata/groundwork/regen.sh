@@ -10,6 +10,13 @@
 #     go run ./cmd/flowmap >/dev/null   # ensure it builds
 #     testdata/groundwork/regen.sh
 #     git diff testdata/groundwork/goldens   # review the delta
+#
+# Section counts are pinned in goldens/manifest.json, which this script
+# deliberately does NOT rewrite: if a regen changes a section's size, the
+# manifest test fails until you update the manifest by hand in the same
+# commit — the ratchet that keeps a regen from laundering an analyzer
+# regression into the goldens (it happened once: see
+# TestGoldenSectionManifest).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

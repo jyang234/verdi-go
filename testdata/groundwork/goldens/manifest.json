@@ -1,0 +1,50 @@
+{
+  "blindsvc.graph.json": {
+    "nodes": 11,
+    "edges": 10,
+    "blind_spots": 2,
+    "entrypoints": 2,
+    "obligations": 0,
+    "effect_order": 0
+  },
+  "layeredsvc.branch-good.graph.json": {
+    "nodes": 14,
+    "edges": 14,
+    "blind_spots": 0,
+    "entrypoints": 2,
+    "obligations": 0,
+    "effect_order": 1
+  },
+  "layeredsvc.branch-skip.graph.json": {
+    "nodes": 14,
+    "edges": 14,
+    "blind_spots": 0,
+    "entrypoints": 2,
+    "obligations": 0,
+    "effect_order": 1
+  },
+  "layeredsvc.graph.json": {
+    "nodes": 13,
+    "edges": 13,
+    "blind_spots": 0,
+    "entrypoints": 2,
+    "obligations": 0,
+    "effect_order": 1
+  },
+  "loansvc.graph.json": {
+    "nodes": 39,
+    "edges": 47,
+    "blind_spots": 0,
+    "entrypoints": 3,
+    "obligations": 0,
+    "effect_order": 2
+  },
+  "obligsvc.graph.json": {
+    "nodes": 49,
+    "edges": 88,
+    "blind_spots": 0,
+    "entrypoints": 1,
+    "obligations": 23,
+    "effect_order": 44
+  }
+}

@@ -959,8 +959,26 @@
       "fn": "example.com/obligsvc.main",
       "effect": "boundary:bus PUBLISH loan.approved",
       "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndCharge",
+      "callee_site": "main.go:32",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
       "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
       "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "callee_site": "main.go:37",
       "always": true,
       "via": "example.com/obligsvc/internal/app.DisburseRacy"
     },
@@ -1013,8 +1031,26 @@
       "fn": "example.com/obligsvc.main",
       "effect": "boundary:bus PUBLISH loan.approved",
       "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndCharge",
+      "callee_site": "main.go:32",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
       "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
       "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "callee_site": "main.go:37",
       "always": true,
       "via": "example.com/obligsvc/internal/app.DeferredPublish"
     },
@@ -1067,8 +1103,26 @@
       "fn": "example.com/obligsvc.main",
       "effect": "boundary:bus PUBLISH loan.approved",
       "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndCharge",
+      "callee_site": "main.go:32",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
       "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
       "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "callee_site": "main.go:37",
       "always": true,
       "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
     },
@@ -1123,6 +1177,15 @@
       "effect_site": "main.go:32",
       "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
       "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "callee_site": "main.go:37",
       "always": true,
       "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
     },

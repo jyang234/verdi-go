@@ -154,5 +154,16 @@
       "name": "PUT /users/{id}",
       "fn": "(*example.com/layeredsvc/internal/handler.Server).UpdateUser"
     }
+  ],
+  "effect_order": [
+    {
+      "fn": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",
+      "effect": "boundary:db UPDATE users",
+      "effect_site": "internal/app/app.go:32",
+      "callee": "(*example.com/layeredsvc/internal/store.Store).InsertAudit",
+      "callee_site": "internal/app/app.go:35",
+      "always": true,
+      "via": "(*example.com/layeredsvc/internal/store.Store).UpdateUser"
+    }
   ]
 }
