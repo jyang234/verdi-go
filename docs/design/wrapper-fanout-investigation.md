@@ -75,33 +75,57 @@ Two facts, both load-bearing:
     which is exactly right here. The lift abstains only because the blind-spot
     label does not distinguish the two cases.
 
-## 4. Recommendation
+## 4. The lift abstention reproduced — and both levers refuted
 
-Two moves, in order of cost:
+Before recommending an unlock I reproduced the field's abstention in the
+summary engine and ran each proposed lever against it
+(`obligations/wrapperabstention_test.go`, committed). The hypothesis in an
+earlier draft of this note — that a `resolved-wide` reclassification, or VTA,
+would let the lifts fire at `doPublish` — **did not survive the measurement.**
 
-1. **Expose `--algo` on `flowmap graph` (small, measured benefit).** Thread
-   `callgraph.Options{Algo: …}` through `analyze.Analyze`. Default stays RTA
-   (determinism, golden discipline unchanged); a dense adopter trades CI time for
-   tighter cones. The measurement justifies it: 22→10 at the canonical site, and
-   the removed candidates are pure noise. This is the field's offered experiment,
-   now warranted by data. Add the shared-middleware fixture's RTA/VTA delta as a
-   golden so the benefit is locked.
+Two faithful shapes, both abstaining UNKNOWN under **both RTA and VTA**:
 
-2. **Split the HighFanOut disclosure — `resolved-wide` vs `blind` — (the real
-   fix, owner's decision).** A site whose every callee is a known in-graph
-   function, with no reflect/`<dynamic>`/unresolved component, is *resolved-wide*:
-   the lifts and groundwork's frontier checks can soundly reason over its full
-   candidate set instead of abstaining. This would let the lifts fire at exactly
-   the field's chokepoint *if* `doPublish`'s fan-out is fully enumerated (likely,
-   for a chi/oapi wrapper with no reflection). It changes what "blind spot" means
-   across the whole framework, so it ships as its own plan with both-ways
-   fixtures per the extension recipe — not as a rider here. The honest caveat:
-   "wide but resolved" still means the lift must hold for *all* N handlers, so a
-   guard rule will SATISFY only if every wrapped route is genuinely guarded —
-   which is the correct, useful answer, not an abstention.
+| shape | why it abstains | lever that would fix it |
+|---|---|---|
+| shared middleware (`mw.Serve` → `next.Serve`, `next` resolving back to `mw`) | self-referential SCC → recursion guard (D-CX1) | none measured: VTA does not break the self-loop in the engine's resolution |
+| handler stored as a func value in a router (`r.handle(pubHandler)`) — **the real oapi/chi shape** | the handler's address is taken → it can be invoked from framework code the unit cannot see | none: address-taking is a genuine soundness boundary |
 
-**Not recommended:** crediting a lift *through* a HighFanOut entry without
-resolving it (the literal reading of the field's ask #2). At a truly-blind site
-that is unsound (D-CX2); at a resolved-wide site the right move is to stop
-calling it blind (move 2), not to wave the lift through. Either way, "credit
-through the frontier" is the wrong framing — the measurement is why.
+Neither abstention is the lift being over-conservative about a fully-resolved
+site (the case the `resolved-wide` split targets). The summary engine
+*already* reasons soundly over a wide-but-resolved dispatch — `addressTaken`
+and `dynInvoke` are both false in the SCC case, so the split would not change
+its verdict. Both abstentions are **correct**: across a framework dispatch
+boundary the analysis genuinely cannot prove what precedes the handler.
+
+## 5. Recommendation (corrected)
+
+1. **The lift abstention at the wrapper is the honest end state, not a gap to
+   engineer away.** The lifts deliver where dispatch is statically resolved —
+   the field confirmed it (the orchestrator took every derived row, clean
+   subgraphs SATISFY). Across the router/wrapper they abstain, and that is the
+   framework being truthful. The lever is **rule anchoring**: keep a
+   must-precede rule's require and before on the same resolved side of the
+   dispatch boundary (the handler body and below), not spanning
+   `doPublish`→`publishWithFanout` through the wrapper. This is authoring
+   guidance + a documented limit, **no engine change** — and it is what to tell
+   the field.
+2. **Expose `--algo` on `flowmap graph` — keep, but demoted.** VTA's 22→10 is a
+   real precision win (it removes spurious candidates, helps blind-spot *noise*
+   and any check that counts callees) and is cheap. But it is **not** a lift
+   unlock — measured, §4 — so it ships as a modest precision option, not as the
+   answer to ask #2. Default stays RTA.
+3. **Drop the `resolved-wide`/`blind` split from the critical path.** It was
+   premised on the lift abstaining at a fully-resolved site; the reproduction
+   shows it does not. The split may still have independent value for
+   groundwork's *frontier checks* (which do treat HighFanOut as blind), but
+   that is a separate, lower-priority question — not the field's lift problem,
+   and not worth its framework-wide blast radius on this evidence.
+4. **Router-aware chain recovery: still out** (§3), now doubly so — even with a
+   perfect chain, the address-taken-handler boundary (the dominant real shape)
+   remains.
+
+**The framing correction stands and is now measured:** "credit through the
+frontier" is wrong because the frontier is real (address-taking,
+self-referential dispatch), not because the site is merely wide. The honest
+product answer is that the lifts are a *resolved-cone* instrument, and the
+wrapper boundary is where they correctly fall silent.

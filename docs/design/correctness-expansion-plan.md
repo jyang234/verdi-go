@@ -267,10 +267,14 @@ blind spots). What it settled, against the pre-committed gates:
   precision, not lift shape (the lift is sound; it refused to over-claim).
   **D-CX10** records the consequence: the lifts' payoff on a service is
   bounded by the dispatch precision at the dominating caller; the lever is
-  *shrinking the blind spot* (a VTA-refined call graph at the wrapper layer,
-  measured 22→10 at the canonical shared-middleware site —
-  [`wrapper-fanout-investigation.md`](wrapper-fanout-investigation.md)),
-  never crediting through it — crediting through a disclosed frontier is
+  rule anchoring — keeping require and before on the same statically-resolved
+  side of the dispatch boundary — never crediting through it. The two precision
+  levers first proposed (VTA refinement; a resolved-wide/blind split) were
+  **reproduced and refuted** as lift unlocks: the abstention comes from
+  address-taken handler registries and self-referential middleware SCCs, not
+  from over-conservatism at a resolved site, and persists under both RTA and
+  VTA ([`wrapper-fanout-investigation.md`](wrapper-fanout-investigation.md),
+  `obligations/wrapperabstention_test.go`) — crediting through a disclosed frontier is
   exactly the D-CX2 violation the whole design forbids. Abstention is the
   correct end state until the frontier is resolved.
 - **CX-3 growth is bounded and true** (event-bus 29→42, all `via`; the clean
