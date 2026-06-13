@@ -2,6 +2,51 @@ package policy
 
 import "testing"
 
+// TestBrokerBlock: the broker declaration loads, exposes its signed/unsigned
+// state, and rejects values outside each closed-vocabulary field — a typo'd
+// guarantee must not read on a fault card as a real (false) promise.
+func TestBrokerBlock(t *testing.T) {
+	p, err := Load("../../../testdata/groundwork/policies/bus-brokers.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, ok := p.Brokers["bus"]
+	if !ok {
+		t.Fatalf("no bus broker in %v", p.Brokers)
+	}
+	if b.Delivery != "at-least-once" || b.Ordered != "false" {
+		t.Errorf("broker = %+v", b)
+	}
+	if b.Signed() {
+		t.Error("the fixture block is intentionally unsigned (no warrant yet)")
+	}
+	b.SignedBy = "John"
+	if !b.Signed() {
+		t.Error("a block with signed_by must read as signed")
+	}
+
+	base := &Policy{Service: "s", Version: 1}
+	for _, bad := range []Broker{
+		{Delivery: "atleastonce"}, // not in the delivery vocabulary
+		{Ordered: "kinda"},        // not false|total|per-key:*
+		{Consumers: "mostly"},     // not idempotent|not-idempotent
+	} {
+		p := *base
+		p.Brokers = map[string]Broker{"bus": bad}
+		if err := p.Validate(); err == nil {
+			t.Errorf("Validate accepted an out-of-vocabulary broker field: %+v", bad)
+		}
+	}
+	// per-key:<key> and total are valid ordered values.
+	for _, ok := range []string{"false", "total", "per-key:account_id"} {
+		p := *base
+		p.Brokers = map[string]Broker{"bus": {Ordered: ok}}
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate rejected valid ordered %q: %v", ok, err)
+		}
+	}
+}
+
 func TestLoadValid(t *testing.T) {
 	p, err := Load("../../../testdata/groundwork/policies/layeredsvc.json")
 	if err != nil {

@@ -29,7 +29,30 @@ type Policy struct {
 	IOBudget          *IOBudget         `json:"io_budget,omitempty"`
 	BlindSpotRatchet  *BlindSpotRatchet `json:"blind_spot_ratchet,omitempty"`
 	EffectRatchet     *EffectRatchet    `json:"effect_ratchet,omitempty"`
+	Brokers           map[string]Broker `json:"brokers,omitempty"`
 }
+
+// Broker is a declared message-broker guarantee, keyed by bus name (e.g. "bus").
+// CX-5 chain cards print it verbatim as the *assumed* half of a cross-service
+// happens-before chain — the link no static analysis can establish, so it is
+// declared, never inferred (D-CX5). The values describe what the transport
+// guarantees; the card never strengthens them.
+//
+// SignedBy is the human warrant. A guarantee a responder reads on a fault card
+// needs a name behind it, not the tool's word — so an unsigned broker block is
+// printed with its values but flagged UNSIGNED, never silently treated as
+// warranted. The tool fills the values; only a person fills SignedBy.
+type Broker struct {
+	Transport string `json:"transport,omitempty"`
+	Delivery  string `json:"delivery,omitempty"`  // at-least-once | at-most-once | exactly-once
+	Ordered   string `json:"ordered,omitempty"`   // false | total | per-key:<key>
+	Consumers string `json:"consumers,omitempty"` // idempotent | not-idempotent
+	Dedup     string `json:"dedup,omitempty"`
+	SignedBy  string `json:"signed_by,omitempty"` // human warrant; empty = unsigned (assumed, pending sign-off)
+}
+
+// Signed reports whether the broker declaration carries a human warrant.
+func (b Broker) Signed() bool { return strings.TrimSpace(b.SignedBy) != "" }
 
 // Layer names an architectural tier and the import-path prefixes that belong to
 // it. Order is significant: layers are listed top (entry) to bottom (storage),
@@ -368,7 +391,35 @@ func (p *Policy) Validate() error {
 			}
 		}
 	}
+	for name, b := range p.Brokers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("brokers: a broker name is required (the bus key the card prints)")
+		}
+		// A printed guarantee must not assert a value outside its own
+		// vocabulary — a typo'd "delivery": "atleastonce" would read on a fault
+		// card as a real (false) guarantee. Validate the closed-vocabulary
+		// fields; free-form fields (transport, dedup) are printed as-is.
+		if b.Delivery != "" && !oneOf(b.Delivery, "at-least-once", "at-most-once", "exactly-once") {
+			return fmt.Errorf("brokers[%q].delivery %q: want at-least-once | at-most-once | exactly-once", name, b.Delivery)
+		}
+		if b.Ordered != "" && !(b.Ordered == "false" || b.Ordered == "total" || strings.HasPrefix(b.Ordered, "per-key:")) {
+			return fmt.Errorf("brokers[%q].ordered %q: want false | total | per-key:<key>", name, b.Ordered)
+		}
+		if b.Consumers != "" && !oneOf(b.Consumers, "idempotent", "not-idempotent") {
+			return fmt.Errorf("brokers[%q].consumers %q: want idempotent | not-idempotent", name, b.Consumers)
+		}
+	}
 	return nil
+}
+
+// oneOf reports whether s equals any of the allowed values.
+func oneOf(s string, allowed ...string) bool {
+	for _, a := range allowed {
+		if s == a {
+			return true
+		}
+	}
+	return false
 }
 
 // RootPackages returns the composition-root package paths (from the layering

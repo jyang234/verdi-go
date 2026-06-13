@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -41,6 +44,11 @@ func TestRunSmoke(t *testing.T) {
 			"../../testdata/groundwork/goldens/layeredsvc.graph.json",
 			"../../testdata/groundwork/goldens/layeredsvc.branch-good.graph.json",
 			"--scope", "example.com/layeredsvc/internal/handler,example.com/layeredsvc/internal/app"},
+		// chains composes the cross-service surface; it is observational (exit 0).
+		{"chains",
+			"--service", "loansvc=../../testdata/groundwork/goldens/loansvc.graph.json",
+			"--service", "obligsvc=../../testdata/groundwork/goldens/obligsvc.graph.json",
+			"--policy", "../../testdata/groundwork/policies/bus-brokers.json"},
 	}
 	for _, args := range cases {
 		if err := run(args); err != nil {
@@ -84,6 +92,10 @@ func TestRunErrors(t *testing.T) {
 		{"diff", "../../testdata/groundwork/goldens/layeredsvc.contract.json",
 			"../../testdata/groundwork/goldens/layeredsvc.branch.contract.json"},
 		{"diff", "/nonexistent/a.json", "/nonexistent/b.json"},
+		// chains with no graph is a usage error, not an empty surface.
+		{"chains"},
+		{"chains", "--service", "missingequals"},
+		{"chains", "/nonexistent/graph.json"},
 	}
 	for _, args := range cases {
 		if err := run(args); err == nil {
@@ -147,4 +159,57 @@ func TestVerifyStamp(t *testing.T) {
 	if err := verifyStamp(bare, "abc123", true); err == nil {
 		t.Error("unstamped graph accepted under --expect")
 	}
+}
+
+// TestRunChainsOutput: the cross-service surface labels each link proven/assumed,
+// prints the declared broker block flagged UNSIGNED (no warrant given), and is
+// honest about the half-open chains the current fixture fleet actually has.
+func TestRunChainsOutput(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"chains",
+			"--service", "loansvc=../../testdata/groundwork/goldens/loansvc.graph.json",
+			"--service", "obligsvc=../../testdata/groundwork/goldens/obligsvc.graph.json",
+			"--policy", "../../testdata/groundwork/policies/bus-brokers.json"}); err != nil {
+			t.Fatalf("chains: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"chain: loan.approved",
+		"[proven] producer — loansvc",
+		"[proven] producer — obligsvc",
+		"audit-before-publish: VIOLATED", // a real producer-side risk surfaced on the chain
+		"[assumed] broker — bus",
+		"UNSIGNED",                // values declared, no human warrant yet
+		"open downstream",         // loan.approved has no consumer in this fleet
+		"chain: payment.settled",  // consumed by loansvc
+		"commits db UPDATE loans", // the consumer's downstream effect
+		"open upstream",           // payment.settled has no producer in this fleet
+		"dynamically-named bus effect(s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("chains output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
+// wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done
 }
