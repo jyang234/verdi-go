@@ -267,7 +267,9 @@ blind spots). What it settled, against the pre-committed gates:
   precision, not lift shape (the lift is sound; it refused to over-claim).
   **D-CX10** records the consequence: the lifts' payoff on a service is
   bounded by the dispatch precision at the dominating caller; the lever is
-  *shrinking the blind spot* (a VTA-refined call graph at the wrapper layer),
+  *shrinking the blind spot* (a VTA-refined call graph at the wrapper layer,
+  measured 22→10 at the canonical shared-middleware site —
+  [`wrapper-fanout-investigation.md`](wrapper-fanout-investigation.md)),
   never crediting through it — crediting through a disclosed frontier is
   exactly the D-CX2 violation the whole design forbids. Abstention is the
   correct end state until the frontier is resolved.
