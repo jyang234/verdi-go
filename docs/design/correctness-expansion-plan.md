@@ -3,9 +3,13 @@
 **Status:** in progress — CX-0 (the summary engine), CX-2 (the must-precede
 lifts, `fromCallers`-gated per D-CX9), CX-3 (derived effect sites with
 `via` provenance), CX-1 (the must-release handoff credit), and CX-4 (the
-sensitive-flow rule pack in usage.md, with its locking test) shipped. Only
-CX-5 remains, parked on the adopter gate (E-CX5) and the field measurement
-run (E-CX6).
+sensitive-flow rule pack, fixed after the field run for unbindable targets)
+shipped and **measured on production substrate (§2c)**: O-CX2 trust
+monotonicity held on real 891-node graphs (only VIOLATED→CANT-PROVE moves),
+CX-1/CX-2/CX-3 are correct but their value is gated by dispatch precision at
+HighFanOut chokepoints (D-CX10), and the engine adds no measurable overhead
+at that scale. Only CX-5 remains, parked on the adopter gate (E-CX5) — the
+broker sign-off and incident citations are the outstanding human inputs.
 
 The §10 adversarial review ran before CX-2 merged and found four issues — F1
 (a conditionally-releasing deferred closure earned ALWAYS through
@@ -240,6 +244,54 @@ exists. What the numbers established:
   summaries-disabled vs. -enabled verdict diff on its CI graphs once CX has a
   prototype and return the deltas — trust monotonicity and the abstention
   budget measured where it counts.
+
+## 2c. Second field run (the post-build measurement, 2026-06-13)
+
+The deployment ran `correctness-field-run.md` end-to-end (OFF `9ae5b15` vs ON
+the branch tip; event-bus 891 nodes / 107 HighFanOut, cgate 103 nodes / 0
+blind spots). What it settled, against the pre-committed gates:
+
+- **O-CX2 held on production substrate.** Across the real graphs the only
+  ON-vs-OFF move was VIOLATED→CANT-PROVE — zero new VIOLATED, zero false
+  SATISFIED. The trust-monotonicity invariant is now *measured*, not just
+  fixture-proven. This is the headline result.
+- **One chokepoint gates both lifts, and the abstention is correct.**
+  `doPublish` — the caller holding the dominating `ValidatePayload` and the
+  parent of the `publishWithFanout` publishes — is itself a HighFanOut blind
+  spot (98 transitive callers, a chi/oapi wrapper over-approximation). So
+  must-precede entry-domination (Run 2) and effect_order derivation up the
+  publish path (Run 3) both *honestly abstain* at exactly that point rather
+  than credit through an unresolved frontier. E-CX1's named case
+  (`validate-before-publish` → SATISFIED) did **not** clear — it landed
+  CANT-PROVE with the precise note — but the cause is substrate dispatch
+  precision, not lift shape (the lift is sound; it refused to over-claim).
+  **D-CX10** records the consequence: the lifts' payoff on a service is
+  bounded by the dispatch precision at the dominating caller; the lever is
+  *shrinking the blind spot* (a VTA-refined call graph at the wrapper layer),
+  never crediting through it — crediting through a disclosed frontier is
+  exactly the D-CX2 violation the whole design forbids. Abstention is the
+  correct end state until the frontier is resolved.
+- **CX-3 growth is bounded and true** (event-bus 29→42, all `via`; the clean
+  services 0→0). The dual-fan-out incident answer did not surface on `Handle`
+  for the same `doPublish` reason; within `publishWithFanout` the ordering is
+  still captured.
+- **CX-4 had a real trust gap — found and fixed.** A `require_proof: true`
+  rule whose `to` named a third-party sink (zap, not a graph node) reported
+  HOLDS *vacuously* — the silent pass the framework exists to prevent, and
+  `require_proof` did nothing. Fixed: an unbindable `to`/`through` is now a
+  disclosed caution, escalated to a violation under `require_proof`, symmetric
+  with an inert `from` (a `to` that binds but is unreached stays a real
+  proof). The pack now documents the first-party-sink requirement, and the
+  field's reshape (an `applog` facade over zap) made the rule bind and fire.
+- **No measurable engine overhead at 891 nodes** (~2s OFF ≈ ON). The
+  efficiency follow-ons (per-label `never()` rescans, eager condensation,
+  merged sweeps) are **measured-unnecessary at this scale** and stay parked
+  until a much larger graph appears — the wall-clock retires their urgency.
+
+Two design questions the run surfaced are recorded for the owner: the
+dispatch-precision direction (D-CX10 — document-and-defer VTA refinement vs.
+build it now), and whether to expose a call-graph-algorithm knob on `flowmap
+graph` so a dense adopter can trade CI time for tighter cones.
 
 ## 3. CX-0 — the summary engine (`internal/static/obligations/summaries.go`)
 
