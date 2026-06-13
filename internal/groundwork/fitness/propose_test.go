@@ -235,6 +235,61 @@ func TestProposeConcurrentClassifiedWriteStillDetected(t *testing.T) {
 	}
 }
 
+// R6, direct-edge branch: a DIRECTLY concurrent opaque boundary edge
+// (`go store.ExecRaw()` whose non-constant SQL labels boundary:db call). Its
+// From is never added as a concurrent seed, so only the direct-edge scan can
+// see it — distinct from the cone path the other R6 test exercises. Must be
+// disclosed, not asserted away.
+func TestProposeConcurrentDirectOpaqueBoundaryDisclosed(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).Fire"
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: route, Sig: "func()", Tier: 1}},
+		Edges: []graph.Edge{
+			{From: route, To: "boundary:db call", Tier: 1, Boundary: "outbound-async", Concurrent: true},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+	if p.NoConcurrentReach != nil {
+		t.Errorf("a directly concurrent opaque write is unproven; want no rule, got %+v", p.NoConcurrentReach)
+	}
+	if strings.Contains(guide, "No concurrent path reaches a DB write today") {
+		t.Errorf("guide falsely claims no concurrent DB write on a directly concurrent db-call edge")
+	}
+	if sec := guideSection(guide, "Concurrency (no_concurrent_reach): not proposed"); !strings.Contains(sec, "UNPROVEN") {
+		t.Errorf("direct concurrent opaque write must be disclosed; section:\n%s", sec)
+	}
+}
+
+// R6, false-positive guard: a concurrent path reaching only db CONTROL ops
+// (PingContext/BeginTx — provably non-mutating, UnclassifiedDBLabel returns
+// false) must still propose the rule clean, NOT divert into the unproven
+// disclosure. The opacity escape hatch must not swallow analyzable non-writes.
+func TestProposeConcurrentControlOpsStillProposed(t *testing.T) {
+	const (
+		route   = "(*example.com/svc/internal/handler.Server).Do"
+		spawned = "(*example.com/svc/internal/worker.Worker).Run"
+	)
+	for _, op := range []string{"PingContext", "BeginTx"} {
+		g := &graph.Graph{
+			Nodes: []graph.Node{
+				{FQN: route, Sig: "func()", Tier: 1},
+				{FQN: spawned, Sig: "func()", Tier: 1},
+			},
+			Edges: []graph.Edge{
+				{From: route, To: spawned, Tier: 2, Concurrent: true},
+				{From: spawned, To: "boundary:db " + op, Tier: 1, Boundary: "outbound-sync"},
+			},
+		}
+		p, guide := Propose(graph.NewIndex(g), "svc")
+		if p.NoConcurrentReach == nil {
+			t.Errorf("%s is non-mutating; the rule must still be proposed", op)
+		}
+		if !strings.Contains(guide, "No concurrent path reaches a DB write today") {
+			t.Errorf("%s: expected the clean proposed claim", op)
+		}
+	}
+}
+
 // guideSection returns the body of the first "## ..." section whose header
 // contains titleSubstr, up to the next section header (or end of guide).
 func guideSection(guide, titleSubstr string) string {
