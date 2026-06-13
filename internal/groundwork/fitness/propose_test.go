@@ -287,6 +287,42 @@ func TestProposeConcurrentControlOpsStillProposed(t *testing.T) {
 		if !strings.Contains(guide, "No concurrent path reaches a DB write today") {
 			t.Errorf("%s: expected the clean proposed claim", op)
 		}
+		// worker.Run IS a concurrent first-party seed, so the note must NOT be the
+		// vacuous variant — guards against a seed-miscount silently flipping it.
+		if strings.Contains(guide, "Currently vacuous") {
+			t.Errorf("%s: a concurrent seed exists; the proposed note must not be vacuous", op)
+		}
+	}
+}
+
+// R6 coverage: a concurrent path reaching only a classified READ (db SELECT) is
+// provable — IsWrite=false and UnclassifiedDBLabel=false (SELECT is an excluded
+// verb) — so the rule must be proposed clean, NOT diverted into the UNPROVEN
+// disclosure. A regression dropping SELECT from the exclusion would surface here.
+func TestProposeConcurrentSelectStillProposed(t *testing.T) {
+	const (
+		route   = "(*example.com/svc/internal/handler.Server).Do"
+		spawned = "(*example.com/svc/internal/worker.Worker).Run"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: spawned, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: spawned, Tier: 2, Concurrent: true},
+			{From: spawned, To: "boundary:db SELECT users", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+	if p.NoConcurrentReach == nil {
+		t.Errorf("a concurrent classified read must propose the rule clean; got nil")
+	}
+	if !strings.Contains(guide, "No concurrent path reaches a DB write today") {
+		t.Errorf("expected the clean proposed claim for a concurrent SELECT")
+	}
+	if strings.Contains(guideSection(guide, "Concurrency (no_concurrent_reach)"), "UNPROVEN") {
+		t.Errorf("a concurrent SELECT is provable, not UNPROVEN")
 	}
 }
 

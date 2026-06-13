@@ -172,8 +172,7 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 		// writes instead of asserting the service writes nothing (R5).
 		if len(unclassified) > 0 {
 			g.section("Waypoint (must_pass_through): not proposed",
-				fmt.Sprintf("No CLASSIFIED DB write exists, but %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write DO exist (%s) — opaque writes may flow through them. A waypoint cannot be derived over writes the graph cannot see; if these routes mutate, name the intended seam by hand (or make the SQL constant so the verb becomes readable).",
-					len(unclassified), strings.Join(unclassified, ", ")))
+				"No CLASSIFIED DB write exists, but there are "+dbCallPhrase(unclassified)+" — opaque writes may flow through them. A waypoint cannot be derived over writes the graph cannot see; if these routes mutate, name the intended seam by hand (or make the SQL constant so the verb becomes readable).")
 		} else {
 			g.section("Waypoint (must_pass_through): not proposed", "No DB write effects exist — nothing to guard yet. Revisit when the service writes.")
 		}
@@ -244,8 +243,8 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 	// substrate the "every path" claim is classified-only — disclose so an opaque
 	// write bypassing the seam does not read as guarded (R5, same class as above).
 	if len(unclassified) > 0 {
-		body += fmt.Sprintf("\n\n**Caution — guarantee is classified-only**: %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s) are NOT proven to pass this seam — an opaque write reaching the DB outside `%s` would not be caught. Make the SQL constant, or confirm the seam covers these paths by hand.",
-			len(unclassified), strings.Join(unclassified, ", "), waypoint)
+		body += fmt.Sprintf("\n\n**Caution — guarantee is classified-only**: %s are NOT proven to pass this seam — an opaque write reaching the DB outside `%s` would not be caught. Make the SQL constant, or confirm the seam covers these paths by hand.",
+			dbCallPhrase(unclassified), waypoint)
 	}
 	g.section("Waypoint (must_pass_through): proposed", body)
 }
@@ -264,6 +263,18 @@ func dbWriteTargets() []string {
 		"boundary:db INSERT", "boundary:db UPDATE", "boundary:db DELETE",
 		"boundary:db UPSERT", "boundary:db MERGE", "boundary:db REPLACE",
 	}
+}
+
+// dbCallPhrase renders the canonical description of opaque DB effect labels —
+// non-constant SQL the labeler cannot read as a write — with their count and
+// sorted list. Every db-call disclosure (the four write-dependent proposers and
+// the closing summary) opens with this exact phrase so the shared wording
+// cannot drift between sites; each caller appends its own site-specific
+// consequence (R6 follow-up — the consequences genuinely differ, the noun
+// phrase must not).
+func dbCallPhrase(labels []string) string {
+	return fmt.Sprintf("%d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s)",
+		len(labels), strings.Join(labels, ", "))
 }
 
 // concurrentUnclassifiedDB returns the sorted distinct unclassified DB effect
@@ -391,9 +402,9 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 
 	if len(unproven) > 0 {
 		g.section("⚠️ Read-only status unproven — db-call routes excluded from the ratchet",
-			fmt.Sprintf("%d route(s) reach no CLASSIFIED write but DO reach %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s): %s.\n\n"+
+			fmt.Sprintf("%d route(s) reach no CLASSIFIED write but DO reach %s: %s.\n\n"+
 				"Their read-only status is UNPROVEN, so they were left OUT of `read-routes-stay-read-only` rather than ratcheted on a claim the graph cannot support — these routes MIGHT mutate. Review before trusting; making the SQL constant exposes the verb and lets init classify it.",
-				len(unproven), len(unclassLabels), strings.Join(setutil.SortedKeys(unclassLabels), ", "), shortList(unproven)))
+				len(unproven), dbCallPhrase(setutil.SortedKeys(unclassLabels)), shortList(unproven)))
 	}
 }
 
@@ -448,8 +459,7 @@ func proposeConcurrent(ix *graph.Index, p *policy.Policy, g *guide) {
 	if len(unclass) > 0 {
 		labels := setutil.SortedKeys(unclass)
 		g.section("Concurrency (no_concurrent_reach): not proposed",
-			fmt.Sprintf("A concurrent (goroutine/defer-spawned) path reaches %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s) — it MIGHT be an unsupervised concurrent write. \"No concurrent path reaches a DB write\" is therefore UNPROVEN on this substrate, so no `no-concurrent-db-writes` rule was ratcheted: it would assert a claim the graph cannot support and would fire the day the SQL is made constant (a strict analyzability improvement). Make the SQL constant to expose the verb, or confirm by hand that no goroutine/defer path mutates.",
-				len(labels), strings.Join(labels, ", ")))
+			"A concurrent (goroutine/defer-spawned) path reaches "+dbCallPhrase(labels)+" — it MIGHT be an unsupervised concurrent write. \"No concurrent path reaches a DB write\" is therefore UNPROVEN on this substrate, so no `no-concurrent-db-writes` rule was ratcheted: it would assert a claim the graph cannot support and would fire the day the SQL is made constant (a strict analyzability improvement). Make the SQL constant to expose the verb, or confirm by hand that no goroutine/defer path mutates.")
 		return
 	}
 	p.NoConcurrentReach = []policy.ConcurrentRule{{
@@ -492,8 +502,7 @@ func proposeBudget(ix *graph.Index, p *policy.Policy, g *guide) {
 	// Disclose so the budget number does not read as "writes are bounded" where the
 	// labeler went blind on the verb — the same caution fitness raises at gate time.
 	if len(unclassified) > 0 {
-		body += fmt.Sprintf("\n\n**Caution — this count is classified-only**: %d DB effect label(s) are built from non-constant SQL the labeler cannot read as a write (%s); they are NOT charged here, so a within-budget pass does not prove the write surface is bounded. `groundwork fitness` discloses the same on every run.",
-			len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", "))
+		body += "\n\n**Caution — this count is classified-only**: " + dbCallPhrase(setutil.SortedKeys(unclassified)) + "; they are NOT charged here, so a within-budget pass does not prove the write surface is bounded. `groundwork fitness` discloses the same on every run."
 	}
 	g.section("Write budget (io_budget): proposed", body)
 }
@@ -635,7 +644,7 @@ func (g *guide) closing(ix *graph.Index) {
 	}
 	unclassified := setutil.SortedKeys(uset)
 	if len(unclassified) > 0 {
-		cannot += fmt.Sprintf("- **Opaque DB writes**: %d DB effect label(s) (%s) are built from non-constant SQL the labeler cannot read as a write. init treats the routes and concurrent (goroutine/defer) paths reaching them as POSSIBLE writers — excluded from the read-only ratchet, uncounted in the write budget, and not lockable by the concurrency rule — but cannot tell whether they mutate. Make the SQL constant to expose the verb, or confirm the write surface by hand.\n", len(unclassified), strings.Join(unclassified, ", "))
+		cannot += "- **Opaque DB writes**: " + dbCallPhrase(unclassified) + ". init treats the routes and concurrent (goroutine/defer) paths reaching them as POSSIBLE writers — excluded from the read-only ratchet, uncounted in the write budget, and not lockable by the concurrency rule — but cannot tell whether they mutate. Make the SQL constant to expose the verb, or confirm the write surface by hand.\n"
 	}
 	g.section("What init CANNOT derive — the questions only the team can answer",
 		cannot+"\nNext steps: `groundwork policy-check` the file, run `groundwork fitness` (it passes clean today by construction), put the policy under CODEOWNERS, wire `groundwork verify` into CI, and after a quiet week tighten the observe-first postures.")
