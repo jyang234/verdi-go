@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
 
 // One scripted MCP session against the obligsvc golden: handshake, discovery,
@@ -73,8 +74,8 @@ func TestServeMCPSession(t *testing.T) {
 	if pv, _ := got[0].Result["protocolVersion"].(string); pv != "2024-11-05" {
 		t.Errorf("initialize protocolVersion = %q", pv)
 	}
-	if tools, _ := got[1].Result["tools"].([]any); len(tools) != 8 {
-		t.Errorf("tools/list = %d tools, want 8", len(tools))
+	if tools, _ := got[1].Result["tools"].([]any); len(tools) != 9 {
+		t.Errorf("tools/list = %d tools, want 9", len(tools))
 	}
 	if !strings.Contains(text(got[2]), "Binding rules") || !strings.Contains(text(got[2]), "partial-effect") {
 		t.Errorf("ground card missing binding rules: %q", text(got[2]))
@@ -122,6 +123,13 @@ func TestServeMCPFleetSession(t *testing.T) {
 		}
 		services[name] = srv
 	}
+	// The broker guarantee is fleet-wide; attach it to one loaded service so the
+	// chains lens prints the assumed link.
+	p, err := policy.Load("../../testdata/groundwork/policies/bus-brokers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	services["obligsvc"].p = p
 	fleet := newMCPFleet(services)
 	in := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"entrypoints","arguments":{}}}`,
@@ -131,6 +139,7 @@ func TestServeMCPFleetSession(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"triage","arguments":{"service":"loansvc","event":"payment.settled"}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"reach","arguments":{"service":"billing","fqn":"x"}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"entrypoints","arguments":{"service":"obligsvc"}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"chains","arguments":{}}}`,
 	}, "\n") + "\n"
 
 	var out strings.Builder
@@ -151,8 +160,8 @@ func TestServeMCPFleetSession(t *testing.T) {
 		}
 		got = append(got, r)
 	}
-	if len(got) != 7 {
-		t.Fatalf("want 7 responses, got %d", len(got))
+	if len(got) != 8 {
+		t.Fatalf("want 8 responses, got %d", len(got))
 	}
 	text := func(r resp) string {
 		content, _ := r.Result["content"].([]any)
@@ -198,6 +207,19 @@ func TestServeMCPFleetSession(t *testing.T) {
 	}
 	if isErr(got[6]) || !strings.Contains(text(got[6]), "/transfer") || strings.Contains(text(got[6]), "obligsvc ") {
 		t.Errorf("scoped entrypoints must be the single-service unprefixed form: %q", text(got[6]))
+	}
+	ch := text(got[7])
+	for _, want := range []string{
+		"chain: loan.approved",
+		"[proven] producer — obligsvc",
+		"[assumed] broker — bus",
+		"UNSIGNED",               // the attached block carries no warrant
+		"open downstream",        // no consumer of loan.approved in this fleet
+		"chain: payment.settled", // consumed by loansvc
+	} {
+		if !strings.Contains(ch, want) {
+			t.Errorf("chains lens missing %q:\n%s", want, ch)
+		}
 	}
 }
 

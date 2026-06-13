@@ -108,12 +108,14 @@ boundary the analysis genuinely cannot prove what precedes the handler.
    dispatch boundary (the handler body and below), not spanning
    `doPublish`→`publishWithFanout` through the wrapper. This is authoring
    guidance + a documented limit, **no engine change** — and it is what to tell
-   the field.
+   the field. **Shipped:** `docs/rule-anchoring.md` (field-facing).
 2. **Expose `--algo` on `flowmap graph` — keep, but demoted.** VTA's 22→10 is a
    real precision win (it removes spurious candidates, helps blind-spot *noise*
    and any check that counts callees) and is cheap. But it is **not** a lift
    unlock — measured, §4 — so it ships as a modest precision option, not as the
-   answer to ask #2. Default stays RTA.
+   answer to ask #2. Default stays RTA. **Shipped:** `flowmap graph --algo
+   rta|vta|cha` (the call graph builds with the chosen algorithm; default RTA
+   keeps output byte-identical).
 3. **Drop the `resolved-wide`/`blind` split from the critical path.** It was
    premised on the lift abstaining at a fully-resolved site; the reproduction
    shows it does not. The split may still have independent value for

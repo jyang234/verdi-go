@@ -24,6 +24,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/render"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/boundary"
+	"github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/graphio"
 	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
@@ -108,12 +109,17 @@ func cmdGraph(args []string) error {
 	fs := flag.NewFlagSet("graph", flag.ContinueOnError)
 	entry := fs.String("entry", "", `scope to the subgraph reachable from this entry point (e.g. "POST /loan-application")`)
 	stamp := fs.String("stamp", "", "identity stamp (e.g. the commit SHA) recorded in the graph; consumers can verify with --expect")
+	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta" (refines interface-dense dispatch — fewer spurious callees), "cha" (rootless fallback)`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	dir := dirArg(fs)
 
-	res, err := analyze.Analyze(dir)
+	opt, err := algoOption(*algo)
+	if err != nil {
+		return err
+	}
+	res, err := analyze.Analyze(dir, opt)
 	if err != nil {
 		return err
 	}
@@ -132,6 +138,23 @@ func cmdGraph(args []string) error {
 	}
 	_, err = os.Stdout.Write(b)
 	return err
+}
+
+// algoOption maps the --algo flag to a call-graph Options. The empty string and
+// "rta" both select the default (RTA); only "vta" and "cha" deviate. An unknown
+// value is rejected here with a friendly message rather than deferred to the
+// builder's generic error.
+func algoOption(s string) (callgraph.Options, error) {
+	switch s {
+	case "", "rta":
+		return callgraph.Options{Algo: callgraph.AlgoRTA}, nil
+	case "vta":
+		return callgraph.Options{Algo: callgraph.AlgoVTA}, nil
+	case "cha":
+		return callgraph.Options{Algo: callgraph.AlgoCHA}, nil
+	default:
+		return callgraph.Options{}, fmt.Errorf("unknown --algo %q (want rta, vta, or cha)", s)
+	}
 }
 
 // cmdDiff prints the structural, prioritized change set between two canonical
@@ -724,7 +747,7 @@ usage: flowmap <command> [flags] [dir]
 
 commands:
   boundary [--check] [dir]   generate the gated boundary contract (--check: verify currency)
-  graph [--entry R] [dir]    print the non-gated call-graph view
+  graph [--entry R] [--algo A] [dir]  print the non-gated call-graph view (--algo rta|vta|cha; default rta)
   diff <a.json> <b.json>     print the structural change set between two golden traces
   coverage [--flows D] [dir] boundary effects no committed flow exercises
   behavior ingest <traces>   map an OTLP/JSON trace export to boundary effects

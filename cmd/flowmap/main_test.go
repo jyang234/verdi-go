@@ -109,6 +109,20 @@ func TestRunGraph(t *testing.T) {
 	}
 }
 
+// TestRunGraphAlgo: --algo selects the call-graph algorithm. rta/vta/cha all
+// build; an unknown value is rejected before any analysis runs.
+func TestRunGraphAlgo(t *testing.T) {
+	silenceStdout(t)
+	for _, a := range []string{"rta", "vta", "cha"} {
+		if err := run([]string{"graph", "--algo", a, fixtureDir()}); err != nil {
+			t.Fatalf("graph --algo %s: %v", a, err)
+		}
+	}
+	if err := run([]string{"graph", "--algo", "bogus", fixtureDir()}); err == nil {
+		t.Fatal("expected an error for an unknown --algo value")
+	}
+}
+
 // TestRunBoundaryCheckStale verifies the gate fails when no contract is committed.
 func TestRunBoundaryCheckStale(t *testing.T) {
 	silenceStdout(t)

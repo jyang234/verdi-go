@@ -1,0 +1,13 @@
+{
+  "service": "bus",
+  "version": 1,
+  "brokers": {
+    "bus": {
+      "transport": "sns->sqs (standard queue)",
+      "delivery": "at-least-once",
+      "ordered": "false",
+      "consumers": "idempotent",
+      "dedup": "inbox UNIQUE(source_id, topic)"
+    }
+  }
+}

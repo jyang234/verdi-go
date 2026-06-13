@@ -14,9 +14,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -71,6 +73,8 @@ func run(args []string) error {
 		return cmdGround(args[1:])
 	case "mcp":
 		return cmdMCP(args[1:])
+	case "chains":
+		return cmdChains(args[1:])
 	case "fitness":
 		return cmdFitness(args[1:])
 	case "review":
@@ -107,6 +111,7 @@ usage:
   groundwork mcp <graph.json> [--policy <policy.json>]  serve triage/reach/ground/exceptions as MCP tools over stdio
   groundwork mcp --service <name>=<graph.json> ...      same server holding several services' maps (+ fleet-events lens)
   groundwork mcp ... --http <addr> [--token <secret>]    team-shared streamable-HTTP transport (token required off loopback)
+  groundwork chains <graph.json>... [--service <name>=<graph.json>]... [--policy <p.json>]...  cross-service effect chains (CX-5, observational)
   groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
@@ -316,6 +321,102 @@ func cmdReach(args []string) error {
 		}
 	}
 	return nil
+}
+
+// cmdChains composes the cross-service effect-chain cards (CX-5). It loads a
+// fleet of service graphs, joins their publishers to consumers by event name,
+// and prints — per event — a happens-before chain whose links are labeled
+// proven (a per-service graph fact: a publish's commit ordering, a consumer
+// handler's effects) or assumed (the declared broker guarantee, never
+// inferred). The broker block, if any, is read from the --policy file(s).
+//
+// It is observational and always exits 0: it surfaces what already committed
+// and what a consumer does with an event, it never gates. A chain that has no
+// producer or no consumer in the loaded fleet is printed as open, not hidden.
+func cmdChains(args []string) error {
+	servicePairs, args := takeValueFlags(args, "--service", "-service")
+	policyPaths, args := takeValueFlags(args, "--policy", "-policy")
+
+	type svcSpec struct{ name, path string }
+	var specs []svcSpec
+	seen := map[string]bool{}
+	addSpec := func(name, path string) error {
+		if !validServiceName(name) {
+			return fmt.Errorf("service name %q: letters, digits, '.', '_', '-' only", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate service name %q", name)
+		}
+		seen[name] = true
+		specs = append(specs, svcSpec{name: name, path: path})
+		return nil
+	}
+	for _, pair := range servicePairs {
+		name, path, ok := strings.Cut(pair, "=")
+		if !ok || name == "" || path == "" {
+			return fmt.Errorf("--service wants <name>=<graph.json>, got %q", pair)
+		}
+		if err := addSpec(name, path); err != nil {
+			return err
+		}
+	}
+	for _, path := range args {
+		if err := addSpec(serviceNameFromPath(path), path); err != nil {
+			return err
+		}
+	}
+	if len(specs) == 0 {
+		return fmt.Errorf("groundwork chains needs at least one graph: pass <graph.json> positionally or with --service name=graph.json")
+	}
+
+	var fleet []chains.Service
+	for _, s := range specs {
+		g, err := graph.LoadFile(s.path)
+		if err != nil {
+			return err
+		}
+		fleet = append(fleet, chains.Service{Name: s.name, Index: graph.NewIndex(g)})
+	}
+
+	// The broker guarantee is fleet-wide: the bus is one thing, so it must have
+	// one declared source. Reading it from several policies that disagree would
+	// print a guarantee no one authored — refuse rather than pick.
+	brokers := map[string]policy.Broker{}
+	for _, pp := range policyPaths {
+		path := pp
+		if _, p, ok := strings.Cut(pp, "="); ok {
+			path = p
+		}
+		pol, err := policy.Load(path)
+		if err != nil {
+			return err
+		}
+		for name, b := range pol.Brokers {
+			// A broker named by two policies is only a problem if they DISAGREE:
+			// the bus is one thing, so two different guarantees for it have no
+			// single source. An identical re-declaration is harmless (mirrors the
+			// mcp chains lens, which conflicts only on differing values).
+			if existing, dup := brokers[name]; dup && existing != b {
+				return fmt.Errorf("broker %q declared differently by more than one --policy; the bus guarantee must have a single source", name)
+			}
+			brokers[name] = b
+		}
+	}
+
+	fmt.Print(chains.Build(fleet, brokers).Render())
+	return nil
+}
+
+// serviceNameFromPath derives a service name from a graph file path for the
+// positional form, stripping the conventional ".graph.json" (or ".json") suffix.
+func serviceNameFromPath(path string) string {
+	base := filepath.Base(path)
+	for _, suf := range []string{".graph.json", ".json"} {
+		if strings.HasSuffix(base, suf) {
+			return strings.TrimSuffix(base, suf)
+		}
+	}
+	return base
 }
 
 // cmdFitness evaluates a policy's invariants against a graph. It prints every

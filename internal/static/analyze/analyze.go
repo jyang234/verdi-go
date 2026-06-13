@@ -27,7 +27,16 @@ type Result struct {
 
 // Analyze runs load → SSA → roots → call graph for the service at dir. A missing
 // .flowmap.yaml is fine (defaults apply); a malformed one is an error.
-func Analyze(dir string) (*Result, error) {
+//
+// The call-graph algorithm defaults to RTA (the zero Options value). A single
+// opts may override it — VTA refines interface-dense dispatch, CHA is the
+// rootless fallback — so the graph view can opt into more precision without
+// changing the default for boundary, coverage, or any other caller.
+func Analyze(dir string, opts ...callgraph.Options) (*Result, error) {
+	var opt callgraph.Options
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	cfg, err := config.LoadDir(dir)
 	if err != nil {
 		return nil, err
@@ -41,7 +50,7 @@ func Analyze(dir string) (*Result, error) {
 		return nil, err
 	}
 	rs := roots.Discover(prog, Registrars(cfg))
-	g, err := callgraph.Build(prog, rs, callgraph.Options{})
+	g, err := callgraph.Build(prog, rs, opt)
 	if err != nil {
 		return nil, err
 	}

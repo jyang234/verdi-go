@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/ground"
@@ -453,6 +454,11 @@ func toolDefs() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			"name":        "chains",
+			"description": "Cross-service effect chains (CX-5): per bus event, a happens-before chain whose links are labeled proven (a per-service graph fact: the publish's commit ordering, the consumer handler's effects/obligations) or assumed (the declared broker guarantee, printed verbatim, never inferred). Answers 'if this publish faulted, what already committed, and what does the consumer do with the event?'. Observational, never a gate; the broker block is read from a service's --policy and flagged UNSIGNED until a human warrants it.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			"name":        "fitness",
 			"description": "Evaluate every policy invariant against a loaded graph: violations, cautions, and obligation verdicts. Requires the service to be started with --policy.",
 			"inputSchema": obj(map[string]any{}),
@@ -509,6 +515,9 @@ func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
 	}
 	if call.Name == "fleet-events" {
 		return f.fleetEvents(), "*"
+	}
+	if call.Name == "chains" {
+		return f.chains(), "*"
 	}
 	if call.Name == "entrypoints" && call.Arguments.Service == "" && len(f.names) > 1 {
 		return f.fleetEntrypoints(), "*"
@@ -604,6 +613,34 @@ func (f *mcpFleet) fleetEvents() map[string]any {
 		}
 	}
 	return toolText(b.String())
+}
+
+// chains composes the cross-service effect-chain cards over the loaded fleet
+// (CX-5). The broker guarantee is read from the loaded services' policies: the
+// bus is one thing, so a guarantee declared by two services that disagree is
+// refused rather than printed as if authored. staleNotes prefixes any
+// since-redeployed graph, the same disclosure every fleet lens carries.
+func (f *mcpFleet) chains() map[string]any {
+	var fleet []chains.Service
+	brokers := map[string]policy.Broker{}
+	conflict := ""
+	for _, name := range f.names {
+		s := f.services[name]
+		fleet = append(fleet, chains.Service{Name: name, Index: s.ix})
+		if s.p == nil {
+			continue
+		}
+		for bn, b := range s.p.Brokers {
+			if existing, ok := brokers[bn]; ok && existing != b {
+				conflict = bn
+			}
+			brokers[bn] = b
+		}
+	}
+	if conflict != "" {
+		return toolError(fmt.Sprintf("broker %q is declared differently by more than one loaded policy; the bus guarantee must have a single source", conflict))
+	}
+	return toolText(f.staleNotes() + chains.Build(fleet, brokers).Render())
 }
 
 // call answers one per-service tool against this service's graph and policy.
