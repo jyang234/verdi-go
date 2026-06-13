@@ -1,6 +1,6 @@
 # CX-5 — the cross-service chain surface (observational, shipped)
 
-> **`ACTIVE`** · shipped observational surface; the gate is pending · _reviewed 2026-06-13_
+> **`DESIGN RECORD`** · the shipped observational surface (the gate itself is unbuilt — see `correctness-expansion-plan.md`) · _reviewed 2026-06-13_
 
 CX-5 is built **up to but not including the gate**. The observational surface —
 `groundwork chains` plus a fleet-MCP `chains` lens — composes the per-service

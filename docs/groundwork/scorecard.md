@@ -1,6 +1,6 @@
 # Capability scorecard — an honest assessment
 
-> **`ACTIVE`** · capability scorecard — re-graded on new evidence · _reviewed 2026-06-13_
+> **`DESIGN RECORD`** · capability assessment, graded by evidence (re-grade on new evidence) · _reviewed 2026-06-13_
 
 **As of:** 2026-06-11, branch `claude/design-ideas-planning-0ymckn`.
 **Purpose:** what this toolset can actually do, graded by *evidence class*, with

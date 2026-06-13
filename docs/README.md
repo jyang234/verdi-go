@@ -12,7 +12,7 @@ Every doc header begins with one of:
 
 | Badge | Meaning |
 |---|---|
-| **`ACTIVE`** | Current source of truth or in active use — specs, guides, living measurement records, and design work still in flight. Trust it; keep it current. |
+| **`ACTIVE`** | Current and in active use — the usage guides, the specs/deep-dive reference, and design docs still awaiting implementation. Trust it; keep it current. |
 | **`DESIGN RECORD`** | The work it describes has shipped. Kept for the rationale, decisions, and pressure-test trail — not a to-do list. Accurate as history, not necessarily a guide to today's surface. |
 | **`HISTORICAL`** | Superseded — its content has been folded into a spec or refined into a plan. Kept only for the reasoning that produced what replaced it. Do not treat as current. |
 
@@ -62,12 +62,12 @@ design record behind them.
 | [`README.md`](groundwork/README.md) | `ACTIVE` | Overview + index into the design record. |
 | [`usage.md`](groundwork/usage.md) | `ACTIVE` | Practical guide: commands and a worked review. |
 | [`personas.md`](groundwork/personas.md) | `ACTIVE` | Before/after for the responder, developer, and reviewer. |
-| [`drills.md`](groundwork/drills.md) | `ACTIVE` | Triage effectiveness, measured as committed tests. |
-| [`scorecard.md`](groundwork/scorecard.md) | `ACTIVE` | Honest capability assessment, graded by evidence class. |
 | [`distilled-learnings.md`](groundwork/distilled-learnings.md) | `DESIGN RECORD` | The thesis and what was established about the substrate. |
 | [`mr-review-artifacts.md`](groundwork/mr-review-artifacts.md) | `DESIGN RECORD` | The unfakeable MR review artifact design. |
 | [`pressure-test.md`](groundwork/pressure-test.md) | `DESIGN RECORD` | Adversarial pressure test of the central claims. |
 | [`implementation-plan.md`](groundwork/implementation-plan.md) | `DESIGN RECORD` | Plan-of-record for building groundwork (built). |
+| [`drills.md`](groundwork/drills.md) | `DESIGN RECORD` | Triage effectiveness, measured as committed tests — the evidence record. |
+| [`scorecard.md`](groundwork/scorecard.md) | `DESIGN RECORD` | Honest capability assessment, graded by evidence class. |
 
 ## design/ — plans & briefs
 
@@ -76,12 +76,10 @@ decision record; a few are still in flight.
 
 | Doc | Status | What it covers |
 |---|---|---|
-| [`correctness-expansion-plan.md`](design/correctness-expansion-plan.md) | `ACTIVE` | The correctness (CX) expansion; CX-5 parked at the adopter gate. |
-| [`cx5-chains-surface.md`](design/cx5-chains-surface.md) | `ACTIVE` | The shipped cross-service chain surface (observational; gate pending). |
-| [`cx5-inputs-request.md`](design/cx5-inputs-request.md) | `ACTIVE` | The two human inputs that unblock chain-card gating. |
-| [`cx5-inputs-response.md`](design/cx5-inputs-response.md) | `ACTIVE` | The field response, recorded and independently verified. |
-| [`wrapper-fanout-investigation.md`](design/wrapper-fanout-investigation.md) | `ACTIVE` | HighFanOut wrapper investigation (D-CX10); owner decision pending. |
+| [`correctness-expansion-plan.md`](design/correctness-expansion-plan.md) | `ACTIVE` | The correctness (CX) expansion; the CX-5 gate is the one phase still awaiting implementation. |
 | [`correctness-field-run.md`](design/correctness-field-run.md) | `DESIGN RECORD` | Protocol for the 2026-06-12 field measurement run. |
+| [`cx5-chains-surface.md`](design/cx5-chains-surface.md) | `DESIGN RECORD` | The shipped cross-service chain surface (observational; the gate is unbuilt). |
+| [`cx5-inputs-response.md`](design/cx5-inputs-response.md) | `DESIGN RECORD` | The field response feeding CX-5, recorded and independently verified. |
 | [`implementation_plan.md`](design/implementation_plan.md) | `DESIGN RECORD` | The original flowmap phased plan; v1 core (Phases 0–8) shipped. |
 | [`post-hoc-behavioral-ingestion.md`](design/post-hoc-behavioral-ingestion.md) | `DESIGN RECORD` | Post-hoc (`ModePostHoc`) ingestion brief; stages 1–2 landed. |
 | [`guardrail-extensions-plan.md`](design/guardrail-extensions-plan.md) | `DESIGN RECORD` | Deterministic guardrail extensions GX-1..5 (shipped). |
@@ -90,6 +88,8 @@ decision record; a few are still in flight.
 | [`mcp-expansion-plan.md`](design/mcp-expansion-plan.md) | `DESIGN RECORD` | MCP tiers 2–3 (all built). |
 | [`policy-coverage-extensions-plan.md`](design/policy-coverage-extensions-plan.md) | `DESIGN RECORD` | Policy coverage extensions PC-1..3 (shipped; PC-4 parked). |
 | [`review-fixes-plan.md`](design/review-fixes-plan.md) | `DESIGN RECORD` | The branch-wide review fixes RF-1..7 (shipped). |
+| [`wrapper-fanout-investigation.md`](design/wrapper-fanout-investigation.md) | `HISTORICAL` | Exploratory HighFanOut investigation (D-CX10); conclusions folded into `rule-anchoring` + the `--algo` flag. |
+| [`cx5-inputs-request.md`](design/cx5-inputs-request.md) | `HISTORICAL` | Exploratory field-input request, now answered by `cx5-inputs-response`. |
 
 ### design/ideas/ — pre-plan discussions · **`HISTORICAL`**
 

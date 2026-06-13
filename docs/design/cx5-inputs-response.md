@@ -1,6 +1,6 @@
 # CX-5 inputs — field response, recorded and independently checked
 
-> **`ACTIVE`** · field response — recorded & independently verified · _reviewed 2026-06-13_
+> **`DESIGN RECORD`** · field-input record — the response, recorded & independently verified · _reviewed 2026-06-13_
 
 Counterpart to `cx5-inputs-request.md`. Records the field partner team's
 2026-06-13 response and the independent verification done from **this** repo.

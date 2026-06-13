@@ -1,6 +1,6 @@
 # Investigation: the HTTP-wrapper HighFanOut that gates the CX lifts (D-CX10)
 
-> **`ACTIVE`** · open investigation — owner decision pending · _reviewed 2026-06-13_
+> **`HISTORICAL`** · exploratory investigation — conclusions folded into `../guides/rule-anchoring.md` and the shipped `--algo` flag · _reviewed 2026-06-13_
 
 **Status:** investigated, measured, recommendation below. No engine change shipped
 yet — the deeper fix is a framework-wide decision for the owner (§4).

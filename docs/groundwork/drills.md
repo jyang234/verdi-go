@@ -1,6 +1,6 @@
 # Triage effectiveness drills — the record
 
-> **`ACTIVE`** · measurement record — re-run as committed tests · _reviewed 2026-06-13_
+> **`DESIGN RECORD`** · triage-effectiveness measurement record (re-run as committed tests) · _reviewed 2026-06-13_
 
 The incident-triage plan (§7, E1–E4) demands that triage's value be *measured*
 against named keep/kill thresholds, not asserted. E1–E3 are simulated against
