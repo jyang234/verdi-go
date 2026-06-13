@@ -66,6 +66,12 @@ func verdict(p *policy.Policy, d graphDelta, a *Artifact) Verdict {
 	if p.GatesEffects() && len(a.NewWriteTargets) > 0 {
 		return Block
 	}
+	// StandingCautions is deliberately NOT a signal here: it holds identically on
+	// base and branch, so it says nothing about THIS change — a body-only change
+	// with only a standing caution must still abstain (NO-STRUCTURAL-SIGNAL), and
+	// the abstain render surfaces the caution anyway (R1). Adding it to hasSignal
+	// would misreport such a change as STRUCTURALLY-CLEAR — "the graph says it's
+	// fine" — exactly where logic review matters most. Leave it out.
 	hasSignal := !d.empty() || len(a.NewCautions) > 0 || len(a.NewBlindSpots) > 0 || len(a.NewWriteTargets) > 0 || a.DBLabelDrift != nil
 	if !hasSignal {
 		return NoStructuralSignal

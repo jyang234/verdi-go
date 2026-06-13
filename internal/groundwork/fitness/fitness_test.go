@@ -303,9 +303,10 @@ func TestIOBudgetNoCautionWhenClassified(t *testing.T) {
 }
 
 // UnclassifiedDBLabel buckets only labels that MIGHT be an unproven write.
-// Driver/transaction control (Ping*, Begin*, Commit, Rollback) and pool/session
-// setters (Set*) reach the DB but cannot mutate a row, so they are excluded;
-// "db call", ExecContext, and Query* stay in (a Postgres INSERT…RETURNING rides
+// Driver/transaction control (Ping*, Begin*, Commit, Rollback), statement prep
+// and connection/stat methods (Prepare*, Conn, Stats), and pool/session setters
+// (Set*) reach the DB but cannot mutate a row, so they are excluded; "db call",
+// ExecContext, and Query* stay in (a Postgres INSERT…RETURNING rides
 // QueryContext, so a Query* might mutate). This is the R2 bucket narrowing.
 func TestUnclassifiedDBLabelExcludesNonMutating(t *testing.T) {
 	cases := map[string]bool{
@@ -317,6 +318,10 @@ func TestUnclassifiedDBLabelExcludesNonMutating(t *testing.T) {
 		"boundary:db BeginTx":           false, // transaction control — excluded
 		"boundary:db Commit":            false, // transaction control — excluded
 		"boundary:db Rollback":          false, // transaction control — excluded
+		"boundary:db Prepare":           false, // statement prep, no row mutation — excluded
+		"boundary:db PrepareContext":    false, // statement prep, no row mutation — excluded
+		"boundary:db Conn":              false, // connection acquisition — excluded
+		"boundary:db Stats":             false, // pool statistics — excluded
 		"boundary:db SetMaxOpenConns":   false, // pool config — excluded
 		"boundary:db INSERT ledger":     false, // classified write, not unclassified
 		"boundary:db SELECT applicants": false, // classified read, not unclassified

@@ -176,13 +176,24 @@ func UnclassifiedDBLabel(e graph.Edge) (string, bool) {
 // control method or a connection-pool/session setter — a sql.DB/sql.Tx call that
 // reaches the database but provably cannot write a row, so it must not count as
 // an unclassified-write frontier. The op is the method name graphio fell back to
-// when the statement was not a compile-time constant (Ping/PingContext, Begin/
-// BeginTx, Commit, Rollback, SetMaxOpenConns, …); a constant transaction-control
-// statement ("COMMIT", "SET search_path") lands here too. It is matched
-// case-insensitively to cover both the method-name and constant-SQL labels.
+// when the statement was not a compile-time constant.
+//
+// The set mirrors the DB boundaries graphio actually emits: the labeler treats
+// every database/sql method EXCEPT the result-cursor surface (Scan/Next/Close/…)
+// as a boundary, "leaving the actual Query*/Exec* round-trips (and Ping/Begin/
+// Prepare) as the only DB boundaries" (static/features/hints.go). Of those, only
+// Query*/Exec* can execute a statement — Ping*, Begin*/Commit/Rollback, Conn,
+// Stats, and Prepare*/Stmt-creation send no row-mutating SQL, and Set* is
+// pool/session config. A constant transaction-control statement ("COMMIT", "SET
+// search_path") lands here too. Matched case-insensitively to cover both the
+// method-name and constant-SQL labels.
 func nonMutatingDBControl(op string) bool {
 	switch strings.ToUpper(op) {
-	case "PING", "PINGCONTEXT", "BEGIN", "BEGINTX", "COMMIT", "ROLLBACK":
+	case "PING", "PINGCONTEXT",
+		"BEGIN", "BEGINTX",
+		"COMMIT", "ROLLBACK",
+		"CONN", "STATS",
+		"PREPARE", "PREPARECONTEXT":
 		return true
 	}
 	return strings.HasPrefix(strings.ToUpper(op), "SET")
