@@ -1,5 +1,7 @@
 # CX-5 inputs — the two human answers that unblock chain cards
 
+> **`HISTORICAL`** · exploratory field-input request — answered in `cx5-inputs-response.md` · _reviewed 2026-06-13_
+
 **To:** the groundwork deployment team (Koalafi Shared Tech)
 **Why:** CX-5 (cross-service effect chains) is the last unbuilt phase. It is
 *observational-first* and rests on two things a tool cannot compute — a broker

@@ -1,5 +1,7 @@
 # Trace Canonicalization Transform — Specification
 
+> **`ACTIVE`** · component specification (source of truth) · _reviewed 2026-06-13_
+
 The transform that turns a raw OpenTelemetry trace (the observed output of one E2E flow) into a **deterministic, run-independent snapshot**. This snapshot is the golden file the test asserts against, and the source from which the human-readable sequence diagram is rendered. It is the load-bearing piece: if the transform is not perfectly deterministic across runs of the same flow under fixed data, the gate produces false diffs and erodes trust.
 
 ---

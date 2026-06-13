@@ -1,5 +1,7 @@
 # incident triage: implementation plan
 
+> **`DESIGN RECORD`** · implemented; kept as design record · _reviewed 2026-06-13_
+
 **Status:** implemented — IT-0 through IT-4 all shipped. Kept as the design
 record (D-IT1..5 and the graph-per-deploy prerequisite). Refined from
 [`ideas/incident-triage.md`](ideas/incident-triage.md). Grounded in the actual

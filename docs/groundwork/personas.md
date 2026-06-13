@@ -1,5 +1,7 @@
 # Three seats, before and after — how Claude Code's behavior changes
 
+> **`ACTIVE`** · narrative guide (before/after) · _reviewed 2026-06-13_
+
 The fastest way to understand this toolset is not its feature list but its
 effect on the three people (and their agent) who touch a service: the
 **incident responder**, the **feature developer**, and the **PR reviewer**.

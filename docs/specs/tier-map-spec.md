@@ -1,5 +1,7 @@
 # Salience Tier-Map — Specification
 
+> **`ACTIVE`** · component specification (source of truth) · _reviewed 2026-06-13_
+
 The single classifier both pipelines call to assign `Tier`. The static extractor tiers call-graph edges; canonicalization (§3.6) tiers spans to decide what survives a threshold and what the diagram foregrounds. Same policy, same code, two sources — so a logging call is tier 4 whether seen statically or as a span, and a publish is tier 1 either way. It is deterministic: a fixed config plus a given operation yields exactly one tier, with no model anywhere in the path.
 
 Tiers, lowest number = most consequential (log-level analogy): **1 = error, 2 = warn, 3 = info, 4 = debug.** The default snapshot/view threshold is `warn` (tiers 1–2).

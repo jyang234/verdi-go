@@ -1,5 +1,7 @@
 # Static Extractor — Specification
 
+> **`ACTIVE`** · component specification (source of truth) · _reviewed 2026-06-13_
+
 The static pipeline. From the repo's code it builds a function-level call graph (via `go/ssa` + `go/callgraph`), then derives two distinct outputs from it:
 
 - **The gated artifact — the inter-service boundary contract** (plus its blind-spot manifest): the events the service publishes and consumes, its external-service dependencies, and its exposed entry points. This is stable under internal refactoring, and it is what routes to review.

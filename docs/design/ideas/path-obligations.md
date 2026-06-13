@@ -1,5 +1,7 @@
 # Idea: path-obligation checks — augmenting the intraprocedural ("buy") leg
 
+> **`HISTORICAL`** · refined into `../path-obligations-plan.md`; kept for the reasoning · _reviewed 2026-06-13_
+
 **Status:** refined into a plan-of-record — see
 [`../path-obligations-plan.md`](../path-obligations-plan.md). This document is
 the original design discussion, kept for the reasoning.

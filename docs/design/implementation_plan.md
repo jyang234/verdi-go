@@ -1,5 +1,7 @@
 # flowmap (golang-code-graph) — Phased Implementation Plan
 
+> **`DESIGN RECORD`** · original flowmap design record — v1 core shipped · _reviewed 2026-06-13_
+
 **Status:** historical — the original flowmap design record. Phases 0–8 (the
 v1 core) are fully shipped. Of the deferred surface, Phase 10 (post-hoc
 capture) shipped via [`post-hoc-behavioral-ingestion.md`](post-hoc-behavioral-ingestion.md);

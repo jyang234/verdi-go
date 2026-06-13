@@ -1,5 +1,7 @@
 # Integration guide: flowmap on an existing OTLP e2e suite
 
+> **`ACTIVE`** · integration guide (step-by-step) · _reviewed 2026-06-13_
+
 This is the step-by-step for adding flowmap's post-hoc behavioral mapping to an
 e2e suite you **already run** — Dockerized services emitting OTLP through a
 collector, driven by an existing test runner (Playwright, k6, Go, whatever). You

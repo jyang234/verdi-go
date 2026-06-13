@@ -1,5 +1,7 @@
 # groundwork: distilled learnings
 
+> **`DESIGN RECORD`** · the thesis & distilled learnings · _reviewed 2026-06-13_
+
 A concise record of what we established about using the event-bus call graph as
 a grounding and verification substrate for AI-accelerated engineering.
 

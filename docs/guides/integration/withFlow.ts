@@ -3,7 +3,7 @@
 // golden by <slug>. This is the entire per-test authoring cost.
 //
 // It assumes your services run a `baggagecopy` span processor that promotes the
-// flowmap.flow baggage member onto spans (see docs/integration/README.md) —
+// flowmap.flow baggage member onto spans (see docs/guides/integration/README.md) —
 // baggage alone does not reach the collector.
 //
 // No flowmap client library in TypeScript: this only sets the standard W3C

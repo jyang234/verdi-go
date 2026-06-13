@@ -1,5 +1,7 @@
 # Triage effectiveness drills — the record
 
+> **`DESIGN RECORD`** · triage-effectiveness measurement record (re-run as committed tests) · _reviewed 2026-06-13_
+
 The incident-triage plan (§7, E1–E4) demands that triage's value be *measured*
 against named keep/kill thresholds, not asserted. E1–E3 are simulated against
 the loansvc dogfood fixture and run as **committed tests**

@@ -1,5 +1,7 @@
 # Idea: incident triage — blast radius and failure-scenario exploration
 
+> **`HISTORICAL`** · refined into `../incident-triage-plan.md`; kept for the reasoning · _reviewed 2026-06-13_
+
 **Status:** refined into a plan-of-record — see
 [`../incident-triage-plan.md`](../incident-triage-plan.md). This document is
 the original design discussion, kept for the reasoning.

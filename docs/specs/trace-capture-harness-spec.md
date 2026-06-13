@@ -1,5 +1,7 @@
 # Trace Capture & Correlation Harness — Specification
 
+> **`ACTIVE`** · component specification (source of truth) · _reviewed 2026-06-13_
+
 The harness produces canonicalization's input: **a complete, scoped trace for exactly one flow.** Everything downstream (canonicalize → snapshot → diff → gate) assumes that input is correct and complete. Get this wrong and you either snapshot a truncated trace (a silent false golden) or include another test's spans (a noisy one).
 
 A flow runs as: **arrange** (fix data, set up capture, mint a correlation key) → **trigger** (drive the entry) → **await** (wait for completeness) → **collect & scope** (gather exactly this flow's spans, reconstruct the tree) → handoff to canonicalization.

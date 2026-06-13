@@ -1,5 +1,7 @@
 # Adopting flowmap in a service
 
+> **`ACTIVE`** · adoption guide · _reviewed 2026-06-13_
+
 flowmap verifies what your service does to the world — the events it
 publishes/consumes and the services it calls — and gates unintended changes to a
 human reviewer. This is the end-to-end recipe for wiring it into a Go service.

@@ -1,5 +1,7 @@
 # path obligations: implementation plan
 
+> **`DESIGN RECORD`** · implemented; kept as design record · _reviewed 2026-06-13_
+
 **Status:** implemented — OB-0 through OB-3 all shipped. Kept as the design
 record (the must-release correction in §4, D-OB1/5/6). Refined from
 [`ideas/path-obligations.md`](ideas/path-obligations.md). Grounded in the actual

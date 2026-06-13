@@ -1,5 +1,7 @@
 # CX field measurement run — protocol
 
+> **`DESIGN RECORD`** · field-run protocol; the 2026-06-12 run is complete · _reviewed 2026-06-13_
+
 **For:** the deployment that produced the 2026-06-12 measurement report.
 **Answers:** O-CX2 (trust monotonicity), E-CX1 (named field cases), E-CX2
 (abstention budget), E-CX4 (sensitive-flow noise), E-CX6 (the promotion

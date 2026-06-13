@@ -123,10 +123,11 @@ threaded through every output.
 |---|---|
 | Understand the concepts and every groundwork surface | [`docs/groundwork/usage.md`](docs/groundwork/usage.md) — the practical guide, primer included |
 | See how it changes the day-to-day — responder, developer, reviewer, each before/after with Claude Code | [`docs/groundwork/personas.md`](docs/groundwork/personas.md) |
-| Wire flowmap into a service (OTel → contract → flow tests → CI) | [`docs/adopting-flowmap.md`](docs/adopting-flowmap.md) |
+| Wire flowmap into a service (OTel → contract → flow tests → CI) | [`docs/guides/adopting-flowmap.md`](docs/guides/adopting-flowmap.md) |
 | Understand *why* it is built this way (thesis, failure modes, pressure tests) | [`docs/groundwork/README.md`](docs/groundwork/README.md) and [`docs/groundwork/distilled-learnings.md`](docs/groundwork/distilled-learnings.md) |
-| See the component specifications (the source of truth) | `docs/*.md` (tier map, static extractor, canonicalization, capture harness, golden diff) |
+| See the component specifications (the source of truth) | `docs/specs/*.md` (tier map, static extractor, canonicalization, capture harness, golden diff, scope & guarantees) |
 | Follow the feature plans and their validation criteria | `docs/design/*-plan.md` |
+| Find your way around all the docs (with a stale/active map) | [`docs/README.md`](docs/README.md) |
 | See how well it actually works — and what is honestly unproven | [`docs/groundwork/drills.md`](docs/groundwork/drills.md) (measured) and [`docs/groundwork/scorecard.md`](docs/groundwork/scorecard.md) (graded by evidence class) |
 | A complete worked example service | `testdata/fixtures/loansvc` (and `testdata/groundwork/{layeredsvc,blindsvc,obligsvc}`) |
 

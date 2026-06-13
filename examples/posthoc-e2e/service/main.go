@@ -1,6 +1,6 @@
 // Command loansvc-otlp is a runnable, OTLP-exporting stand-in for a real
 // instrumented service — the worked reference for wiring a service into
-// flowmap's post-hoc path (docs/integration). It emits the loansvc boundary
+// flowmap's post-hoc path (docs/guides/integration). It emits the loansvc boundary
 // shape (an inbound entry, two outbound HTTP deps, a publish, two DB writes) and
 // shows the three things an adopting service must get right:
 //

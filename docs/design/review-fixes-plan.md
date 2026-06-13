@@ -1,5 +1,7 @@
 # review-fixes: implementation plan
 
+> **`DESIGN RECORD`** · implemented; kept as quality record · _reviewed 2026-06-13_
+
 **Status:** implemented — RF-1 through RF-7 all shipped. Kept as the quality
 record (the root-cause taxonomy and the disclosed residuals in §4). The plan
 was for fixing the 16 confirmed findings from the

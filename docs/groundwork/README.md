@@ -1,5 +1,7 @@
 # groundwork
 
+> **`ACTIVE`** · groundwork overview & design-record index · _reviewed 2026-06-13_
+
 `groundwork` is a deterministic consumer of flowmap's static call graph: it turns
 the "what can happen" map into computed verification artifacts — architectural
 fitness functions, blast-radius/reach, fail-closed pre-merge gates, and unfakeable

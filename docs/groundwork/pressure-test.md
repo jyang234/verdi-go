@@ -1,5 +1,7 @@
 # Pressure test of the latest findings
 
+> **`DESIGN RECORD`** · shipped; kept for rationale · _reviewed 2026-06-13_
+
 We attacked the three central claims — (1) the artifact is unfakeable, (2) the
 diff catches what reviewers miss, (3) it reports only newly-introduced
 violations — by trying to break them with adversarial inputs, not confirm them.
