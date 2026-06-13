@@ -141,6 +141,42 @@ func TestReviewReachExisting(t *testing.T) {
 	}
 }
 
+// A branch that moves a write off constant SQL — the labeler can no longer read
+// its verb, so it becomes "db call" — erodes the whole write-surface family at
+// once. The review discloses the fidelity drop as a graph-health signal, with no
+// policy rule required (F2).
+func TestReviewDBLabelDrift(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).Create"
+	const store = "(*example.com/svc/internal/store.Store).Insert"
+	mk := func(dbLabel string) *graph.Graph {
+		return &graph.Graph{
+			Nodes: []graph.Node{
+				{FQN: route, Sig: "func()", Tier: 1},
+				{FQN: store, Sig: "func() error", Tier: 1},
+			},
+			Edges: []graph.Edge{
+				{From: route, To: store, Tier: 2},
+				{From: store, To: "boundary:db " + dbLabel, Tier: 1, Boundary: "outbound-sync"},
+			},
+		}
+	}
+	base := mk("INSERT things") // classified
+	branch := mk("call")        // moved off constant SQL — now unreadable
+	p := &policy.Policy{Service: "svc", Version: 1}
+
+	a := Review(p, base, branch)
+	if a.DBLabelDrift == nil {
+		t.Fatal("a classified→unclassified DB move must surface label drift")
+	}
+	if a.DBLabelDrift.Base != 0 || a.DBLabelDrift.Branch != 1 {
+		t.Fatalf("drift = %+v, want base 0 → branch 1", *a.DBLabelDrift)
+	}
+	// The reverse move (gaining fidelity) is not a regression — stay silent.
+	if rev := Review(p, branch, base); rev.DBLabelDrift != nil {
+		t.Fatalf("regaining fidelity must not report drift; got %+v", *rev.DBLabelDrift)
+	}
+}
+
 func TestReviewDeterministic(t *testing.T) {
 	p := loadPolicy(t)
 	base := loadGraph(t, "layeredsvc.graph.json")

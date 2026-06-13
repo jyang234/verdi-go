@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/capture"
+	"github.com/jyang234/golang-code-graph/internal/buildinfo"
 	"github.com/jyang234/golang-code-graph/internal/canon"
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/coverage"
@@ -31,6 +32,8 @@ import (
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
+// When unset, buildinfo.Version recovers the module/VCS stamp Go embeds so an
+// installed binary still names itself (see internal/buildinfo).
 var version = "dev"
 
 func main() {
@@ -47,7 +50,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("flowmap", version)
+		fmt.Println("flowmap", buildinfo.Version(version))
 		return nil
 	case "boundary":
 		return cmdBoundary(args[1:])
@@ -213,6 +216,20 @@ func cmdCoverage(args []string) error {
 		return err
 	}
 
+	// Zero flows is not full coverage — it is coverage of nothing. Saying "every
+	// effect is exercised by 0 flow(s)" reads as a clean pass while having checked
+	// nothing, the exact false-green this tool exists to avoid. Disclose it, and
+	// point at the likely cause: a directory of post-hoc *.effects.json goldens,
+	// which this in-process path (it joins *.golden.json canonical traces) does
+	// not read (F7).
+	if len(traces) == 0 {
+		fmt.Printf("coverage: no *.golden.json flow snapshots in %s — checked nothing (this is not coverage)\n", gdir)
+		if hint := otherGoldenHint(gdir); hint != "" {
+			fmt.Print(hint)
+		}
+		return nil
+	}
+
 	r := coverage.Delta(c, traces)
 	if r.Empty() {
 		fmt.Printf("coverage: every boundary effect is exercised by %d flow(s)\n", len(traces))
@@ -223,6 +240,17 @@ func cmdCoverage(args []string) error {
 		fmt.Printf("  [%s] %s\n", e.Category, e.Key)
 	}
 	return nil
+}
+
+// otherGoldenHint detects post-hoc goldens (*.effects.json) sitting in a flows
+// directory that `coverage` found no *.golden.json in, and returns a one-line
+// pointer to the right surface — so an empty in-process coverage run names the
+// format mismatch instead of leaving the reader to guess.
+func otherGoldenHint(dir string) string {
+	if effects, _ := filepath.Glob(filepath.Join(dir, "*.effects.json")); len(effects) > 0 {
+		return fmt.Sprintf("  hint: %s holds %d post-hoc *.effects.json golden(s); those are gated by `flowmap behavior ingest --flows-dir`, not `coverage`\n", dir, len(effects))
+	}
+	return ""
 }
 
 // cmdBehavior dispatches the behavioral subcommands. Today: `ingest`, the

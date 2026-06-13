@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -187,6 +188,48 @@ func TestRunCoverage(t *testing.T) {
 	if err := run([]string{"coverage", "--flows", flowsDir, fixtureDir()}); err != nil {
 		t.Fatalf("coverage on the fixture should succeed: %v", err)
 	}
+}
+
+// coverage against a directory with no *.golden.json flow snapshots must not read
+// as a clean pass: it discloses that it checked nothing, and — when the directory
+// holds post-hoc *.effects.json goldens instead — names the format mismatch (F7).
+func TestRunCoverageNoFlowsDiscloses(t *testing.T) {
+	flowsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(flowsDir, "x.effects.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := run([]string{"coverage", "--flows", flowsDir, fixtureDir()}); err != nil {
+			t.Fatalf("coverage stays informational (exit 0): %v", err)
+		}
+	})
+	if strings.Contains(out, "every boundary effect is exercised") {
+		t.Fatalf("zero flows must not read as full coverage:\n%s", out)
+	}
+	if !strings.Contains(out, "checked nothing") || !strings.Contains(out, "effects.json") {
+		t.Fatalf("want a 'checked nothing' disclosure naming the effects.json mismatch:\n%s", out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
+// wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done
 }
 
 // otlpFixture is the committed OTLP/JSON trace export used by the post-hoc tests.

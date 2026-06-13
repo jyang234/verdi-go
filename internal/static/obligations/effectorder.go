@@ -118,6 +118,26 @@ func OrderFacts(fn *ssa.Function, effects []EffectSite, baseDir string) []Effect
 		}
 		return a.Effect < b.Effect
 	})
+	return dedupeFacts(out)
+}
+
+// dedupeFacts drops exact-duplicate order facts. The effect/fallible double loop
+// pairs every collected effect site with every fault site, so a function that
+// records the same effect site more than once (a derived site that coincides
+// with a direct one, repeated collection) would otherwise emit byte-identical
+// rows. Identity here is the whole fact — distinct sites are preserved; only
+// genuine duplicates collapse, keeping the graph's effect_order section honest
+// about how many distinct facts it carries.
+func dedupeFacts(in []EffectOrder) []EffectOrder {
+	if len(in) < 2 {
+		return in
+	}
+	out := in[:1]
+	for _, f := range in[1:] {
+		if f != out[len(out)-1] {
+			out = append(out, f)
+		}
+	}
 	return out
 }
 
