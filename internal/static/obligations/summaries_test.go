@@ -789,3 +789,19 @@ func TestReleaseLift(t *testing.T) {
 		t.Errorf("the abstention must name the unprovable callee, got %q", leaky[0].Detail)
 	}
 }
+
+// member and sccOf must cover the identical key set after construction — the
+// inUnit doc comment's invariant, asserted so the two structures cannot
+// silently drift.
+func TestUniverseMembershipMatchesCondensation(t *testing.T) {
+	fns := buildProg(t, dischargeSrc)
+	s := NewSummaries(testUnit(fns))
+	if len(s.member) != len(s.sccOf) {
+		t.Fatalf("member has %d keys, condensation %d", len(s.member), len(s.sccOf))
+	}
+	for fn := range s.member {
+		if _, ok := s.sccOf[fn]; !ok {
+			t.Errorf("%s in member but not in condensation", fn)
+		}
+	}
+}

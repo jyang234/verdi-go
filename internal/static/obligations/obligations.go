@@ -451,25 +451,21 @@ func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, 
 			}
 		}
 	}
-	// handoff classifies a call the resource flows into: covered (all callees
-	// ALWAYS release), continue (all NEVER — provably not a release), or
-	// unknown (name) — beyond proof either way.
-	const (
-		notHandoff = iota
-		handoffCovered
-		handoffContinue
-		handoffUnknown
-	)
-	classify := func(in ssa.CallInstruction) (int, string) {
+	// classify inspects a call the resource flows into: covered (every callee
+	// ALWAYS releases — an inline release equivalent), or unknown (a named
+	// maybe-release, beyond proof either way). Everything else — not a
+	// handoff, a builtin, or callees that provably NEVER release — returns
+	// the zero values: the walk just keeps going.
+	classify := func(in ssa.CallInstruction) (covered bool, unknown string) {
 		if sums == nil || !operandInWeb(in, web) {
-			return notHandoff, ""
+			return false, ""
 		}
 		cands, frontier := sums.resolve(in)
 		if frontier {
-			return handoffUnknown, "<dynamic>"
+			return false, "<dynamic>"
 		}
 		if len(cands) == 0 {
-			return notHandoff, "" // builtin or no callee: not a release vehicle
+			return false, "" // builtin or no callee: not a release vehicle
 		}
 		always, never := true, true
 		var name string
@@ -488,14 +484,14 @@ func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, 
 		}
 		switch {
 		case always:
-			return handoffCovered, ""
+			return true, ""
 		case never:
-			return handoffContinue, ""
+			return false, "" // every candidate provably never releases: keep walking
 		default:
 			if name == "" {
-				name = cands[0].RelString(nil) // mixed ALWAYS/NEVER candidates
+				name = cands[0].RelString(nil) // mixed ALWAYS/NEVER: dispatch-dependent
 			}
-			return handoffUnknown, name
+			return false, name
 		}
 	}
 
@@ -517,13 +513,13 @@ func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, 
 					if anyRef(releases, in) {
 						return token.NoPos, false // released: this path is covered
 					}
-					kind, name := classify(in)
-					if kind == handoffCovered {
+					covered, unknown := classify(in)
+					if covered {
 						return token.NoPos, false // proven release in the callee
 					}
-					if kind == handoffUnknown {
+					if unknown != "" {
 						if res.unknown == "" {
-							res.unknown = name
+							res.unknown = unknown
 						}
 						if unknownCovers {
 							return token.NoPos, false // no leak claim past a maybe-release
@@ -533,13 +529,13 @@ func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, 
 					if deferReleases(in, releases) {
 						return token.NoPos, false // deferred release covers every later exit
 					}
-					kind, name := classify(in)
-					if kind == handoffCovered {
+					covered, unknown := classify(in)
+					if covered {
 						return token.NoPos, false // deferred proven release covers exits
 					}
-					if kind == handoffUnknown {
+					if unknown != "" {
 						if res.unknown == "" {
-							res.unknown = name
+							res.unknown = unknown
 						}
 						if unknownCovers {
 							return token.NoPos, false

@@ -189,3 +189,41 @@ func TestGraphDeterministic(t *testing.T) {
 		t.Error("graph view is not deterministic across builds")
 	}
 }
+
+// TestEffectOrderKeepsCarrierFaultSites locks the loansvc partial-effect
+// facts against the regen-laundering failure mode (code-review finding, CX-3
+// regression): when a call becomes a DERIVED effect site (the callee
+// ALWAYS-publishes), it must remain a fault site for the OTHER effects above
+// it — the direct publishes at evaluate.go:89/92 certainly-precede the
+// fallible notify call, and those rows must never silently vanish from the
+// emitted graph, whatever the goldens say.
+func TestEffectOrderKeepsCarrierFaultSites(t *testing.T) {
+	res := analyzeFixture(t)
+	g, err := graphio.Build(res, "")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	const evaluate = "(*example.com/loansvc/internal/origination.Evaluator).Evaluate"
+	const notify = "(*example.com/loansvc/internal/origination.Evaluator).notify"
+	want := map[string]bool{
+		"boundary:bus PUBLISH loan.approved":          false,
+		"boundary:bus PUBLISH disbursement.initiated": false,
+	}
+	for _, f := range g.EffectOrder {
+		if f.Fn == evaluate && f.Callee == notify && f.Always {
+			if _, ok := want[f.Effect]; ok {
+				want[f.Effect] = true
+			}
+		}
+	}
+	for effect, found := range want {
+		if !found {
+			t.Errorf("loansvc lost the fact %q certainly-precedes the fallible %s call", effect, notify)
+		}
+	}
+	for _, f := range g.EffectOrder {
+		if f.EffectSite == f.CalleeSite && f.Via != "" {
+			t.Errorf("a derived effect paired with its own carrier call: %+v", f)
+		}
+	}
+}

@@ -153,6 +153,17 @@ func NewSummaries(u *Unit) *Summaries {
 	return s
 }
 
+// inUnit reports universe membership. member looks redundant with sccOf
+// presence, but it is NOT derivable from it: resolve() consults membership
+// while computeSCC is still BUILDING sccOf (the adjacency pass), and an empty
+// membership there marks every candidate a frontier — erasing self-loops from
+// the condensation and unleashing unbounded creditCall recursion. The
+// separate map is the bootstrap order made explicit; a post-construction
+// assertion that the two key sets agree lives in the unit tests.
+func (s *Summaries) inUnit(fn *ssa.Function) bool {
+	return s.member[fn]
+}
+
 // Discharges answers the bottom-up question: does fn, on every path from
 // entry to every exit, call one of targets (ALWAYS); provably never reach one
 // (NEVER); or neither (UNKNOWN)? Targets use the rule "import/path#Symbol"
@@ -192,7 +203,7 @@ func (s *Summaries) EntryDominated(fn *ssa.Function, require string) Summary {
 // (D-OB6).
 func (s *Summaries) EntryDominatedNote(fn *ssa.Function, require string) (Summary, string) {
 	key := s.intern([]string{require})
-	if !s.member[fn] {
+	if !s.inUnit(fn) {
 		return SummaryUnknown, "the function is outside the analyzed unit"
 	}
 	return s.entryDominatedMemo(fn, key)
@@ -227,7 +238,7 @@ func (s *Summaries) intern(targets []string) string {
 // ---- bottom-up: Discharges ----------------------------------------------------
 
 func (s *Summaries) dischargeKey(fn *ssa.Function, key string) Summary {
-	if !s.member[fn] {
+	if !s.inUnit(fn) {
 		return SummaryUnknown
 	}
 	k := summaryKey{fn, key}
@@ -410,7 +421,7 @@ func (s *Summaries) resolve(site ssa.CallInstruction) (cands []*ssa.Function, fr
 		}
 	}
 	for _, c := range raw {
-		if !s.member[c] || len(c.Blocks) == 0 {
+		if !s.inUnit(c) || len(c.Blocks) == 0 {
 			frontier = true
 			continue
 		}
