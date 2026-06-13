@@ -8,8 +8,12 @@ shipped and **measured on production substrate (§2c)**: O-CX2 trust
 monotonicity held on real 891-node graphs (only VIOLATED→CANT-PROVE moves),
 CX-1/CX-2/CX-3 are correct but their value is gated by dispatch precision at
 HighFanOut chokepoints (D-CX10), and the engine adds no measurable overhead
-at that scale. Only CX-5 remains, parked on the adopter gate (E-CX5) — the
-broker sign-off and incident citations are the outstanding human inputs.
+at that scale. CX-5's **observational surface is now shipped** (`groundwork
+chains` + a fleet-MCP lens; see `cx5-chains-surface.md`): cross-service chain
+cards, links labeled proven/assumed, the broker block printed from policy and
+flagged UNSIGNED. What remains parked at the adopter gate (E-CX5) is the
+*gating* `chain` rule kind and the two human inputs it rests on — the broker
+sign-off and a cited incident — neither of which the tool supplies.
 
 The §10 adversarial review ran before CX-2 merged and found four issues — F1
 (a conditionally-releasing deferred closure earned ALWAYS through
@@ -479,6 +483,11 @@ introducing named scrubbers is an adopter refactor that *upgrades* the rule
 to `must_pass_through` later — never a heuristic stand-in.
 
 ## 8. CX-5 — cross-service effect chains (observational)
+
+**Status: the observational surface is shipped** — `groundwork chains` and the
+fleet-MCP `chains` lens, documented in `cx5-chains-surface.md`. The gating
+`chain` rule kind below remains deferred to E-CX5. This section is the design it
+was built from.
 
 A groundwork fleet surface (`groundwork chains`, and a fleet-MCP lens)
 composing facts that already exist per service:

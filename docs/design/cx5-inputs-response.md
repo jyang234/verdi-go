@@ -85,6 +85,21 @@ documented outcome — a surface no responder reached for should not ship.
 
 ---
 
+## Update (2026-06-13): the observational surface shipped
+
+At the field's direction ("everything short of gating"), the CX-5 cross-service
+chain surface is now built — `groundwork chains` + a fleet-MCP lens, documented
+in `cx5-chains-surface.md`. It composes the proven per-service facts into chain
+cards and prints the broker block from policy. Crucially, it did **not** change
+either answer this doc records:
+
+- The broker block is wired into policy as `brokers` data and printed on every
+  card flagged **UNSIGNED** — the values, with no warrant. The signature line
+  below is still John's.
+- Input 2's checkboxes are still empty. The surface ships observational on the
+  honest current fleet (half-open chains and all); no citation was manufactured,
+  and the *gating* `chain` rule kind is deferred to E-CX5.
+
 ## What is blocking, precisely
 
 1. **John's signature** on the Input 1 block — then it lands in `.flowmap.yaml`
