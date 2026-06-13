@@ -290,6 +290,101 @@ func TestProposeConcurrentControlOpsStillProposed(t *testing.T) {
 	}
 }
 
+// R6 coverage (direct-edge classified branch): a concurrent boundary edge that
+// IS a classified write (`go store.Insert()`). Its From is never a seed, so only
+// the first loop catches it, with a message ("A concurrent DB write already
+// exists") distinct from the cone path — previously exercised by no test.
+func TestProposeConcurrentDirectClassifiedWriteDetected(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).Fire"
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: route, Sig: "func()", Tier: 1}},
+		Edges: []graph.Edge{
+			{From: route, To: "boundary:db INSERT messages", Tier: 1, Boundary: "outbound-async", Concurrent: true},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+	if p.NoConcurrentReach != nil {
+		t.Errorf("a directly concurrent classified write exists; want no rule, got %+v", p.NoConcurrentReach)
+	}
+	sec := guideSection(guide, "Concurrency (no_concurrent_reach): not proposed")
+	if !strings.Contains(sec, "A concurrent DB write already exists") {
+		t.Errorf("direct classified concurrent write must report the existing-write message; section:\n%s", sec)
+	}
+	if strings.Contains(sec, "UNPROVEN") {
+		t.Errorf("a classified write is proven, not unproven; section:\n%s", sec)
+	}
+}
+
+// R6 coverage (mixed cone precedence): a concurrent cone reaching BOTH a
+// classified write and an opaque label — the classified write must win (rule
+// withheld via the existing-write message), regardless of effect iteration
+// order. Pins the precedence the early-return at the write check provides, so a
+// refactor that collected opaque labels ahead of that return cannot regress
+// into surfacing UNPROVEN on a substrate that has a provable concurrent write.
+func TestProposeConcurrentMixedConeClassifiedWins(t *testing.T) {
+	const (
+		route   = "(*example.com/svc/internal/handler.Server).Do"
+		spawned = "(*example.com/svc/internal/worker.Worker).Run"
+		store   = "(*example.com/svc/internal/storage.Store).Save"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: spawned, Sig: "func()", Tier: 1},
+			{FQN: store, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: spawned, Tier: 2, Concurrent: true},
+			{From: spawned, To: store, Tier: 2},
+			{From: store, To: "boundary:db INSERT things", Tier: 1, Boundary: "outbound-sync"},
+			{From: store, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+	if p.NoConcurrentReach != nil {
+		t.Errorf("a classified concurrent write exists; want no rule, got %+v", p.NoConcurrentReach)
+	}
+	sec := guideSection(guide, "Concurrency (no_concurrent_reach): not proposed")
+	if !strings.Contains(sec, "already reaches a DB write") || strings.Contains(sec, "UNPROVEN") {
+		t.Errorf("classified write must win over opaque on a mixed cone; section:\n%s", sec)
+	}
+}
+
+// R6 follow-up (closing union): a goroutine spawned off a NON-route path (here,
+// in main, which routeUnclassifiedDB skips) that performs an opaque write is
+// flagged by the concurrency section but invisible to a route-scoped walk. The
+// closing "Opaque DB writes" summary must union the concurrent cone so it does
+// not under-report relative to the concurrency disclosure.
+func TestProposeClosingUnionsConcurrentOpaqueWrites(t *testing.T) {
+	const (
+		mainFn = "example.com/svc/cmd/svc.main"
+		reaper = "(*example.com/svc/internal/worker.Reaper).Run"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: mainFn, Sig: "func()", Tier: 1},
+			{FQN: reaper, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			// main spawns a background goroutine that does an opaque write.
+			{From: mainFn, To: reaper, Tier: 2, Concurrent: true},
+			{From: reaper, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	_, guide := Propose(graph.NewIndex(g), "svc")
+
+	// The concurrency section discloses the main-spawned opaque write...
+	if csec := guideSection(guide, "Concurrency (no_concurrent_reach): not proposed"); !strings.Contains(csec, "UNPROVEN") {
+		t.Errorf("concurrency section must disclose the main-spawned opaque write; section:\n%s", csec)
+	}
+	// ...and the closing summary must NOT omit it (the union fix). Pre-fix the
+	// route-scoped walk skips main, so this label never reached the closing bullet.
+	closing := guideSection(guide, "What init CANNOT derive")
+	if !strings.Contains(closing, "Opaque DB writes") || !strings.Contains(closing, "db call") {
+		t.Errorf("closing 'Opaque DB writes' must include the concurrent-cone opaque label; section:\n%s", closing)
+	}
+}
+
 // guideSection returns the body of the first "## ..." section whose header
 // contains titleSubstr, up to the next section header (or end of guide).
 func guideSection(guide, titleSubstr string) string {
