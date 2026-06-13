@@ -156,15 +156,15 @@ func proposeLayers(ix *graph.Index, p *policy.Policy, g *guide) {
 // ratchets it as must_pass_through.
 func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 	writers := map[string]bool{}
-	unclassified := map[string]bool{}
 	for _, e := range ix.Edges() {
 		if strings.HasPrefix(e.To, "boundary:db ") && IsWrite(e) {
 			writers[e.From] = true
 		}
-		if label, ok := UnclassifiedDBLabel(e); ok {
-			unclassified[label] = true
-		}
 	}
+	// Opaque DB effects scoped to routes (non-main entrypoints) — the same scope
+	// proposeReadOnly/proposeBudget/closing use, so every section that discloses
+	// the db-call frontier agrees on its count and labels.
+	unclassified := routeUnclassifiedDB(ix)
 	if len(writers) == 0 {
 		// "No DB write effects exist" is a MEASUREMENT claim, and it is wrong on a
 		// db-call substrate: a write whose SQL is non-constant labels "db call"
@@ -173,7 +173,7 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 		if len(unclassified) > 0 {
 			g.section("Waypoint (must_pass_through): not proposed",
 				fmt.Sprintf("No CLASSIFIED DB write exists, but %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write DO exist (%s) — opaque writes may flow through them. A waypoint cannot be derived over writes the graph cannot see; if these routes mutate, name the intended seam by hand (or make the SQL constant so the verb becomes readable).",
-					len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", ")))
+					len(unclassified), strings.Join(unclassified, ", ")))
 		} else {
 			g.section("Waypoint (must_pass_through): not proposed", "No DB write effects exist — nothing to guard yet. Revisit when the service writes.")
 		}
@@ -245,9 +245,33 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 	// write bypassing the seam does not read as guarded (R5, same class as above).
 	if len(unclassified) > 0 {
 		body += fmt.Sprintf("\n\n**Caution — guarantee is classified-only**: %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s) are NOT proven to pass this seam — an opaque write reaching the DB outside `%s` would not be caught. Make the SQL constant, or confirm the seam covers these paths by hand.",
-			len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", "), waypoint)
+			len(unclassified), strings.Join(unclassified, ", "), waypoint)
 	}
 	g.section("Waypoint (must_pass_through): proposed", body)
+}
+
+// routeUnclassifiedDB returns the sorted distinct unclassified DB effect labels
+// (non-constant SQL the labeler cannot read as a write — "db call" and friends)
+// reachable from any ROUTE: a non-main entrypoint. Scoping to routes — not the
+// whole graph (ix.Edges()) — keeps every section that discloses the db-call
+// frontier in agreement, and makes the route-level "treated as possible writers,
+// excluded from the read-only ratchet, uncounted in the write budget" framing
+// accurate: a migration reachable only from main is not a route and is not what
+// those sections exclude or count.
+func routeUnclassifiedDB(ix *graph.Index) []string {
+	set := map[string]bool{}
+	for _, s := range ix.Sources() {
+		if strings.HasSuffix(s, ".main") {
+			continue
+		}
+		cone := append([]string{s}, ix.Reachable(s)...)
+		for _, e := range ix.Effects(cone...) {
+			if label, ok := UnclassifiedDBLabel(e); ok {
+				set[label] = true
+			}
+		}
+	}
+	return setutil.SortedKeys(set)
 }
 
 // proposeReadOnly ratchets every entrypoint that currently writes nothing:
@@ -274,21 +298,25 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 		}
 		cone := append([]string{s}, ix.Reachable(s)...)
 		writes := false
-		hasUnclassified := false
+		routeUnclass := map[string]bool{}
 		for _, e := range ix.Effects(cone...) {
 			if IsWrite(e) {
 				writes = true
 			}
 			if label, ok := UnclassifiedDBLabel(e); ok {
-				hasUnclassified = true
-				unclassLabels[label] = true
+				routeUnclass[label] = true
 			}
 		}
 		switch {
 		case writes:
 			// a classified writer — not a read route
-		case hasUnclassified:
-			unproven = append(unproven, s) // reaches a possible opaque write
+		case len(routeUnclass) > 0:
+			// Reaches a possible opaque write — record the labels THIS route
+			// reaches so the disclosure attributes them to the routes it names.
+			unproven = append(unproven, s)
+			for l := range routeUnclass {
+				unclassLabels[l] = true
+			}
 		default:
 			readOnly = append(readOnly, s)
 		}
@@ -513,14 +541,11 @@ func (g *guide) closing(ix *graph.Index) {
 	// db-call blindness is a MEASUREMENT limit, not an intent question, but it sits
 	// here so the team sees it next to everything else init could not prove: the
 	// write surface above is classified-only, and opaque writes are invisible to it.
-	unclassified := map[string]bool{}
-	for _, e := range ix.Edges() {
-		if label, ok := UnclassifiedDBLabel(e); ok {
-			unclassified[label] = true
-		}
-	}
+	// Route-scoped (routeUnclassifiedDB) so this matches what the read-only and
+	// budget sections actually excluded/uncounted.
+	unclassified := routeUnclassifiedDB(ix)
 	if len(unclassified) > 0 {
-		cannot += fmt.Sprintf("- **Opaque DB writes**: %d DB effect label(s) (%s) are built from non-constant SQL the labeler cannot read as a write. init treats the routes reaching them as POSSIBLE writers — excluded from the read-only ratchet, uncounted in the write budget — but cannot tell whether they mutate. Make the SQL constant to expose the verb, or confirm the write surface by hand.\n", len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", "))
+		cannot += fmt.Sprintf("- **Opaque DB writes**: %d DB effect label(s) (%s) are built from non-constant SQL the labeler cannot read as a write. init treats the routes reaching them as POSSIBLE writers — excluded from the read-only ratchet, uncounted in the write budget — but cannot tell whether they mutate. Make the SQL constant to expose the verb, or confirm the write surface by hand.\n", len(unclassified), strings.Join(unclassified, ", "))
 	}
 	g.section("What init CANNOT derive — the questions only the team can answer",
 		cannot+"\nNext steps: `groundwork policy-check` the file, run `groundwork fitness` (it passes clean today by construction), put the policy under CODEOWNERS, wire `groundwork verify` into CI, and after a quiet week tighten the observe-first postures.")

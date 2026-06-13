@@ -144,6 +144,65 @@ func TestProposeExcludesAndDisclosesDBCallWrites(t *testing.T) {
 	}
 }
 
+// guideSection returns the body of the first "## ..." section whose header
+// contains titleSubstr, up to the next section header (or end of guide).
+func guideSection(guide, titleSubstr string) string {
+	for _, chunk := range strings.Split(guide, "\n## ") {
+		if strings.Contains(chunk, titleSubstr) {
+			return chunk
+		}
+	}
+	return ""
+}
+
+// Regression: the unproven-routes disclosure must attribute only the opaque
+// labels the UNPROVEN routes actually reach — not labels that belong to a
+// classified-writer route's cone. Pre-fix, unclassLabels was collected from
+// every non-main route, so a writer's `db ExecContext` inflated the count and
+// label list of the read-only caution that names only the unproven routes.
+func TestProposeUnprovenDisclosureScopedToNamedRoutes(t *testing.T) {
+	const (
+		writerRoute   = "(*example.com/svc/internal/handler.Server).Mixed"
+		writerStore   = "(*example.com/svc/internal/store.Store).Both"
+		unprovenRoute = "(*example.com/svc/internal/handler.Server).Sync"
+		unprovenStore = "(*example.com/svc/internal/store.Store).Opaque"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: writerRoute, Sig: "func()", Tier: 1},
+			{FQN: writerStore, Sig: "func() error", Tier: 1},
+			{FQN: unprovenRoute, Sig: "func()", Tier: 1},
+			{FQN: unprovenStore, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			// A classified writer that ALSO touches an opaque label (db ExecContext).
+			{From: writerRoute, To: writerStore, Tier: 2},
+			{From: writerStore, To: "boundary:db INSERT things", Tier: 1, Boundary: "outbound-sync"},
+			{From: writerStore, To: "boundary:db ExecContext", Tier: 1, Boundary: "outbound-sync"},
+			// The genuinely unproven route reaches a single opaque label (db call).
+			{From: unprovenRoute, To: unprovenStore, Tier: 2},
+			{From: unprovenStore, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	_, guide := Propose(graph.NewIndex(g), "svc")
+
+	sec := guideSection(guide, "Read-only status unproven")
+	if sec == "" {
+		t.Fatalf("expected an unproven-routes disclosure section; guide:\n%s", guide)
+	}
+	// The named unproven route reaches exactly ONE opaque label; the writer's
+	// db ExecContext must not be counted into or listed by this section.
+	if !strings.Contains(sec, "1 DB effect label(s)") {
+		t.Errorf("unproven disclosure must count only the unproven route's labels (1); section:\n%s", sec)
+	}
+	if strings.Contains(sec, "ExecContext") {
+		t.Errorf("unproven disclosure must not list a classified-writer route's opaque label; section:\n%s", sec)
+	}
+	if !strings.Contains(sec, ShortName(unprovenRoute)) {
+		t.Errorf("unproven disclosure must name the unproven route; section:\n%s", sec)
+	}
+}
+
 // On a MIXED substrate (one classified write a seam guards, plus an opaque
 // db-call write that bypasses it), the proposed waypoint must disclose that its
 // "every path passes X" guarantee is classified-only — guardsAll cannot see the
