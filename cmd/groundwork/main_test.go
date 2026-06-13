@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -189,6 +190,38 @@ func TestRunChainsOutput(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("chains output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRunChainsBrokerDedup: the bus is one thing, so a broker named identically
+// by two --policy files is allowed (the same guarantee, re-stated) and still
+// printed; two that DISAGREE are an error. This mirrors the mcp chains lens,
+// which conflicts only on differing values.
+func TestRunChainsBrokerDedup(t *testing.T) {
+	loan := "../../testdata/groundwork/goldens/loansvc.graph.json"
+	bus := "../../testdata/groundwork/policies/bus-brokers.json"
+
+	// The same broker block, declared by two --policy flags → allowed, still printed.
+	out := captureStdout(t, func() {
+		if err := run([]string{"chains", "--service", "loansvc=" + loan,
+			"--policy", bus, "--policy", bus}); err != nil {
+			t.Fatalf("identical broker re-declaration must be allowed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "[assumed] broker — bus") {
+		t.Errorf("the broker should still print on the card:\n%s", out)
+	}
+
+	// A second policy declaring the same broker with different values → error:
+	// the bus guarantee has no single source.
+	conflict := filepath.Join(t.TempDir(), "other.json")
+	if err := os.WriteFile(conflict,
+		[]byte(`{"service":"other","version":1,"brokers":{"bus":{"delivery":"at-most-once"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"chains", "--service", "loansvc=" + loan,
+		"--policy", bus, "--policy", conflict}); err == nil {
+		t.Fatal("conflicting broker declarations across policies must be an error")
 	}
 }
 
