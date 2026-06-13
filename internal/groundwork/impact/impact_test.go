@@ -62,6 +62,46 @@ func TestCardDisclosesBlindSpots(t *testing.T) {
 	}
 }
 
+// A reverse reach that crosses a HighFanOut dispatch over-approximates the
+// implicated-entrypoint set; the card marks the count as an upper bound (F3) and
+// discloses the dispatch blind spot it crossed.
+func TestCardCoverOverApproxAcrossDispatch(t *testing.T) {
+	const ep = "example.com/svc/internal/api.main"
+	const dispatch = "(*example.com/svc/internal/api.Wrapper).Dispatch"
+	const target = "(*example.com/svc/internal/app.Service).Handle"
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: ep, Sig: "func()", Tier: 1},
+			{FQN: dispatch, Sig: "func()", Tier: 1},
+			{FQN: target, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: ep, To: dispatch, Tier: 2},
+			{From: dispatch, To: target, Tier: 2},
+		},
+		// The dispatch site fanned out to many implementations.
+		BlindSpots: []graph.BlindSpot{{Kind: graph.KindHighFanOut, Site: dispatch, Detail: "resolved to 47 callees"}},
+	}
+	ix := graph.NewIndex(g)
+	c := ForNodes(ix, []string{target})
+
+	if !c.CoverOverApprox {
+		t.Fatalf("cover crossed a HighFanOut dispatch but CoverOverApprox is false")
+	}
+	if !strings.Contains(c.Render(), "over-approx via dispatch") {
+		t.Fatalf("render must annotate the over-approximated entrypoint cover:\n%s", c.Render())
+	}
+	var disclosed bool
+	for _, b := range c.BlindSpots {
+		if b.Kind == graph.KindHighFanOut {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Fatalf("HighFanOut on the reverse reach must be disclosed; got %v", c.BlindSpots)
+	}
+}
+
 // O2: card determinism across runs.
 func TestCardDeterministic(t *testing.T) {
 	ix := index(t, "layeredsvc.graph.json")

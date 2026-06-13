@@ -37,6 +37,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		Reach:           reachExisting(d, baseIx, branchIx),
 		NewCautions:     newCautions,
 		NewBlindSpots:   newBlindSpots(p, base, branch),
+		DBLabelDrift:    dbLabelDrift(base, branch),
 	}
 	a.Verdict = verdict(p, d, &a)
 	a.Digest = digestOf(a)
@@ -62,7 +63,7 @@ func verdict(p *policy.Policy, d graphDelta, a *Artifact) Verdict {
 	if p.GatesEffects() && len(a.NewWriteTargets) > 0 {
 		return Block
 	}
-	hasSignal := !d.empty() || len(a.NewCautions) > 0 || len(a.NewBlindSpots) > 0 || len(a.NewWriteTargets) > 0
+	hasSignal := !d.empty() || len(a.NewCautions) > 0 || len(a.NewBlindSpots) > 0 || len(a.NewWriteTargets) > 0 || a.DBLabelDrift != nil
 	if !hasSignal {
 		return NoStructuralSignal
 	}
@@ -95,6 +96,29 @@ func newBlindSpots(p *policy.Policy, base, branch *graph.Graph) []BlindSpotDelta
 		return out[i].Site < out[j].Site
 	})
 	return out
+}
+
+// dbLabelDrift counts DB effect edges whose SQL verb the labeler could not read,
+// base and branch, and returns the pair only when the branch has MORE — the
+// write-surface family's blind fraction grew. It is computed over the whole graph
+// (every such edge), not the io_budget routes, so the disclosure stands even
+// when no io_budget is declared: it is a graph-health metric, not a rule. A
+// decrease or no change is silent (fidelity holding is the expected state).
+func dbLabelDrift(base, branch *graph.Graph) *DBLabelDrift {
+	count := func(g *graph.Graph) int {
+		n := 0
+		for _, e := range g.Edges {
+			if _, ok := fitness.UnclassifiedDBLabel(e); ok {
+				n++
+			}
+		}
+		return n
+	}
+	b, br := count(base), count(branch)
+	if br <= b {
+		return nil
+	}
+	return &DBLabelDrift{Base: b, Branch: br}
 }
 
 // newFindings runs fitness on both graphs and returns the findings present on

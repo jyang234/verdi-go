@@ -108,16 +108,52 @@ func OrderFacts(fn *ssa.Function, effects []EffectSite, baseDir string) []Effect
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.EffectSite != b.EffectSite {
-			return a.EffectSite < b.EffectSite
-		}
-		if a.CalleeSite != b.CalleeSite {
-			return a.CalleeSite < b.CalleeSite
-		}
+	// A TOTAL order over every field — not just the (EffectSite, CalleeSite,
+	// Effect) display key. sort.Slice is not stable, so any facts that tied on a
+	// partial key could land in a run-dependent order; ordering on all fields
+	// makes the emitted section a pure function of the graph AND guarantees
+	// byte-identical duplicates are adjacent, which is what dedupeFacts collapses.
+	sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
+	return dedupeFacts(out)
+}
+
+// less is the total order over EffectOrder used to make emission deterministic.
+func less(a, b EffectOrder) bool {
+	switch {
+	case a.EffectSite != b.EffectSite:
+		return a.EffectSite < b.EffectSite
+	case a.CalleeSite != b.CalleeSite:
+		return a.CalleeSite < b.CalleeSite
+	case a.Effect != b.Effect:
 		return a.Effect < b.Effect
-	})
+	case a.Callee != b.Callee:
+		return a.Callee < b.Callee
+	case a.Fn != b.Fn:
+		return a.Fn < b.Fn
+	case a.Always != b.Always:
+		return !a.Always // false before true, a stable convention
+	default:
+		return a.Via < b.Via
+	}
+}
+
+// dedupeFacts drops exact-duplicate order facts. The effect/fallible double loop
+// pairs every collected effect site with every fault site, so a function that
+// records the same effect site more than once (a derived site that coincides
+// with a direct one, repeated collection) would otherwise emit byte-identical
+// rows. Identity here is the whole fact — distinct sites are preserved; only
+// genuine duplicates collapse, keeping the graph's effect_order section honest
+// about how many distinct facts it carries.
+func dedupeFacts(in []EffectOrder) []EffectOrder {
+	if len(in) < 2 {
+		return in
+	}
+	out := in[:1]
+	for _, f := range in[1:] {
+		if f != out[len(out)-1] {
+			out = append(out, f)
+		}
+	}
 	return out
 }
 

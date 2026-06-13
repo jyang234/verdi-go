@@ -12,7 +12,22 @@ import (
 // cards could not name.
 func (r *Report) Render() string {
 	if len(r.Cards) == 0 {
-		return "no bus events in the loaded fleet — no chains to compose\n"
+		// No nameable chains: say whether that is because the fleet does no
+		// messaging, or because every bus effect was dynamically named and this
+		// lens — which joins on static event names — is INERT, not empty (F5).
+		var b strings.Builder
+		b.WriteString("no statically-named bus events in the loaded fleet — no chains to compose\n")
+		total := 0
+		for _, name := range setutil.SortedKeys(r.Dynamic) {
+			if n := r.Dynamic[name]; n > 0 {
+				fmt.Fprintf(&b, "⚠️  %s has %d dynamically-named bus effect(s) — chains need statically-nameable topics and are inert on <dynamic> messaging here\n", name, n)
+				total += n
+			}
+		}
+		if total > 0 {
+			b.WriteString("(the behavioral pipeline resolves these runtime topic names; static analysis cannot)\n")
+		}
+		return b.String()
 	}
 	var b strings.Builder
 	for i, c := range r.Cards {

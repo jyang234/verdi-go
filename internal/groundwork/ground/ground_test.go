@@ -129,6 +129,77 @@ func TestGraphBorneBindingWithoutPolicy(t *testing.T) {
 	}
 }
 
+// effect_order facts that differ only by call site render to one binding line:
+// the card states the rule once, and its "Binding rules (N)" count is the number
+// of DISTINCT rules, not the number of underlying facts (F6).
+func TestEffectOrderBindingDeduped(t *testing.T) {
+	const fn = "example.com/svc/internal/app.Publish"
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: fn, Sig: "func() error", Tier: 1}},
+		// Three publish sites, all preceding the same fallible callee — same
+		// rendered fact, three distinct sites in the graph.
+		EffectOrder: []graph.EffectOrderFact{
+			{Fn: fn, Effect: "boundary:bus PUBLISH <dynamic>", EffectSite: "a.go:10", Callee: "example.com/svc/internal/app.mapErr", CalleeSite: "a.go:20", Always: true},
+			{Fn: fn, Effect: "boundary:bus PUBLISH <dynamic>", EffectSite: "a.go:11", Callee: "example.com/svc/internal/app.mapErr", CalleeSite: "a.go:20", Always: true},
+			{Fn: fn, Effect: "boundary:bus PUBLISH <dynamic>", EffectSite: "a.go:12", Callee: "example.com/svc/internal/app.mapErr", CalleeSite: "a.go:20", Always: true},
+		},
+	}
+	card, err := For(graph.NewIndex(g), nil, fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, r := range card.Binding {
+		if strings.Contains(r, "partial-effect") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want one partial-effect binding line, got %d: %v", n, card.Binding)
+	}
+}
+
+// The ground card's entrypoint-cover claim is defended against the dispatch seam
+// that inflates it: a HighFanOut on the BACKWARD reach is disclosed (parity with
+// reach/triage, F4) and the cover line is marked over-approximated (F3). The
+// earlier forward-only blind-spot scope left this — the line read first — silent.
+func TestCoverOverApproxDisclosedAcrossDispatch(t *testing.T) {
+	const ep = "example.com/svc/internal/api.main"
+	const dispatch = "(*example.com/svc/internal/api.Wrapper).Dispatch"
+	const target = "(*example.com/svc/internal/app.Service).Handle"
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: ep, Sig: "func()", Tier: 1},
+			{FQN: dispatch, Sig: "func()", Tier: 1},
+			{FQN: target, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: ep, To: dispatch, Tier: 2},
+			{From: dispatch, To: target, Tier: 2},
+		},
+		BlindSpots: []graph.BlindSpot{{Kind: graph.KindHighFanOut, Site: dispatch, Detail: "resolved to 47 callees"}},
+	}
+	card, err := For(graph.NewIndex(g), nil, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !card.CoverOverApprox {
+		t.Fatal("cover crossed a HighFanOut dispatch but CoverOverApprox is false")
+	}
+	var disclosed bool
+	for _, b := range card.BlindSpots {
+		if b.Kind == graph.KindHighFanOut {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Fatalf("upstream HighFanOut must appear on the card; got %v", card.BlindSpots)
+	}
+	if !strings.Contains(card.Render(), "over-approx via dispatch") {
+		t.Fatalf("cover line must be annotated:\n%s", card.Render())
+	}
+}
+
 func TestCardDeterministicAndUnknownFQN(t *testing.T) {
 	ix := index(t, "obligsvc.graph.json")
 	a, _ := For(ix, nil, "example.com/obligsvc/internal/app.Transfer")

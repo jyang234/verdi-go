@@ -160,8 +160,27 @@ func TestBuildNoEvents(t *testing.T) {
 	if len(r.Cards) != 0 {
 		t.Fatalf("an eventless fleet yields no cards, got %d", len(r.Cards))
 	}
-	if !strings.Contains(r.Render(), "no bus events") {
+	if !strings.Contains(r.Render(), "no statically-named bus events") {
 		t.Errorf("empty report should say so: %q", r.Render())
+	}
+}
+
+// A fleet whose only bus effects are dynamically named yields no chains — but
+// the lens must say it is INERT (needs static topic names), not silently read as
+// "no messaging here." The unnameable effects are disclosed per service (F5).
+func TestBuildAllDynamicDisclosesInert(t *testing.T) {
+	pub := "(*svc/app.Svc).Emit"
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: pub}},
+		Edges: []graph.Edge{{From: pub, To: "boundary:bus PUBLISH <dynamic>", Boundary: "outbound-async"}},
+	}
+	r := Build([]Service{{Name: "svc", Index: graph.NewIndex(g)}}, nil)
+	if len(r.Cards) != 0 {
+		t.Fatalf("dynamic-only fleet yields no cards, got %d", len(r.Cards))
+	}
+	out := r.Render()
+	if !strings.Contains(out, "inert on <dynamic> messaging") || !strings.Contains(out, "svc has 1 dynamically-named") {
+		t.Fatalf("dynamic-only report must disclose inertness and the unnameable effect:\n%s", out)
 	}
 }
 

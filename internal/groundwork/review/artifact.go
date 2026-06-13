@@ -68,7 +68,20 @@ type Artifact struct {
 	Reach           []string         `json:"reachable_from,omitempty"`
 	NewCautions     []Violation      `json:"new_cautions,omitempty"`
 	NewBlindSpots   []BlindSpotDelta `json:"new_blind_spots,omitempty"`
+	DBLabelDrift    *DBLabelDrift    `json:"db_label_drift,omitempty"`
 	Digest          string           `json:"digest"`
+}
+
+// DBLabelDrift reports DB write-label fidelity eroding base→branch: the count of
+// DB boundary-effect edges whose SQL verb the labeler could not read ("db call"
+// or a bare method name, built from non-constant SQL). The io_budget, triage
+// --table, and effect-ratchet write surfaces all read such an effect as zero
+// writes, so a base→branch INCREASE is protection silently shrinking — a single
+// point of failure for the whole write-surface family (F2). It is disclosed, not
+// gated: reported only when the count grew, and it does not Block on its own.
+type DBLabelDrift struct {
+	Base   int `json:"base"`
+	Branch int `json:"branch"`
 }
 
 // PkgDelta is the node add/remove count for one touched package.
@@ -224,6 +237,13 @@ func (a Artifact) Render() string {
 			fmt.Fprintf(&b, "- %s\n", t)
 		}
 		b.WriteString("\n")
+	}
+
+	if a.DBLabelDrift != nil {
+		fmt.Fprintf(&b, "🔎 DB write-label fidelity dropped: %d → %d unclassified DB effect(s)\n", a.DBLabelDrift.Base, a.DBLabelDrift.Branch)
+		b.WriteString("  more mutations now flow through non-constant SQL the io_budget, triage\n")
+		b.WriteString("  --table, and effect ratchet all read as zero writes — the write surface is\n")
+		b.WriteString("  going blind here, independent of any rule.\n\n")
 	}
 
 	if len(a.RouteIO) > 0 {

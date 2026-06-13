@@ -194,6 +194,16 @@ closed-vocabulary fields are validated on load, so a typo'd value cannot read as
 a real guarantee. `signed_by` is the human warrant — an unsigned block prints
 its values flagged UNSIGNED. See `docs/design/cx5-chains-surface.md`.
 
+The cross-service lenses (`chains`, `fleet-events`) join publishers to consumers
+**by static event name**, so they are **inert on `<dynamic>` messaging**: a fleet
+whose topics are chosen at runtime publishes/consumes `boundary:bus … <dynamic>`,
+which the name-join cannot bind. Rather than read as "this fleet does no
+messaging," both lenses now say so explicitly and disclose the per-service count
+of dynamically-named bus effects they could not name. The behavioral pipeline
+resolves those runtime names (it observes the real topics); static analysis
+cannot. Treat an empty chain/fleet-events on a `<dynamic>`-heavy fleet as "the
+static half is blind here," not "there is nothing to see."
+
 ```json
 "brokers": {
   "bus": {

@@ -594,7 +594,24 @@ func (f *mcpFleet) fleetEvents() map[string]any {
 		events[ev] = true
 	}
 	if len(events) == 0 {
-		return toolText("no bus events in any loaded graph")
+		// "No bus events" must not read as "this fleet does no messaging" when
+		// every bus effect was dynamically named: the lens is INERT here, not
+		// empty. Disclose the dynamic effects it could not name so the silence is
+		// legible — the join needs statically-nameable topics, which <dynamic>
+		// publish/consume does not provide (F5).
+		var b strings.Builder
+		b.WriteString("no statically-named bus events in any loaded graph")
+		total := 0
+		for _, name := range f.names {
+			if n := dynamic[name]; n > 0 {
+				fmt.Fprintf(&b, "\n⚠️ %s has %d dynamically-named bus effect(s) — this lens needs statically-nameable topics and is inert on <dynamic> messaging here", name, n)
+				total += n
+			}
+		}
+		if total > 0 {
+			b.WriteString("\n(the behavioral pipeline resolves these runtime topic names; static analysis cannot)")
+		}
+		return toolText(b.String())
 	}
 	side := func(m map[string]bool) string {
 		if len(m) == 0 {

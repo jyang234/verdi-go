@@ -36,6 +36,11 @@ type Card struct {
 	Effects     []string          `json:"effects,omitempty"`     // reachable boundary effects
 	Binding     []string          `json:"binding_rules,omitempty"`
 	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"`
+
+	// CoverOverApprox marks the entrypoint cover as an upper bound: the backward
+	// reach to those entrypoints passed through a HighFanOut dispatch seam, which
+	// fans every caller onto every implementation, so the count is "≤", not "=".
+	CoverOverApprox bool `json:"cover_over_approx,omitempty"`
 }
 
 // For assembles the card. The policy may be nil (graph-only grounding); the
@@ -52,24 +57,51 @@ func For(ix *graph.Index, p *policy.Policy, fqn string) (Card, error) {
 	c.Entrypoints = ix.EntrypointCover(fqn)
 
 	cone := append([]string{fqn}, ix.Reachable(fqn)...)
+	coneEffects := ix.Effects(cone...)
 	effects := map[string]bool{}
-	for _, e := range ix.Effects(cone...) {
+	for _, e := range coneEffects {
 		effects[e.To] = true
 	}
 	c.Effects = setutil.SortedKeys(effects)
 
 	c.Binding = bindingRules(ix, p, fqn, &c)
 
+	// Blind spots are gathered over the WHOLE traversed frontier — the backward
+	// reach (who the entrypoint-cover claim crosses) as well as the forward cone
+	// (what the effects claim crosses) — at parity with reach/triage. The earlier
+	// forward-only scope left the cover claim, the line an agent reads first,
+	// undefended against the HighFanOut dispatch that inflates it (F4). The
+	// <dynamic> boundary effects in the cone are synthesized into blind spots too:
+	// they are the frontier the effects claim stops being sound past, and they do
+	// not appear in the graph's blind_spots[] manifest.
+	reaching := ix.Reaching(fqn)
+	traversed := append(append([]string{}, cone...), reaching...)
 	seen := map[string]bool{}
-	for _, fn := range cone {
-		for _, b := range append(ix.BlindSpotsAt(fn), ix.BlindSpotsAt(fitness.PkgOf(fn))...) {
-			k := b.Kind + "\x00" + b.Site
-			if !seen[k] {
-				seen[k] = true
-				c.BlindSpots = append(c.BlindSpots, b)
-			}
+	addBlind := func(b graph.BlindSpot) {
+		k := b.Kind + "\x00" + b.Site
+		if !seen[k] {
+			seen[k] = true
+			c.BlindSpots = append(c.BlindSpots, b)
 		}
 	}
+	for _, fn := range traversed {
+		for _, b := range ix.BlindSpotsAt(fn) {
+			addBlind(b)
+		}
+		for _, b := range ix.BlindSpotsAt(fitness.PkgOf(fn)) {
+			addBlind(b)
+		}
+	}
+	for _, e := range coneEffects {
+		if e.IsDynamic() {
+			addBlind(graph.BlindSpot{Kind: "DynamicEffect", Site: e.From, Detail: strings.TrimPrefix(e.To, "boundary:")})
+		}
+	}
+
+	// The cover crosses a dispatch seam iff a HighFanOut sits on the backward
+	// reach — then the entrypoint count is an over-approximation (F3).
+	c.CoverOverApprox = ix.CrossesHighFanOut(reaching)
+
 	sort.Slice(c.BlindSpots, func(i, j int) bool {
 		if c.BlindSpots[i].Kind != c.BlindSpots[j].Kind {
 			return c.BlindSpots[i].Kind < c.BlindSpots[j].Kind
@@ -125,6 +157,25 @@ func bindingRules(ix *graph.Index, p *policy.Policy, fqn string, c *Card) []stri
 		}
 	}
 	sort.Strings(out)
+	return dedupeSorted(out)
+}
+
+// dedupeSorted collapses adjacent identical lines in a sorted slice. Several
+// effect_order facts that differ only by call site (e.g. many <dynamic> publish
+// sites that all precede the same fallible callee) render to the SAME binding
+// line; the card states each rule once rather than printing the fact N times and
+// overstating its "Binding rules (N)" count. The facts keep their distinct sites
+// in the graph — this is presentation only.
+func dedupeSorted(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	out := in[:1]
+	for _, s := range in[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 
@@ -154,7 +205,12 @@ func (c Card) Render() string {
 	section("Binding rules — these gate any edit here", c.Binding)
 	section("Callers", c.Callers)
 	section("Callees", c.Callees)
-	section("Live behind entrypoints", c.Entrypoints)
+	entryTitle := "Live behind entrypoints"
+	if c.CoverOverApprox {
+		// The cover crossed a HighFanOut dispatch — the count is an upper bound.
+		entryTitle = "Live behind entrypoints ≤ (over-approx via dispatch)"
+	}
+	section(entryTitle, c.Entrypoints)
 	section("Reachable boundary effects", c.Effects)
 	if len(c.BlindSpots) > 0 {
 		fmt.Fprintf(&b, "🕳️  Blind spots touching this card's claims (%d)\n", len(c.BlindSpots))

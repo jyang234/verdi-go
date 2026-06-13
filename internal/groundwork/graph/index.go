@@ -221,6 +221,28 @@ func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
 	return effects, dynamic
 }
 
+// KindHighFanOut is the blind-spot kind flowmap records at a dynamic-dispatch
+// site its algorithm resolved to many callees (an interface method, an
+// oapi-codegen strictHandler seam). Decoding the vocabulary here keeps it with
+// the schema owner: a backward reach that passes through such a site is
+// OVER-approximated (the dispatch fans every caller onto every implementation),
+// so an entrypoint cover counted across one is an upper bound, not a count.
+const KindHighFanOut = "HighFanOut"
+
+// CrossesHighFanOut reports whether any of the given nodes sits on a HighFanOut
+// blind spot — the test a cover renderer uses to mark its count as an
+// over-approximation when the reverse reach fanned out through a dispatch seam.
+func (ix *Index) CrossesHighFanOut(nodes []string) bool {
+	for _, fn := range nodes {
+		for _, b := range ix.blind[fn] {
+			if b.Kind == KindHighFanOut {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // BlindSpotsAt returns the blind spots recorded at a site (an FQN or a package
 // path).
 func (ix *Index) BlindSpotsAt(site string) []BlindSpot { return ix.blind[site] }

@@ -26,6 +26,9 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 	// Carried on the Result so review's route-delta section reuses this exact
 	// computation instead of repeating the per-route BFS.
 	r.RouteWrites = routes
+	unclassRoutes := 0
+	blindRoutes := 0
+	unclassified := map[string]bool{}
 	for _, src := range setutil.SortedKeys(routes) {
 		writes := routes[src].Writes
 		if len(writes) > max {
@@ -36,15 +39,66 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 				From:     src,
 			})
 		}
+		if len(routes[src].Unclassified) > 0 {
+			unclassRoutes++
+			for _, l := range routes[src].Unclassified {
+				unclassified[l] = true
+			}
+		}
+		if routes[src].Blind {
+			blindRoutes++
+		}
+	}
+	// Two disclosures that keep a green budget from lying — both the io_budget
+	// analogue of the must_not_reach blind-frontier caution, kept distinct because
+	// the epistemic reasons differ.
+	//
+	// (1) A DB effect built from non-constant SQL is labeled "db call" (or a bare
+	// method name), not "db INSERT/UPDATE/DELETE" — IsWrite cannot read it as a
+	// write, so it counts as zero against the budget. A route whose mutations all
+	// flow through such a wrapper reaches an unbounded write surface the cap
+	// silently passes. We do not GUESS those are writes (that would manufacture
+	// false violations); we surface a caution so "within budget" stops reading as
+	// "writes are bounded" where the labeler went blind on the verb.
+	if unclassRoutes > 0 {
+		r.add(Finding{
+			Rule:     "io_budget",
+			Severity: Caution,
+			Summary: fmt.Sprintf("write budget unenforceable on %d route(s): %d DB effect label(s) are unclassified (%s) — built from non-constant SQL the labeler cannot read as a write, so a within-budget pass here does not prove the write surface is bounded",
+				unclassRoutes, len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", ")),
+		})
+	}
+	// (2) A route whose forward cone touches a blind frontier — a dynamic-dispatch
+	// seam (HighFanOut), a reflect/unsafe site, or a <dynamic> boundary effect —
+	// has a write count that is a LOWER BOUND, not a proof: edges past the
+	// frontier are hidden, so writes reachable beyond it are uncounted. This is
+	// the half that fires on the real oapi-codegen topology, where per-route
+	// forward reach is starved at the strictHandler dispatch and a route can read
+	// "0 writes" while its true cone is unknown.
+	if blindRoutes > 0 {
+		r.add(Finding{
+			Rule:     "io_budget",
+			Severity: Caution,
+			Summary: fmt.Sprintf("write budget is a lower bound on %d route(s): the forward frontier is blind (dynamic dispatch, reflect/unsafe, or a <dynamic> effect) — writes reachable past it are uncounted, so a within-budget pass there is not a proof the write surface is bounded",
+				blindRoutes),
+		})
 	}
 }
 
 // RouteIO is one route's external write surface: the sorted distinct write
 // targets (sans "boundary:") reachable from it, and whether the route's cone
 // touches a blind spot — in which case Writes is a lower bound, not a count.
+//
+// Unclassified is the sorted distinct DB effect labels in the cone whose SQL
+// verb the labeler could not read (a "db call" / method-named label). These are
+// NOT counted as writes — the budget cannot prove they mutate — but their
+// presence means the write count is unenforceable here, which the budget check
+// discloses rather than passing silently. The review surface reuses it to
+// ratchet the unclassified-DB fraction base→branch.
 type RouteIO struct {
-	Writes []string
-	Blind  bool
+	Writes       []string
+	Blind        bool
+	Unclassified []string
 }
 
 // RouteWrites computes the write surface of every route (non-root entrypoint),
@@ -61,15 +115,47 @@ func RouteWrites(p *policy.Policy, ix *graph.Index) map[string]RouteIO {
 		cone := append([]string{src}, ix.Reachable(src)...)
 		effects := ix.Effects(cone...)
 		writes := map[string]bool{}
+		unclassified := map[string]bool{}
 		for _, e := range effects {
 			if label, ok := WriteLabel(e); ok {
 				writes[label] = true
 			}
+			if label, ok := UnclassifiedDBLabel(e); ok {
+				unclassified[label] = true
+			}
 		}
 		_, blind := frontierBlindSiteWith(ix, cone, effects)
-		out[src] = RouteIO{Writes: setutil.SortedKeys(writes), Blind: blind}
+		out[src] = RouteIO{
+			Writes:       setutil.SortedKeys(writes),
+			Blind:        blind,
+			Unclassified: setutil.SortedKeys(unclassified),
+		}
 	}
 	return out
+}
+
+// UnclassifiedDBLabel returns the label (sans "boundary:") of a DB effect whose
+// SQL verb the labeler could not read, and whether e is one. The verb is
+// "<system> <op> <target>"; a DB op outside the known read/write SQL verbs
+// (INSERT/UPDATE/DELETE/UPSERT/MERGE/REPLACE/SELECT) is a fallback label —
+// graphio emits "db call" or a bare method name when the statement is not a
+// compile-time-constant string. Such an effect MIGHT mutate, but IsWrite cannot
+// tell, so it is neither charged to the budget nor trusted as a read; it is the
+// frontier the budget caution discloses.
+func UnclassifiedDBLabel(e graph.Edge) (string, bool) {
+	if !e.IsBoundary() {
+		return "", false
+	}
+	f := strings.Fields(strings.TrimPrefix(e.To, "boundary:"))
+	if len(f) < 2 || f[0] != "db" {
+		return "", false
+	}
+	switch strings.ToUpper(f[1]) {
+	case "INSERT", "UPDATE", "DELETE", "UPSERT", "MERGE", "REPLACE", "SELECT":
+		return "", false // a verb the labeler read and IsWrite can classify
+	default:
+		return strings.TrimPrefix(e.To, "boundary:"), true
+	}
 }
 
 // WriteLabel returns the effect label (sans "boundary:") of an external write,

@@ -230,6 +230,11 @@ func (c Card) Render() string {
 	if c.Fault {
 		entryTitle = "Entrypoints degraded if the suspects fail"
 	}
+	if c.CoverOverApprox {
+		// The reverse reach crossed a HighFanOut dispatch — the set is an upper
+		// bound (every caller fanned onto every implementation), not a count.
+		entryTitle += " ≤ (over-approx via dispatch)"
+	}
 	section(entryTitle, c.Entrypoints)
 	section("⚡ Effects CERTAINLY committed before the fault", c.CertainlyCommitted)
 	section("⚡ Effects possibly committed before the fault", c.PossiblyCommitted)

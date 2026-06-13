@@ -2,6 +2,7 @@ package fitness
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -216,6 +217,88 @@ func TestIOBudget(t *testing.T) {
 	v := res.Violations()
 	if len(v) != 1 || v[0].Rule != "io_budget" || v[0].From != hUpdateUser {
 		t.Fatalf("want one io_budget violation on the UpdateUser route, got %v", res.Findings)
+	}
+}
+
+// A route whose DB mutations flow through a wrapper (non-constant SQL, labeled
+// "db call") writes ZERO classified writes, so it trivially passes any budget —
+// but that pass is not a proof the write surface is bounded. The budget check
+// discloses it as a caution (advisory, exit 0), never a silent green (F1).
+func TestIOBudgetCautionsOnUnclassifiedDB(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).CreateThing"
+	const store = "(*example.com/svc/internal/store.Store).Insert"
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: store, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: store, Tier: 2},
+			// The store mutates, but the labeler could not read the verb.
+			{From: store, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	p := &policy.Policy{Service: "svc", Version: 1, IOBudget: &policy.IOBudget{MaxWritesPerRoute: 0}}
+	res := Check(p, graph.NewIndex(g))
+
+	if !res.OK() {
+		t.Fatalf("an unclassified-DB caution must not fail the gate; got %v", res.Violations())
+	}
+	var found bool
+	for _, c := range res.Cautions() {
+		if c.Rule == "io_budget" && strings.Contains(c.Summary, "unenforceable") && strings.Contains(c.Summary, "db call") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want an io_budget unenforceable caution naming `db call`, got %v", res.Findings)
+	}
+}
+
+// A route whose forward cone touches a blind frontier (here a <dynamic> bus
+// publish, the shape an oapi-codegen dispatch seam produces) has a write count
+// that is only a lower bound — the budget discloses it as such, the half of F1
+// that fires when forward reach is starved rather than mislabeled.
+func TestIOBudgetCautionsOnBlindFrontier(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).Publish"
+	const fan = "(*example.com/svc/internal/app.Bus).Fanout"
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: fan, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: fan, Tier: 2},
+			{From: fan, To: "boundary:bus PUBLISH <dynamic>", Tier: 1, Boundary: "outbound-async"},
+		},
+	}
+	p := &policy.Policy{Service: "svc", Version: 1, IOBudget: &policy.IOBudget{MaxWritesPerRoute: 2}}
+	res := Check(p, graph.NewIndex(g))
+	if !res.OK() {
+		t.Fatalf("a blind-frontier caution must not fail the gate; got %v", res.Violations())
+	}
+	var found bool
+	for _, c := range res.Cautions() {
+		if c.Rule == "io_budget" && strings.Contains(c.Summary, "lower bound") && strings.Contains(c.Summary, "blind") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want an io_budget lower-bound caution naming the blind frontier, got %v", res.Findings)
+	}
+}
+
+// A graph whose every DB write is classified (db INSERT/UPDATE/...) produces no
+// unenforceable caution — the disclosure fires only where the labeler is blind.
+func TestIOBudgetNoCautionWhenClassified(t *testing.T) {
+	g := loadGraph(t, "layeredsvc.graph.json")
+	p := layeredPolicy()
+	p.IOBudget = &policy.IOBudget{MaxWritesPerRoute: 2}
+	res := Check(p, graph.NewIndex(g))
+	for _, c := range res.Cautions() {
+		if c.Rule == "io_budget" {
+			t.Fatalf("classified DB writes must not raise an io_budget caution; got %q", c.Summary)
+		}
 	}
 }
 

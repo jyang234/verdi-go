@@ -30,6 +30,11 @@ type Card struct {
 	Effects     []string          `json:"effects,omitempty"`     // boundary effects reachable from the suspects
 	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"` // gaps on any traversed path — where the card's claims stop being sound
 
+	// CoverOverApprox marks the implicated-entrypoint set as an upper bound: the
+	// reverse reach passed through a HighFanOut dispatch seam, which fans every
+	// caller onto every implementation. The entrypoints are "≤", not a count.
+	CoverOverApprox bool `json:"cover_over_approx,omitempty"`
+
 	// Fault marks the what-if framing: the suspects are HYPOTHESIZED to be
 	// failing, and the card reads as fault propagation — entrypoints degraded,
 	// effects that may not have happened. Same evidence, same determinism; only
@@ -147,5 +152,8 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		Callers:     callers,
 		Effects:     setutil.SortedKeys(effects),
 		BlindSpots:  blind,
+		// The implicated-entrypoint count is an upper bound iff the reverse reach
+		// to those entrypoints fanned out through a HighFanOut dispatch seam.
+		CoverOverApprox: ix.CrossesHighFanOut(callers),
 	}
 }

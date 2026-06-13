@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/buildinfo"
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
@@ -29,6 +30,9 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/transcript"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=...". When
+// unset, buildinfo.Version recovers the module/VCS stamp Go embeds so an
+// installed binary still names itself (see internal/buildinfo).
 var version = "dev"
 
 // verdictError marks a computed gate verdict — a BLOCK, invariant violations, a
@@ -63,7 +67,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("groundwork", version)
+		fmt.Println("groundwork", buildinfo.Version(version))
 		return nil
 	case "reach":
 		return cmdReach(args[1:])
@@ -302,7 +306,13 @@ func cmdReach(args []string) error {
 	for _, c := range callees {
 		fmt.Printf("  → %s\n", c)
 	}
-	fmt.Printf("live behind %d entrypoint(s):\n", len(cover))
+	coverNote := ""
+	if ix.CrossesHighFanOut(callers) {
+		// The reverse reach crossed a HighFanOut dispatch seam — the cover fans
+		// every caller onto every implementation, so this count is an upper bound.
+		coverNote = " ≤ (over-approx via dispatch)"
+	}
+	fmt.Printf("live behind %d entrypoint(s)%s:\n", len(cover), coverNote)
 	for _, e := range cover {
 		fmt.Printf("  ⮕ %s\n", e)
 	}
