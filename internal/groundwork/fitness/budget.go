@@ -26,7 +26,8 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 	// Carried on the Result so review's route-delta section reuses this exact
 	// computation instead of repeating the per-route BFS.
 	r.RouteWrites = routes
-	affected := 0
+	unclassRoutes := 0
+	blindRoutes := 0
 	unclassified := map[string]bool{}
 	for _, src := range setutil.SortedKeys(routes) {
 		writes := routes[src].Writes
@@ -39,27 +40,47 @@ func checkIOBudget(p *policy.Policy, ix *graph.Index, r *Result) {
 			})
 		}
 		if len(routes[src].Unclassified) > 0 {
-			affected++
+			unclassRoutes++
 			for _, l := range routes[src].Unclassified {
 				unclassified[l] = true
 			}
 		}
+		if routes[src].Blind {
+			blindRoutes++
+		}
 	}
-	// The disclosure that keeps a green budget from lying. A DB effect built from
-	// non-constant SQL is labeled "db call" (or a bare method name), not "db
-	// INSERT/UPDATE/DELETE" — IsWrite cannot read it as a write, so it counts as
-	// zero against the budget. A route whose mutations all flow through such a
-	// wrapper reaches an unbounded write surface the cap silently passes. We do
-	// not GUESS those are writes (that would manufacture false violations); we
-	// surface a caution so "within budget" stops reading as "writes are bounded"
-	// where the labeler went blind. This is the io_budget analogue of the
-	// must_not_reach blind-frontier caution.
-	if affected > 0 {
+	// Two disclosures that keep a green budget from lying — both the io_budget
+	// analogue of the must_not_reach blind-frontier caution, kept distinct because
+	// the epistemic reasons differ.
+	//
+	// (1) A DB effect built from non-constant SQL is labeled "db call" (or a bare
+	// method name), not "db INSERT/UPDATE/DELETE" — IsWrite cannot read it as a
+	// write, so it counts as zero against the budget. A route whose mutations all
+	// flow through such a wrapper reaches an unbounded write surface the cap
+	// silently passes. We do not GUESS those are writes (that would manufacture
+	// false violations); we surface a caution so "within budget" stops reading as
+	// "writes are bounded" where the labeler went blind on the verb.
+	if unclassRoutes > 0 {
 		r.add(Finding{
 			Rule:     "io_budget",
 			Severity: Caution,
 			Summary: fmt.Sprintf("write budget unenforceable on %d route(s): %d DB effect label(s) are unclassified (%s) — built from non-constant SQL the labeler cannot read as a write, so a within-budget pass here does not prove the write surface is bounded",
-				affected, len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", ")),
+				unclassRoutes, len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", ")),
+		})
+	}
+	// (2) A route whose forward cone touches a blind frontier — a dynamic-dispatch
+	// seam (HighFanOut), a reflect/unsafe site, or a <dynamic> boundary effect —
+	// has a write count that is a LOWER BOUND, not a proof: edges past the
+	// frontier are hidden, so writes reachable beyond it are uncounted. This is
+	// the half that fires on the real oapi-codegen topology, where per-route
+	// forward reach is starved at the strictHandler dispatch and a route can read
+	// "0 writes" while its true cone is unknown.
+	if blindRoutes > 0 {
+		r.add(Finding{
+			Rule:     "io_budget",
+			Severity: Caution,
+			Summary: fmt.Sprintf("write budget is a lower bound on %d route(s): the forward frontier is blind (dynamic dispatch, reflect/unsafe, or a <dynamic> effect) — writes reachable past it are uncounted, so a within-budget pass there is not a proof the write surface is bounded",
+				blindRoutes),
 		})
 	}
 }

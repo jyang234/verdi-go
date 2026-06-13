@@ -255,6 +255,39 @@ func TestIOBudgetCautionsOnUnclassifiedDB(t *testing.T) {
 	}
 }
 
+// A route whose forward cone touches a blind frontier (here a <dynamic> bus
+// publish, the shape an oapi-codegen dispatch seam produces) has a write count
+// that is only a lower bound — the budget discloses it as such, the half of F1
+// that fires when forward reach is starved rather than mislabeled.
+func TestIOBudgetCautionsOnBlindFrontier(t *testing.T) {
+	const route = "(*example.com/svc/internal/handler.Server).Publish"
+	const fan = "(*example.com/svc/internal/app.Bus).Fanout"
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: fan, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: fan, Tier: 2},
+			{From: fan, To: "boundary:bus PUBLISH <dynamic>", Tier: 1, Boundary: "outbound-async"},
+		},
+	}
+	p := &policy.Policy{Service: "svc", Version: 1, IOBudget: &policy.IOBudget{MaxWritesPerRoute: 2}}
+	res := Check(p, graph.NewIndex(g))
+	if !res.OK() {
+		t.Fatalf("a blind-frontier caution must not fail the gate; got %v", res.Violations())
+	}
+	var found bool
+	for _, c := range res.Cautions() {
+		if c.Rule == "io_budget" && strings.Contains(c.Summary, "lower bound") && strings.Contains(c.Summary, "blind") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want an io_budget lower-bound caution naming the blind frontier, got %v", res.Findings)
+	}
+}
+
 // A graph whose every DB write is classified (db INSERT/UPDATE/...) produces no
 // unenforceable caution — the disclosure fires only where the labeler is blind.
 func TestIOBudgetNoCautionWhenClassified(t *testing.T) {
