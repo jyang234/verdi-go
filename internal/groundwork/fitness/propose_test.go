@@ -71,3 +71,106 @@ func TestProposeRatchetsBlindSpots(t *testing.T) {
 		t.Errorf("ratchet = %+v, want observe-first with %d baseline allows", p.BlindSpotRatchet, len(g.BlindSpots))
 	}
 }
+
+// R5: on a db-call substrate (production CRUD built from non-constant SQL, so the
+// writes label "db call" and IsWrite cannot read them), init must NOT sweep the
+// opaque write routes into `read-routes-stay-read-only`. The classified-only
+// predicate used to call them read-only and propose a must_not_reach rule over
+// the genuine write paths — silent-green. The fixture mirrors cgate: a consumer
+// whose only DB effect is an opaque "db call" write, a health probe (db
+// PingContext, provably non-mutating), and a route reaching no DB at all.
+func TestProposeExcludesAndDisclosesDBCallWrites(t *testing.T) {
+	const (
+		writeRoute  = "(*example.com/svc/internal/inbound.Handler).Handle"
+		writeStore  = "(*example.com/svc/internal/storage.PostgresStore).CreateMessage"
+		healthRoute = "(*example.com/svc/internal/server.Server).Healthcheck"
+		readRoute   = "(*example.com/svc/internal/server.Server).Livez"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: writeRoute, Sig: "func()", Tier: 1},
+			{FQN: writeStore, Sig: "func() error", Tier: 1},
+			{FQN: healthRoute, Sig: "func()", Tier: 1},
+			{FQN: readRoute, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: writeRoute, To: writeStore, Tier: 2},
+			// The consumer's whole write path is an opaque db call — zero classified writes.
+			{From: writeStore, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+			// A readiness probe cannot mutate; it stays provably read-only.
+			{From: healthRoute, To: "boundary:db PingContext", Tier: 1, Boundary: "outbound-sync"},
+			// readRoute reaches no DB at all — the clean read-only baseline.
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+
+	// The opaque write route must NOT be ratcheted as read-only...
+	from := map[string]bool{}
+	if len(p.MustNotReach) > 0 {
+		for _, f := range p.MustNotReach[0].From {
+			from[f] = true
+		}
+	}
+	if from[writeRoute] {
+		t.Errorf("the opaque db-call write route was swept into read-routes-stay-read-only: %v", p.MustNotReach[0].From)
+	}
+	// ...while the provably read-only routes (no DB, and a non-mutating probe) are.
+	if !from[readRoute] || !from[healthRoute] {
+		t.Errorf("provably read-only routes must still be ratcheted; From = %v", p.MustNotReach[0].From)
+	}
+
+	// ...and it must be DISCLOSED in the guide, in the R2 caution's voice.
+	for _, want := range []string{"Read-only status unproven", "db call", ShortName(writeRoute)} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("guide missing unproven-route disclosure %q", want)
+		}
+	}
+	// The budget section discloses its count is classified-only.
+	if !strings.Contains(guide, "classified-only") {
+		t.Errorf("guide budget section must disclose the count is classified-only")
+	}
+	// The "what init cannot derive" section names the opaque-write limit.
+	if !strings.Contains(guide, "Opaque DB writes") {
+		t.Errorf("guide closing must list opaque DB writes under what init cannot derive")
+	}
+
+	// The proposal must still be a clean ratchet of its own graph (no must_not_reach
+	// rule fires, because the excluded opaque write never reaches a classified target).
+	res := Check(p, graph.NewIndex(g))
+	for _, f := range res.Violations() {
+		if f.Rule != "obligation" {
+			t.Errorf("proposed rule violates its own source graph: %v", f)
+		}
+	}
+}
+
+// When the ENTIRE write surface is opaque and no route is provably read-only,
+// init proposes no read-only rule at all and says so — rather than asserting
+// "every entrypoint writes" (false) or ratcheting an unsupported claim.
+func TestProposeNoProvablyReadOnlyRoute(t *testing.T) {
+	const (
+		route = "(*example.com/svc/internal/inbound.Handler).Handle"
+		store = "(*example.com/svc/internal/storage.PostgresStore).CreateMessage"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: route, Sig: "func()", Tier: 1},
+			{FQN: store, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: route, To: store, Tier: 2},
+			{From: store, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+	if p.MustNotReach != nil {
+		t.Errorf("no route is provably read-only; want no must_not_reach, got %+v", p.MustNotReach)
+	}
+	if !strings.Contains(guide, "No entrypoint is PROVABLY read-only") {
+		t.Errorf("guide must explain why no read-only rule was proposed")
+	}
+	// The waypoint section must not claim "No DB write effects exist".
+	if strings.Contains(guide, "No DB write effects exist") {
+		t.Errorf("waypoint section falsely claims no DB writes exist on a db-call substrate")
+	}
+}
