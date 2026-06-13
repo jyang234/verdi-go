@@ -25,14 +25,17 @@ derived sites removed their carrier calls from OrderFacts' fault-site list,
 silently deleting loansvc's two pre-existing facts, and the wholesale golden
 regen ratified the loss — fixed (direct-site-only exclusion + self-pair
 skip) and locked with a semantic fact assertion regen cannot launder
-(TestEffectOrderKeepsCarrierFaultSites). The review's efficiency findings
-are recorded follow-ons, deliberately deferred to the E-CX6 wall-clock
-measurement: per-label cone rescans in never(), the eager whole-program
-condensation on first rule (lazy/scoped condensation is the prepared fix),
-merging the three full-universe sweeps (computeSCC / entries /
-addressTaken), a typed summary key replacing the "\x00effect:" namespace
-packing, an engine-owned program-adapter constructor enforcing the F4
-preconditions, and unifying the three CFG coverage walks. Companion to
+(TestEffectOrderKeepsCarrierFaultSites). Three review items closed since: a typed
+summary key (kind+name; effect bindings now assert set identity instead of
+silently keeping the first), NewProgramSummaries (the engine owns
+universe completeness; the no-pre-filter half of F4 remains the caller's),
+and the general regen ratchet (goldens/manifest.json pins every golden's
+section counts in a file regen.sh never rewrites). The remaining follow-ons
+are deliberately deferred to the E-CX6 wall-clock measurement: per-label
+cone rescans in never(), the eager whole-program condensation on first rule
+(lazy/scoped condensation is the prepared fix), merging the three
+full-universe sweeps (computeSCC / entries / addressTaken), and unifying
+the three CFG coverage walks. Companion to
 [`path-obligations-plan.md`](path-obligations-plan.md) (whose §4/§10
 "no interprocedural" limit D-CX2 supersedes, for *proven* summaries only) and
 [`guardrail-extensions-plan.md`](guardrail-extensions-plan.md) (whose §1

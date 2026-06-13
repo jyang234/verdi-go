@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
@@ -236,23 +235,13 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 	return g, nil
 }
 
-// obligationSummaries adapts the program into the obligation engine's unit
-// (CX-2). The universe is every BUILT function, not just the call graph's
-// reachable set: package initializers run before main and can take a
-// function's address (`var hook = fn`) or call into the service — facts the
-// entry-domination guard is unsound without, and the RTA node set does not
-// root init. Call sites resolve through the graph's edges (the same
-// over-approximation every other check trusts); sites the graph has no edges
-// for fall back to their static callee inside the engine and anything else is
-// a frontier. NewSummaries sorts the universe, so map iteration order here is
-// harmless. Built only when obligation rules exist; rule-free services pay
-// nothing.
+// obligationSummaries hands the engine its production inputs (CX-2): the
+// whole built program (NewProgramSummaries owns the universe-completeness
+// precondition — package initializers run before main and can take addresses
+// or call in without being RTA-rooted) and the call graph's edges as the
+// per-site over-approximation, unfiltered. Built only when obligation rules
+// or effect labels exist; rule-free, effect-free services pay nothing.
 func obligationSummaries(res *analyze.Result) *obligations.Summaries {
-	all := ssautil.AllFunctions(res.Program.Prog)
-	fns := make([]*ssa.Function, 0, len(all))
-	for fn := range all {
-		fns = append(fns, fn)
-	}
 	bySite := map[ssa.CallInstruction][]*ssa.Function{}
 	for _, n := range res.Graph.Nodes {
 		for _, e := range n.Out {
@@ -261,10 +250,8 @@ func obligationSummaries(res *analyze.Result) *obligations.Summaries {
 			}
 		}
 	}
-	return obligations.NewSummaries(&obligations.Unit{
-		Fns:     fns,
-		Callees: func(site ssa.CallInstruction) []*ssa.Function { return bySite[site] },
-	})
+	return obligations.NewProgramSummaries(res.Program.Prog,
+		func(site ssa.CallInstruction) []*ssa.Function { return bySite[site] })
 }
 
 // Marshal renders the graph as canonical JSON (non-gated, but still deterministic).

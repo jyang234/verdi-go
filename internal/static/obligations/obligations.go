@@ -187,7 +187,7 @@ func pkgPathOf(fn *ssa.Function) string {
 func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string, sums *Summaries) []Finding {
 	acquire := parseRef(rule.Acquire)
 	releases := parseRefs(rule.Release)
-	relKey := ""
+	var relKey targetKey
 	if sums != nil {
 		relKey = sums.intern(rule.Release)
 	}
@@ -439,7 +439,7 @@ type leakResult struct {
 // path can claim neither leak nor proof — recorded as unknown. A VIOLATED is
 // reported only off a path whose handoffs were all provably non-releasing, so
 // the witness is never weaker than the intraprocedural one (D-CX2).
-func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, relKey string) leakResult {
+func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, relKey targetKey) leakResult {
 	errVals := errorValuesOf(acq)
 
 	var web map[ssa.Value]bool
