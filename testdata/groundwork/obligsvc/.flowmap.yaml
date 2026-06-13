@@ -27,3 +27,10 @@ obligations:
     acquire: "example.com/obligsvc/internal/store#BeginTransaction"
     release:
       - "example.com/obligsvc/internal/store#Commit"
+  # Guard-intent (CX-2): the validation may run in callers, so the rule opts
+  # into the entry-domination lift. Pairing-intent rules (audit-before-publish
+  # above) deliberately do not.
+  - name: validate-before-send
+    require: "example.com/obligsvc/internal/gate#Validate"
+    before: "example.com/obligsvc/internal/outbound#Send"
+    fromCallers: true

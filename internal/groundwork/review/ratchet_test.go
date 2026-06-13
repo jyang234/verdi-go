@@ -182,7 +182,7 @@ func TestObligationFlipIsNewViolation(t *testing.T) {
 	base := loadGraph(t, "obligsvc.graph.json")
 	branch := loadGraph(t, "obligsvc.graph.json")
 	for i := range branch.Obligations {
-		if strings.Contains(branch.Obligations[i].Fn, "TransferDefer") {
+		if strings.HasSuffix(branch.Obligations[i].Fn, ".TransferDefer") {
 			branch.Obligations[i].Status = "VIOLATED"
 			branch.Obligations[i].Detail = "exit reachable without release"
 		}

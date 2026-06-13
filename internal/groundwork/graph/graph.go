@@ -68,6 +68,10 @@ type EffectOrderFact struct {
 	Callee     string `json:"callee"`
 	CalleeSite string `json:"callee_site"`
 	Always     bool   `json:"always,omitempty"`
+	// Via names the ALWAYS-effect callee when the effect is committed inside
+	// a call one frame down (a derived site, CX-3) — provenance for the
+	// fault card, never part of fact identity.
+	Via string `json:"via,omitempty"`
 }
 
 // Obligation is one path-obligation verdict flowmap computed from a function's

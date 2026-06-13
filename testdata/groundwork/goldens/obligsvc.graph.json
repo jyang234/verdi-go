@@ -44,6 +44,11 @@
       "tier": 1
     },
     {
+      "fqn": "example.com/obligsvc/internal/app.CallTaken",
+      "sig": "func app.CallTaken()",
+      "tier": 3
+    },
+    {
       "fqn": "example.com/obligsvc/internal/app.DeferredPublish",
       "sig": "func app.DeferredPublish()",
       "tier": 1
@@ -76,10 +81,27 @@
       "tier": 1
     },
     {
+      "fqn": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "sig": "func app.DisburseViaHelper(id string) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.DispatchSend",
+      "sig": "func app.DispatchSend() error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
       "fqn": "example.com/obligsvc/internal/app.HoldSem",
       "sig": "func app.HoldSem(s *store.Store) error",
       "tier": 2,
       "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.OpenSend",
+      "sig": "func app.OpenSend()",
+      "tier": 3
     },
     {
       "fqn": "example.com/obligsvc/internal/app.Transfer",
@@ -132,6 +154,18 @@
       "fallible": true
     },
     {
+      "fqn": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "sig": "func app.TransferDeferHelper(s *store.Store) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "sig": "func app.TransferMaybeHelper(s *store.Store, ok bool) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
       "fqn": "example.com/obligsvc/internal/app.TransferOwn",
       "sig": "func app.TransferOwn(s *store.Store) (*store.Tx, error)",
       "tier": 2,
@@ -144,10 +178,21 @@
       "fallible": true
     },
     {
+      "fqn": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "sig": "func app.TransferViaHelper(s *store.Store) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
       "fqn": "example.com/obligsvc/internal/app.annotate",
       "sig": "func app.annotate(err error) error",
       "tier": 3,
       "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.closeTx",
+      "sig": "func app.closeTx(tx *store.Tx)",
+      "tier": 3
     },
     {
       "fqn": "example.com/obligsvc/internal/app.credit",
@@ -162,8 +207,39 @@
       "fallible": true
     },
     {
+      "fqn": "example.com/obligsvc/internal/app.finishMaybe",
+      "sig": "func app.finishMaybe(tx *store.Tx, ok bool)",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.finishTx",
+      "sig": "func app.finishTx(tx *store.Tx, err error) error",
+      "tier": 2,
+      "fallible": true
+    },
+    {
       "fqn": "example.com/obligsvc/internal/app.handle",
       "sig": "func app.handle()",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.publishApproved",
+      "sig": "func app.publishApproved()",
+      "tier": 1
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.sendFanout",
+      "sig": "func app.sendFanout()",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.sendFanoutOpen",
+      "sig": "func app.sendFanoutOpen()",
+      "tier": 3
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/app.sendFanoutTaken",
+      "sig": "func app.sendFanoutTaken()",
       "tier": 3
     },
     {
@@ -181,6 +257,17 @@
       "fqn": "example.com/obligsvc/internal/bus.Publish",
       "sig": "func bus.Publish(event string)",
       "tier": 1
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/gate.Validate",
+      "sig": "func gate.Validate() error",
+      "tier": 3,
+      "fallible": true
+    },
+    {
+      "fqn": "example.com/obligsvc/internal/outbound.Send",
+      "sig": "func outbound.Send(event string)",
+      "tier": 3
     }
   ],
   "edges": [
@@ -188,6 +275,11 @@
       "from": "example.com/obligsvc.main",
       "to": "(*example.com/obligsvc/internal/store.Tx).Commit",
       "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.CallTaken",
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc.main",
@@ -221,8 +313,23 @@
     },
     {
       "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.DispatchSend",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
       "to": "example.com/obligsvc/internal/app.HoldSem",
       "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.OpenSend",
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc.main",
@@ -251,6 +358,16 @@
     },
     {
       "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc.main",
       "to": "example.com/obligsvc/internal/app.TransferOwn",
       "tier": 2
     },
@@ -260,9 +377,19 @@
       "tier": 2
     },
     {
+      "from": "example.com/obligsvc.main",
+      "to": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "tier": 2
+    },
+    {
       "from": "example.com/obligsvc.main$1",
       "to": "example.com/obligsvc/internal/app.Transfer",
       "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.CallTaken",
+      "to": "example.com/obligsvc/internal/app.sendFanoutTaken",
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.DeferredPublish",
@@ -338,6 +465,26 @@
       "tier": 3
     },
     {
+      "from": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "to": "example.com/obligsvc/internal/app.publishApproved",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "to": "example.com/obligsvc/internal/billing.Charge",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.DispatchSend",
+      "to": "example.com/obligsvc/internal/app.sendFanout",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.DispatchSend",
+      "to": "example.com/obligsvc/internal/gate.Validate",
+      "tier": 2
+    },
+    {
       "from": "example.com/obligsvc/internal/app.HoldSem",
       "to": "(*example.com/obligsvc/internal/store.Store).Acquire",
       "tier": 2
@@ -347,6 +494,11 @@
       "to": "(*example.com/obligsvc/internal/store.Store).Release",
       "tier": 3,
       "concurrent": true
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.OpenSend",
+      "to": "example.com/obligsvc/internal/app.sendFanoutOpen",
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.Transfer",
@@ -469,6 +621,32 @@
       "tier": 3
     },
     {
+      "from": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "to": "example.com/obligsvc/internal/app.closeTx",
+      "tier": 3,
+      "concurrent": true
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "to": "example.com/obligsvc/internal/app.debit",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "to": "example.com/obligsvc/internal/app.finishMaybe",
+      "tier": 3
+    },
+    {
       "from": "example.com/obligsvc/internal/app.TransferOwn",
       "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
       "tier": 2
@@ -488,6 +666,67 @@
       "to": "example.com/obligsvc/internal/app.handle",
       "tier": 3,
       "concurrent": true
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "to": "(*example.com/obligsvc/internal/store.Store).BeginTx",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "to": "example.com/obligsvc/internal/app.debit",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "to": "example.com/obligsvc/internal/app.finishTx",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.closeTx",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.finishMaybe",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.finishTx",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Commit",
+      "tier": 2
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.finishTx",
+      "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.publishApproved",
+      "to": "boundary:bus PUBLISH loan.approved",
+      "tier": 1,
+      "boundary": "outbound-async"
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.publishApproved",
+      "to": "example.com/obligsvc/internal/audit.Write",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.sendFanout",
+      "to": "example.com/obligsvc/internal/outbound.Send",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.sendFanoutOpen",
+      "to": "example.com/obligsvc/internal/outbound.Send",
+      "tier": 3
+    },
+    {
+      "from": "example.com/obligsvc/internal/app.sendFanoutTaken",
+      "to": "example.com/obligsvc/internal/outbound.Send",
+      "tier": 3
     }
   ],
   "blind_spots": [],
@@ -496,7 +735,7 @@
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.DeferredPublish",
-      "site": "internal/app/app.go:134",
+      "site": "internal/app/app.go:136",
       "status": "VIOLATED",
       "detail": "no call to example.com/obligsvc/internal/audit#Write dominates this call to example.com/obligsvc/internal/bus#Publish"
     },
@@ -504,37 +743,44 @@
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.DeferredPublishAudited",
-      "site": "internal/app/app.go:140",
+      "site": "internal/app/app.go:142",
       "status": "SATISFIED"
     },
     {
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.Disburse",
-      "site": "internal/app/app.go:58",
+      "site": "internal/app/app.go:60",
       "status": "SATISFIED"
     },
     {
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.DisburseAndCharge",
-      "site": "internal/app/app.go:148",
+      "site": "internal/app/app.go:150",
       "status": "SATISFIED"
     },
     {
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
-      "site": "internal/app/app.go:157",
+      "site": "internal/app/app.go:159",
       "status": "SATISFIED"
     },
     {
       "rule": "audit-before-publish",
       "kind": "must-precede",
       "fn": "example.com/obligsvc/internal/app.DisburseRacy",
-      "site": "internal/app/app.go:67",
+      "site": "internal/app/app.go:69",
       "status": "VIOLATED",
       "detail": "no call to example.com/obligsvc/internal/audit#Write dominates this call to example.com/obligsvc/internal/bus#Publish"
+    },
+    {
+      "rule": "audit-before-publish",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.publishApproved",
+      "site": "internal/app/app.go:203",
+      "status": "SATISFIED"
     },
     {
       "rule": "renamed-away",
@@ -546,43 +792,58 @@
       "rule": "sem-must-release",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.HoldSem",
-      "site": "internal/app/app.go:124",
+      "site": "internal/app/app.go:126",
       "status": "SATISFIED"
     },
     {
       "rule": "tx-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.Transfer",
-      "site": "internal/app/app.go:17",
+      "site": "internal/app/app.go:19",
       "status": "VIOLATED",
-      "detail": "exit at internal/app/app.go:22 reachable without release"
+      "detail": "exit at internal/app/app.go:24 reachable without release"
     },
     {
       "rule": "tx-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferAnnotate",
-      "site": "internal/app/app.go:100",
+      "site": "internal/app/app.go:102",
       "status": "SATISFIED"
     },
     {
       "rule": "tx-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferClosure",
-      "site": "internal/app/app.go:87",
+      "site": "internal/app/app.go:89",
       "status": "SATISFIED"
     },
     {
       "rule": "tx-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferDefer",
-      "site": "internal/app/app.go:33",
+      "site": "internal/app/app.go:35",
       "status": "SATISFIED"
     },
     {
       "rule": "tx-must-close",
       "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "site": "internal/app/app.go:258",
+      "status": "SATISFIED"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "site": "internal/app/app.go:244",
+      "status": "CANT-PROVE",
+      "detail": "release may occur inside example.com/obligsvc/internal/app.finishMaybe — beyond proof; name it as a release ref to assert it"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferOwn",
-      "site": "internal/app/app.go:47",
+      "site": "internal/app/app.go:49",
       "status": "CANT-PROVE",
       "detail": "acquired value is returned — its lifecycle leaves the function"
     },
@@ -590,16 +851,55 @@
       "rule": "tx-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferRecoverNamed",
-      "site": "internal/app/app.go:77",
+      "site": "internal/app/app.go:79",
       "status": "CANT-PROVE",
       "detail": "function uses recover; control flow after a panic is invisible to the CFG"
+    },
+    {
+      "rule": "tx-must-close",
+      "kind": "must-release",
+      "fn": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "site": "internal/app/app.go:227",
+      "status": "SATISFIED"
     },
     {
       "rule": "txc-must-close",
       "kind": "must-release",
       "fn": "example.com/obligsvc/internal/app.TransferConcrete",
-      "site": "internal/app/app.go:113",
+      "site": "internal/app/app.go:115",
       "status": "SATISFIED"
+    },
+    {
+      "rule": "validate-before-send",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.sendFanout",
+      "site": "internal/app/app.go:168",
+      "status": "SATISFIED",
+      "detail": "require-covered at every entry; e.g. entered via example.com/obligsvc/internal/app.DispatchSend"
+    },
+    {
+      "rule": "validate-before-send",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.sendFanout",
+      "site": "internal/app/app.go:169",
+      "status": "SATISFIED",
+      "detail": "require-covered at every entry; e.g. entered via example.com/obligsvc/internal/app.DispatchSend"
+    },
+    {
+      "rule": "validate-before-send",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.sendFanoutOpen",
+      "site": "internal/app/app.go:185",
+      "status": "CANT-PROVE",
+      "detail": "no call to example.com/obligsvc/internal/gate#Validate dominates this call to example.com/obligsvc/internal/outbound#Send in this function; entry via example.com/obligsvc/internal/app.OpenSend is beyond proof"
+    },
+    {
+      "rule": "validate-before-send",
+      "kind": "must-precede",
+      "fn": "example.com/obligsvc/internal/app.sendFanoutTaken",
+      "site": "internal/app/app.go:192",
+      "status": "CANT-PROVE",
+      "detail": "no call to example.com/obligsvc/internal/gate#Validate dominates this call to example.com/obligsvc/internal/outbound#Send in this function; its address is taken — an unseen dynamic caller may exist"
     }
   ],
   "entrypoints": [
@@ -611,19 +911,334 @@
   ],
   "effect_order": [
     {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferRecoverNamed",
+      "callee_site": "main.go:25",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferClosure",
+      "callee_site": "main.go:26",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferAnnotate",
+      "callee_site": "main.go:27",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferConcrete",
+      "callee_site": "main.go:28",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.HoldSem",
+      "callee_site": "main.go:29",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
+      "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "callee_site": "main.go:38",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "callee_site": "main.go:39",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "callee_site": "main.go:40",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "example.com/obligsvc/internal/app.DispatchSend",
+      "callee_site": "main.go:42",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:24",
+      "callee": "net/http.ListenAndServe",
+      "callee_site": "main.go:49",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseRacy"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
+      "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "callee_site": "main.go:38",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "callee_site": "main.go:39",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "callee_site": "main.go:40",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "example.com/obligsvc/internal/app.DispatchSend",
+      "callee_site": "main.go:42",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:30",
+      "callee": "net/http.ListenAndServe",
+      "callee_site": "main.go:49",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublish"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
+      "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "callee_site": "main.go:38",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "callee_site": "main.go:39",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "callee_site": "main.go:40",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "example.com/obligsvc/internal/app.DispatchSend",
+      "callee_site": "main.go:42",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:31",
+      "callee": "net/http.ListenAndServe",
+      "callee_site": "main.go:49",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DeferredPublishAudited"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
+      "callee_site": "main.go:33",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "callee_site": "main.go:38",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "callee_site": "main.go:39",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "callee_site": "main.go:40",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "example.com/obligsvc/internal/app.DispatchSend",
+      "callee_site": "main.go:42",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:32",
+      "callee": "net/http.ListenAndServe",
+      "callee_site": "main.go:49",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseAndCharge"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:37",
+      "callee": "example.com/obligsvc/internal/app.TransferViaHelper",
+      "callee_site": "main.go:38",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseViaHelper"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:37",
+      "callee": "example.com/obligsvc/internal/app.TransferMaybeHelper",
+      "callee_site": "main.go:39",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseViaHelper"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:37",
+      "callee": "example.com/obligsvc/internal/app.TransferDeferHelper",
+      "callee_site": "main.go:40",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseViaHelper"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:37",
+      "callee": "example.com/obligsvc/internal/app.DispatchSend",
+      "callee_site": "main.go:42",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseViaHelper"
+    },
+    {
+      "fn": "example.com/obligsvc.main",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "main.go:37",
+      "callee": "net/http.ListenAndServe",
+      "callee_site": "main.go:49",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.DisburseViaHelper"
+    },
+    {
       "fn": "example.com/obligsvc/internal/app.DisburseAndCharge",
       "effect": "boundary:bus PUBLISH loan.approved",
-      "effect_site": "internal/app/app.go:148",
+      "effect_site": "internal/app/app.go:150",
       "callee": "example.com/obligsvc/internal/billing.Charge",
-      "callee_site": "internal/app/app.go:149",
+      "callee_site": "internal/app/app.go:151",
       "always": true
     },
     {
       "fn": "example.com/obligsvc/internal/app.DisburseAndChargeRisky",
       "effect": "boundary:bus PUBLISH loan.approved",
-      "effect_site": "internal/app/app.go:157",
+      "effect_site": "internal/app/app.go:159",
       "callee": "example.com/obligsvc/internal/billing.Charge",
-      "callee_site": "internal/app/app.go:159"
+      "callee_site": "internal/app/app.go:161"
+    },
+    {
+      "fn": "example.com/obligsvc/internal/app.DisburseViaHelper",
+      "effect": "boundary:bus PUBLISH loan.approved",
+      "effect_site": "internal/app/app.go:210",
+      "callee": "example.com/obligsvc/internal/billing.Charge",
+      "callee_site": "internal/app/app.go:211",
+      "always": true,
+      "via": "example.com/obligsvc/internal/app.publishApproved"
     }
   ]
 }

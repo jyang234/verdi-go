@@ -78,8 +78,11 @@ type Finding struct {
 
 // Check evaluates every rule against every function, returning findings sorted
 // by (rule, fn, site). baseDir anchors site paths (the service directory);
-// empty means bare file names. The result is a pure function of its inputs.
-func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string) []Finding {
+// empty means bare file names. sums is the interprocedural summary engine
+// (correctness plan CX-2); nil keeps every verdict intraprocedural — the
+// summaries-off half of the O-CX2 monotonicity check. The result is a pure
+// function of its inputs.
+func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string, sums *Summaries) []Finding {
 	var out []Finding
 	for i := range rules {
 		rule := &rules[i]
@@ -90,9 +93,9 @@ func Check(rules []config.ObligationRule, fns []*ssa.Function, baseDir string) [
 			}
 			var fs []Finding
 			if rule.Kind() == config.KindMustRelease {
-				fs = checkRelease(rule, fn, baseDir)
+				fs = checkRelease(rule, fn, baseDir, sums)
 			} else {
-				fs = checkPrecede(rule, fn, baseDir)
+				fs = checkPrecede(rule, fn, baseDir, sums)
 			}
 			if len(fs) > 0 {
 				matched = true
@@ -181,9 +184,13 @@ func pkgPathOf(fn *ssa.Function) string {
 
 // ---- must-release -----------------------------------------------------------
 
-func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string) []Finding {
+func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string, sums *Summaries) []Finding {
 	acquire := parseRef(rule.Acquire)
 	releases := parseRefs(rule.Release)
+	relKey := ""
+	if sums != nil {
+		relKey = sums.intern(rule.Release)
+	}
 
 	var acquires []*ssa.Call
 	for _, b := range fn.Blocks {
@@ -211,11 +218,17 @@ func checkRelease(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 		default:
 			if why, escaped := ownershipEscapes(acq); escaped {
 				f.Status, f.Detail = CantProve, why
-			} else if exitPos, leaked := leakPath(fn, acq, releases); leaked {
-				f.Status = Violated
-				f.Detail = fmt.Sprintf("exit at %s reachable without release", site(fn, exitPos, baseDir, 0))
 			} else {
-				f.Status = Satisfied
+				switch r := leakPath(fn, acq, releases, sums, relKey); {
+				case r.leaked:
+					f.Status = Violated
+					f.Detail = fmt.Sprintf("exit at %s reachable without release", site(fn, r.exit, baseDir, 0))
+				case r.unknown != "":
+					f.Status = CantProve
+					f.Detail = fmt.Sprintf("release may occur inside %s — beyond proof; name it as a release ref to assert it", r.unknown)
+				default:
+					f.Status = Satisfied
+				}
 			}
 		}
 		out = append(out, f)
@@ -400,6 +413,15 @@ var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.
 
 func isErrorType(t types.Type) bool { return types.Implements(t, errorInterface) }
 
+// leakResult is one acquire site's walk outcome: a leak with its witness exit,
+// a handoff whose release behavior is beyond proof (CX-1 abstention), or
+// neither — covered on every modeled path.
+type leakResult struct {
+	exit    token.Pos // valid iff leaked
+	leaked  bool
+	unknown string // non-empty: a handoff callee the walk could not classify
+}
+
 // leakPath walks the CFG forward from the acquire, looking for a function exit
 // reachable without passing a release site. A release via plain call or defer
 // covers the path from that point on; an explicit panic is an exit (an
@@ -407,58 +429,187 @@ func isErrorType(t types.Type) bool { return types.Implements(t, errorInterface)
 // lifecycle checkers conventionally do. The acquire's own failure branch is
 // pruned: an If whose condition tests the acquire's error result against nil
 // only has its success arm followed.
-func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref) (token.Pos, bool) {
+//
+// CX-1 (D-CX3): when sums is non-nil, a HANDOFF site — a call or defer the
+// resource's value web visibly flows into — consults the callees' summaries:
+// all ALWAYS-release ⇒ the handoff covers like an inline release (and a
+// deferred ALWAYS-release named helper covers later exits, lifting the
+// deferReleases ceiling); all NEVER-release ⇒ the walk continues, so a leak
+// past it keeps today's VIOLATED with the same witness; anything else ⇒ that
+// path can claim neither leak nor proof — recorded as unknown. A VIOLATED is
+// reported only off a path whose handoffs were all provably non-releasing, so
+// the witness is never weaker than the intraprocedural one (D-CX2).
+func leakPath(fn *ssa.Function, acq *ssa.Call, releases []ref, sums *Summaries, relKey string) leakResult {
 	errVals := errorValuesOf(acq)
-	visited := map[*ssa.BasicBlock]bool{}
 
-	var walk func(b *ssa.BasicBlock, from int) (token.Pos, bool)
-	walk = func(b *ssa.BasicBlock, from int) (token.Pos, bool) {
-		for i := from; i < len(b.Instrs); i++ {
-			switch in := b.Instrs[i].(type) {
-			case *ssa.Call:
-				if anyRef(releases, in) {
-					return token.NoPos, false // released: this path is covered
+	var web map[ssa.Value]bool
+	if sums != nil {
+		web = map[ssa.Value]bool{}
+		for _, root := range resourceValues(acq) {
+			for v := range valueWeb(root) {
+				web[v] = true
+			}
+		}
+	}
+	// handoff classifies a call the resource flows into: covered (all callees
+	// ALWAYS release), continue (all NEVER — provably not a release), or
+	// unknown (name) — beyond proof either way.
+	const (
+		notHandoff = iota
+		handoffCovered
+		handoffContinue
+		handoffUnknown
+	)
+	classify := func(in ssa.CallInstruction) (int, string) {
+		if sums == nil || !operandInWeb(in, web) {
+			return notHandoff, ""
+		}
+		cands, frontier := sums.resolve(in)
+		if frontier {
+			return handoffUnknown, "<dynamic>"
+		}
+		if len(cands) == 0 {
+			return notHandoff, "" // builtin or no callee: not a release vehicle
+		}
+		always, never := true, true
+		var name string
+		for _, c := range cands {
+			switch sums.dischargeKey(c, relKey) {
+			case SummaryAlways:
+				never = false
+			case SummaryNever:
+				always = false
+			default:
+				always, never = false, false
+				if name == "" {
+					name = c.RelString(nil)
 				}
-			case *ssa.Defer:
-				if deferReleases(in, releases) {
-					return token.NoPos, false // deferred release covers every later exit
-				}
-			case *ssa.Return:
-				return exitPos(fn, in), true
-			case *ssa.Panic:
-				return exitPos(fn, in), true
-			case *ssa.If:
-				if skip, ok := failureBranch(in, errVals); ok {
-					next := in.Block().Succs[1-skip]
-					if !visited[next] {
-						visited[next] = true
-						return walk(next, 0)
+			}
+		}
+		switch {
+		case always:
+			return handoffCovered, ""
+		case never:
+			return handoffContinue, ""
+		default:
+			if name == "" {
+				name = cands[0].RelString(nil) // mixed ALWAYS/NEVER candidates
+			}
+			return handoffUnknown, name
+		}
+	}
+
+	res := leakResult{}
+	// Two walks with one classifier, because the leak claim and the proof
+	// claim treat an unknown handoff differently: the LEAK hunt must stop
+	// there (the callee may have released — no witness past it), while the
+	// PROOF hunt must walk through it (an unconditional release further down
+	// still proves the path, so an early maybe-release must not force
+	// abstention). Each mode's "uncovered exit reachable from B" is
+	// prefix-independent, so each keeps the usual visited-set memoization.
+	run := func(unknownCovers bool) (token.Pos, bool) {
+		visited := map[*ssa.BasicBlock]bool{}
+		var walk func(b *ssa.BasicBlock, from int) (token.Pos, bool)
+		walk = func(b *ssa.BasicBlock, from int) (token.Pos, bool) {
+			for i := from; i < len(b.Instrs); i++ {
+				switch in := b.Instrs[i].(type) {
+				case *ssa.Call:
+					if anyRef(releases, in) {
+						return token.NoPos, false // released: this path is covered
 					}
-					return token.NoPos, false
+					kind, name := classify(in)
+					if kind == handoffCovered {
+						return token.NoPos, false // proven release in the callee
+					}
+					if kind == handoffUnknown {
+						if res.unknown == "" {
+							res.unknown = name
+						}
+						if unknownCovers {
+							return token.NoPos, false // no leak claim past a maybe-release
+						}
+					}
+				case *ssa.Defer:
+					if deferReleases(in, releases) {
+						return token.NoPos, false // deferred release covers every later exit
+					}
+					kind, name := classify(in)
+					if kind == handoffCovered {
+						return token.NoPos, false // deferred proven release covers exits
+					}
+					if kind == handoffUnknown {
+						if res.unknown == "" {
+							res.unknown = name
+						}
+						if unknownCovers {
+							return token.NoPos, false
+						}
+					}
+				case *ssa.Return:
+					return exitPos(fn, in), true
+				case *ssa.Panic:
+					return exitPos(fn, in), true
+				case *ssa.If:
+					if skip, ok := failureBranch(in, errVals); ok {
+						next := in.Block().Succs[1-skip]
+						if !visited[next] {
+							visited[next] = true
+							return walk(next, 0)
+						}
+						return token.NoPos, false
+					}
 				}
 			}
-		}
-		for _, next := range b.Succs {
-			if visited[next] {
-				continue
+			for _, next := range b.Succs {
+				if visited[next] {
+					continue
+				}
+				visited[next] = true
+				if pos, leaked := walk(next, 0); leaked {
+					return pos, true
+				}
 			}
-			visited[next] = true
-			if pos, leaked := walk(next, 0); leaked {
-				return pos, true
+			return token.NoPos, false
+		}
+
+		blk := acq.Block()
+		start := 0
+		for i, in := range blk.Instrs {
+			if in == acq {
+				start = i + 1
+				break
 			}
 		}
-		return token.NoPos, false
+		return walk(blk, start)
 	}
 
-	blk := acq.Block()
-	start := 0
-	for i, in := range blk.Instrs {
-		if in == acq {
-			start = i + 1
-			break
+	if pos, leaked := run(true); leaked {
+		res.exit, res.leaked = pos, true
+		return res
+	}
+	if res.unknown != "" {
+		// The proof hunt: a path proven covered past every maybe-release
+		// clears the abstention; an uncovered exit confirms it.
+		if _, uncovered := run(false); !uncovered {
+			res.unknown = ""
 		}
 	}
-	return walk(blk, start)
+	return res
+}
+
+// operandInWeb reports whether the resource's value web flows into the call:
+// among its arguments, or as the invoke receiver — the D-CX3 handoff test.
+func operandInWeb(in ssa.CallInstruction, web map[ssa.Value]bool) bool {
+	common := in.Common()
+	if common.IsInvoke() && web[common.Value] {
+		return true
+	}
+	for _, a := range common.Args {
+		if web[a] {
+			return true
+		}
+	}
+	return false
 }
 
 // deferReleases reports whether a Defer covers the obligation: it defers a
@@ -550,7 +701,7 @@ func isNil(v ssa.Value) bool {
 
 // ---- must-precede -----------------------------------------------------------
 
-func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string) []Finding {
+func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string, sums *Summaries) []Finding {
 	require := parseRef(rule.Require)
 	before := parseRef(rule.Before)
 
@@ -567,9 +718,15 @@ func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 				continue
 			}
 			// A Require site must be a plain call: a deferred A runs at exit,
-			// AFTER the B it is supposed to precede.
-			if _, plain := in.(*ssa.Call); plain && require.matchesCall(call) {
-				aSites = append(aSites, sited{call, b, i})
+			// AFTER the B it is supposed to precede. A derived A — a plain
+			// call that provably executes the require on every path before
+			// returning (CX-2) — counts the same way, for every rule: it
+			// widens A-site recognition, not the rule's scope (D-CX9).
+			if _, plain := in.(*ssa.Call); plain {
+				if require.matchesCall(call) ||
+					(sums != nil && sums.DerivedRequire(in.(*ssa.Call), rule.Require)) {
+					aSites = append(aSites, sited{call, b, i})
+				}
 			}
 			// A Before site is ANY call form: a deferred or spawned B still
 			// happens and still needs its A. The registration/spawn point is
@@ -598,9 +755,26 @@ func checkPrecede(rule *config.ObligationRule, fn *ssa.Function, baseDir string)
 				break
 			}
 		}
-		if dominated {
+		switch {
+		case dominated:
 			f.Status = Satisfied
-		} else {
+		case sums != nil && rule.FromCallers:
+			// The guard-intent lift (D-CX7/D-CX9): the require may run in
+			// callers; consult entry domination. Trust-monotone by
+			// construction — the intraprocedural verdict here was VIOLATED,
+			// and the lift can only prove it away or abstain legibly. There
+			// is no interprocedural VIOLATED: "provably require-less entry"
+			// would overclaim (adversarial review F3), and the rule author
+			// opted into caller context, so unprovable entries abstain.
+			sum, note := sums.EntryDominatedNote(fn, rule.Require)
+			if sum == SummaryAlways {
+				f.Status = Satisfied
+				f.Detail = fmt.Sprintf("require-covered at every entry; %s", note)
+			} else {
+				f.Status = CantProve
+				f.Detail = fmt.Sprintf("no call to %s dominates this call to %s in this function; %s", rule.Require, rule.Before, note)
+			}
+		default:
 			f.Status = Violated
 			f.Detail = fmt.Sprintf("no call to %s dominates this call to %s", rule.Require, rule.Before)
 		}

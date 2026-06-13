@@ -13,6 +13,7 @@ import (
 type EffectSite struct {
 	Label string // the boundary label, e.g. "boundary:bus PUBLISH loan.approved"
 	Site  ssa.CallInstruction
+	Via   string // non-empty for a derived site (CX-3): the ALWAYS-effect callee that commits it
 }
 
 // EffectOrder is one (committed effect, fallible call) order fact: the effect
@@ -31,6 +32,11 @@ type EffectOrder struct {
 	Callee     string `json:"callee"`
 	CalleeSite string `json:"callee_site"`
 	Always     bool   `json:"always,omitempty"`
+	// Via names the ALWAYS-effect callee for a derived site (CX-3): the
+	// effect is committed inside that call, proven on its every path.
+	// Presentation/provenance only — identity stays (Fn, EffectSite,
+	// CalleeSite).
+	Via string `json:"via,omitempty"`
 }
 
 // OrderFacts computes the intra-CFG partial order between fn's committed
@@ -87,6 +93,7 @@ func OrderFacts(fn *ssa.Function, effects []EffectSite, baseDir string) []Effect
 				Callee:     c.fqn,
 				CalleeSite: site(fn, c.instr.Common().Pos(), baseDir, 0),
 				Always:     always,
+				Via:        e.Via,
 			})
 		}
 	}

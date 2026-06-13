@@ -36,9 +36,12 @@ func TestObligationsJudged(t *testing.T) {
 		}
 	}
 
+	// CX-1/CX-2: the lift shapes land as cautions — sendFanoutOpen's
+	// unproven entry, sendFanoutTaken's taken address, TransferMaybeHelper's
+	// unprovable handoff — never as minted or borrowed verdicts.
 	c := res.Cautions()
-	if len(c) != 3 {
-		t.Fatalf("want 3 obligation cautions (2x CANT-PROVE, UNMATCHED), got %v", c)
+	if len(c) != 6 {
+		t.Fatalf("want 6 obligation cautions (5x CANT-PROVE, UNMATCHED), got %v", c)
 	}
 	var inert, cantProve bool
 	for _, f := range c {

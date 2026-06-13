@@ -144,7 +144,7 @@ func one(t *testing.T, fs []Finding, name string) Finding {
 
 func TestMustReleaseVerdicts(t *testing.T) {
 	fns := buildSSA(t, txSrc)
-	fs := Check([]config.ObligationRule{txRule()}, fns, "")
+	fs := Check([]config.ObligationRule{txRule()}, fns, "", nil)
 
 	leak := one(t, fs, "Transfer")
 	if leak.Status != Violated {
@@ -195,7 +195,7 @@ func Run(b Beginner) error {
 		Name:    "tx-must-close",
 		Acquire: "example.com/fix#BeginTx",
 		Release: []string{"example.com/fix#Commit"},
-	}}, fns, "")
+	}}, fns, "", nil)
 	if f := one(t, fs, "Run"); f.Status != Violated {
 		t.Errorf("invoke-mode acquire = %s (%s), want VIOLATED", f.Status, f.Detail)
 	}
@@ -243,7 +243,7 @@ func auditRule() config.ObligationRule {
 
 func TestMustPrecedeVerdicts(t *testing.T) {
 	fns := buildSSA(t, auditSrc)
-	fs := Check([]config.ObligationRule{auditRule()}, fns, "")
+	fs := Check([]config.ObligationRule{auditRule()}, fns, "", nil)
 
 	cases := map[string]Status{
 		"Disburse":      Satisfied,
@@ -265,7 +265,7 @@ func TestUnmatchedRuleDisclosed(t *testing.T) {
 		Name:    "renamed-away",
 		Acquire: "example.com/fix#BeginTransaction", // no such symbol anymore
 		Release: []string{"example.com/fix#Commit"},
-	}}, fns, "")
+	}}, fns, "", nil)
 	if len(fs) != 1 || fs[0].Status != Unmatched || fs[0].Fn != "" {
 		t.Fatalf("want one UNMATCHED finding with no fn, got %v", fs)
 	}
@@ -277,7 +277,7 @@ func TestUnmatchedRuleDisclosed(t *testing.T) {
 func TestCheckDeterministic(t *testing.T) {
 	fns := buildSSA(t, txSrc)
 	rules := []config.ObligationRule{txRule()}
-	a, b := Check(rules, fns, ""), Check(rules, fns, "")
+	a, b := Check(rules, fns, "", nil), Check(rules, fns, "", nil)
 	if len(a) != len(b) {
 		t.Fatalf("non-deterministic finding count: %d vs %d", len(a), len(b))
 	}
@@ -373,7 +373,7 @@ func TestRF4ReleaseIdioms(t *testing.T) {
 		{Name: "sem-must-release", Acquire: "example.com/fix#Acquire",
 			Release: []string{"example.com/fix#Release"}},
 	}
-	fs := Check(rules, fns, "")
+	fs := Check(rules, fns, "", nil)
 
 	want := map[string]Status{
 		"HoldSem":              Satisfied,
@@ -406,7 +406,7 @@ func DeferredPublishAudited() { audit("x"); defer publish("x") }
 	fns := buildSSA(t, src)
 	fs := Check([]config.ObligationRule{{
 		Name: "audit-before-publish", Require: "example.com/fix#audit", Before: "example.com/fix#publish",
-	}}, fns, "")
+	}}, fns, "", nil)
 
 	if f := one(t, fs, "DeferredPublish"); f.Status != Violated {
 		t.Errorf("unaudited deferred publish = %s, want VIOLATED (and not UNMATCHED)", f.Status)
