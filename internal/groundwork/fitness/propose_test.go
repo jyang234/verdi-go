@@ -144,6 +144,47 @@ func TestProposeExcludesAndDisclosesDBCallWrites(t *testing.T) {
 	}
 }
 
+// On a MIXED substrate (one classified write a seam guards, plus an opaque
+// db-call write that bypasses it), the proposed waypoint must disclose that its
+// "every path passes X" guarantee is classified-only — guardsAll cannot see the
+// opaque write, so an absolute claim would be silent-green (R5, waypoint case).
+func TestProposeWaypointDisclosesOpaqueBypass(t *testing.T) {
+	const (
+		guardedRoute = "(*example.com/svc/internal/handler.Server).Create"
+		seam         = "(*example.com/svc/internal/app.Service)"
+		seamMethod   = "(*example.com/svc/internal/app.Service).Do"
+		store        = "(*example.com/svc/internal/store.Store).Insert"
+		bypassRoute  = "(*example.com/svc/internal/handler.Server).Sync"
+		bypassStore  = "(*example.com/svc/internal/store.Store).Upsert"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: guardedRoute, Sig: "func()", Tier: 1},
+			{FQN: seamMethod, Sig: "func() error", Tier: 1},
+			{FQN: store, Sig: "func() error", Tier: 1},
+			{FQN: bypassRoute, Sig: "func()", Tier: 1},
+			{FQN: bypassStore, Sig: "func() error", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			// Classified write path: route → seam → store → db INSERT (seam guards it).
+			{From: guardedRoute, To: seamMethod, Tier: 2},
+			{From: seamMethod, To: store, Tier: 2},
+			{From: store, To: "boundary:db INSERT things", Tier: 1, Boundary: "outbound-sync"},
+			// Opaque write path bypassing the seam entirely.
+			{From: bypassRoute, To: bypassStore, Tier: 2},
+			{From: bypassStore, To: "boundary:db call", Tier: 1, Boundary: "outbound-sync"},
+		},
+	}
+	p, guide := Propose(graph.NewIndex(g), "svc")
+
+	if len(p.MustPassThrough) != 1 || p.MustPassThrough[0].Through[0] != seam {
+		t.Fatalf("want a waypoint at the app.Service seam, got %+v", p.MustPassThrough)
+	}
+	if !strings.Contains(guide, "guarantee is classified-only") || !strings.Contains(guide, "db call") {
+		t.Errorf("proposed waypoint must disclose the opaque-write bypass; guide:\n%s", guide)
+	}
+}
+
 // When the ENTIRE write surface is opaque and no route is provably read-only,
 // init proposes no read-only rule at all and says so — rather than asserting
 // "every entrypoint writes" (false) or ratcheting an unsupported claim.

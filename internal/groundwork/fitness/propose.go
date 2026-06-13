@@ -236,10 +236,18 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 		To:      []string{"boundary:db INSERT", "boundary:db UPDATE", "boundary:db DELETE"},
 		Through: []string{waypoint},
 	}}
-	g.section("Waypoint (must_pass_through): proposed",
-		fmt.Sprintf("Every entrypoint-to-DB-write path already passes **`%s`** — ratcheted, so a future route that skips it fails the gate (the `entrypoint:*` selector binds brand-new handler packages automatically).\n\n"+
-			"**Tighten by**: setting `\"require_proof\": true` if this seam is security-relevant (auth/tenancy) — unprovability then fails closed.\n"+
-			"**Question for the team**: is this seam guarding by DESIGN or by accident? If by accident, decide whether to bless it or name the intended seam instead.", waypoint))
+	body := fmt.Sprintf("Every entrypoint-to-DB-write path already passes **`%s`** — ratcheted, so a future route that skips it fails the gate (the `entrypoint:*` selector binds brand-new handler packages automatically).\n\n"+
+		"**Tighten by**: setting `\"require_proof\": true` if this seam is security-relevant (auth/tenancy) — unprovability then fails closed.\n"+
+		"**Question for the team**: is this seam guarding by DESIGN or by accident? If by accident, decide whether to bless it or name the intended seam instead.", waypoint)
+	// The seam guards every CLASSIFIED write path, but guardsAll cannot see opaque
+	// writes (non-constant SQL labels "db call", which IsWrite skips). On a mixed
+	// substrate the "every path" claim is classified-only — disclose so an opaque
+	// write bypassing the seam does not read as guarded (R5, same class as above).
+	if len(unclassified) > 0 {
+		body += fmt.Sprintf("\n\n**Caution — guarantee is classified-only**: %d DB effect label(s) built from non-constant SQL the labeler cannot read as a write (%s) are NOT proven to pass this seam — an opaque write reaching the DB outside `%s` would not be caught. Make the SQL constant, or confirm the seam covers these paths by hand.",
+			len(unclassified), strings.Join(setutil.SortedKeys(unclassified), ", "), waypoint)
+	}
+	g.section("Waypoint (must_pass_through): proposed", body)
 }
 
 // proposeReadOnly ratchets every entrypoint that currently writes nothing:
