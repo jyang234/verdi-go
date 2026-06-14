@@ -421,6 +421,92 @@ func TestProposeClosingUnionsConcurrentOpaqueWrites(t *testing.T) {
 	}
 }
 
+// R7: an oapi-codegen STRICT-SERVER topology. The generated
+// `(*ServerInterfaceWrapper).Handler` method is a graph root whose static
+// out-edges stop at the chi router BEFORE its own per-handler `$1` closure (the
+// forward seam), so `Reachable(wrapper)` is starved and never sees the classified
+// `db DELETE` the `$1` closure reaches. fitness, however, binds the
+// `read-routes-stay-read-only` from-entry by NAME-EXPANSION (expandFroms/matchNodes),
+// which pulls the `$1` closure in by prefix — so init used to propose the wrapper
+// as read-only from the starved cone, then fail its own gate over the expanded
+// family. proposeReadOnly must now judge over the same expansion the enforcer
+// will, so the writing wrapper is excluded and the proposal stays self-clean.
+//
+// No existing fixture has this shape: loansvc/layeredsvc are direct-call (no `$1`
+// closure), and the db-call fixtures are opaque-write, not classified-write behind
+// a dispatch seam. This models the strict-server topology directly.
+func TestProposeExcludesStrictServerWriterBehindSeam(t *testing.T) {
+	const (
+		wrapper = "(*example.com/svc/internal/api.ServerInterfaceWrapper).CreateEventTypeTemplate"
+		// The generated handler closure: shares the wrapper's FQN as a prefix, so
+		// expandFroms(wrapper) binds it — but it is NOT reachable from the wrapper.
+		closure = "(*example.com/svc/internal/api.ServerInterfaceWrapper).CreateEventTypeTemplate$1"
+		// The chi dispatch site that wires the generated handler closure: the
+		// closure's single incoming edge comes from here, NOT from the wrapper.
+		dispatch = "example.com/svc/internal/api.HandlerWithOptions$1"
+		paramErr = "(*example.com/svc/internal/handler.Server).ParamErrorHandler"
+		strictH  = "(*example.com/svc/internal/api.strictHandler).CreateEventTypeTemplate"
+		store    = "(*example.com/svc/internal/storage.PostgresStore).deleteOutboxBySourceIDs"
+		// A genuinely read-only route, to prove the rule is still proposed for the
+		// routes that earn it.
+		readRoute = "(*example.com/svc/internal/api.ServerInterfaceWrapper).GetHealth"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: wrapper, Sig: "func()", Tier: 1},
+			{FQN: closure, Sig: "func()", Tier: 1},
+			{FQN: dispatch, Sig: "func()", Tier: 1},
+			{FQN: paramErr, Sig: "func()", Tier: 1},
+			{FQN: strictH, Sig: "func() error", Tier: 1},
+			{FQN: store, Sig: "func() error", Tier: 1},
+			{FQN: readRoute, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			// The wrapper root's static reach stops at the param error handler — it
+			// never crosses chi's dynamic dispatch to its own `$1` closure (the seam),
+			// so `Reachable(wrapper)` is starved and reaches no write.
+			{From: wrapper, To: paramErr, Tier: 2},
+			// The `$1` closure's single incoming edge comes from the chi dispatch
+			// site, NOT the wrapper — so the wrapper cannot reach it, but
+			// `expandFroms(wrapper)` still binds it by prefix.
+			{From: dispatch, To: closure, Tier: 2},
+			{From: closure, To: strictH, Tier: 2},
+			{From: strictH, To: store, Tier: 2},
+			// The classified write lives past the seam.
+			{From: store, To: "boundary:db DELETE provisioning_outbox", Tier: 1, Boundary: "outbound-sync"},
+			// GetHealth reaches no write at all — the clean read-only baseline.
+		},
+	}
+	ix := graph.NewIndex(g)
+	p, _ := Propose(ix, "svc")
+
+	from := map[string]bool{}
+	if len(p.MustNotReach) > 0 {
+		for _, f := range p.MustNotReach[0].From {
+			from[f] = true
+		}
+	}
+	// The wrapper writes through its `$1` closure — it must NOT be ratcheted as a
+	// read-only route, even though its bare forward cone is starved past the seam.
+	if from[wrapper] {
+		t.Errorf("the strict-server wrapper writes through its closure but was swept into read-routes-stay-read-only: From = %v", p.MustNotReach[0].From)
+	}
+	// The genuinely read-only route is still ratcheted.
+	if !from[readRoute] {
+		t.Errorf("the read-only route must still be ratcheted; From = %v", p.MustNotReach[0].From)
+	}
+
+	// The decisive assertion: the proposal must pass its own gate. Before the fix
+	// fitness flagged the wrapper's `$1` closure reaching the DELETE — init's own
+	// output exited 1 (R7). It must now be clean.
+	res := Check(p, ix)
+	for _, f := range res.Violations() {
+		if f.Rule != "obligation" {
+			t.Errorf("proposed policy violates its own source graph (R7): %v", f)
+		}
+	}
+}
+
 // guideSection returns the body of the first "## ..." section whose header
 // contains titleSubstr, up to the next section header (or end of guide).
 func guideSection(guide, titleSubstr string) string {

@@ -356,7 +356,7 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 		if strings.HasSuffix(s, ".main") {
 			continue
 		}
-		cone := append([]string{s}, ix.Reachable(s)...)
+		cone := readOnlyCone(ix, s)
 		writes := false
 		routeUnclass := map[string]bool{}
 		for _, e := range ix.Effects(cone...) {
@@ -406,6 +406,31 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 				"Their read-only status is UNPROVEN, so they were left OUT of `read-routes-stay-read-only` rather than ratcheted on a claim the graph cannot support — these routes MIGHT mutate. Review before trusting; making the SQL constant exposes the verb and lets init classify it.",
 				len(unproven), dbCallPhrase(setutil.SortedKeys(unclassLabels)), shortList(unproven)))
 	}
+}
+
+// readOnlyCone returns the reachability cone proposeReadOnly must judge a route
+// source over so its read-only verdict matches what fitness will ENFORCE.
+//
+// The enforcer binds a `must_not_reach` from-entry by NAME-EXPANSION —
+// checkMustNotReach → bindFroms → expandFroms → matchNodes — so the set it
+// actually walks from includes every node whose FQN the entry exact-or-prefix-
+// matches: the source AND its generated closure family (its `$N` closures), which
+// share the source's FQN as a prefix. The proposer used to judge read-only-ness
+// over `ix.Reachable(s)` alone, the source's bare forward cone. On an oapi-codegen
+// strict-server topology these two node sets diverge: the
+// `(*ServerInterfaceWrapper).Handler` method is a graph root whose static
+// out-edges stop at the chi router BEFORE its own per-handler `$1` closure (the
+// forward seam), so `Reachable(wrapper)` is starved and never sees the write the
+// `$1` closure reaches — yet `expandFroms(wrapper)` pulls that `$1` closure in by
+// name. Judging from the starved cone while the gate enforces over the expanded
+// family is what let init propose a from-entry fitness then violates: init shipped
+// a "read-only" route that reaches a classified write through its closure.
+// Expanding here, exactly as expandFroms will, makes the proposal and the
+// enforcement share one reachability — init cannot emit a read-only entry the gate
+// rejects.
+func readOnlyCone(ix *graph.Index, source string) []string {
+	family := expandFroms(ix, []string{source})
+	return append(family, ix.Reachable(family...)...)
 }
 
 // proposeConcurrent ratchets the current truth about concurrency: if no
@@ -553,9 +578,19 @@ func reconcile(ix *graph.Index, p *policy.Policy, g *guide) {
 					p.MustPassThrough = nil
 				}
 			case "must_not_reach":
+				// Drop the from-entry that OWNS the violation. The finding names the
+				// node that actually reached the target (f.From), which the enforcer
+				// took from the NAME-EXPANDED from-set — for an oapi-codegen wrapper
+				// that is the entry's `$1` closure, not the entry itself, so a bare
+				// `from == f.From` test never matches and the relaxation is a silent
+				// no-op. Match through the same expandFroms the enforcer used: prune
+				// the entry whose closure family the violating node belongs to. (The
+				// root fix in readOnlyCone means init no longer proposes such an
+				// entry; this keeps the relaxation honest if one ever reaches here.)
 				var kept []string
 				for _, from := range p.MustNotReach[0].From {
-					if from != f.From {
+					owns := from == f.From || setutil.StringSet(expandFroms(ix, []string{from}))[f.From]
+					if !owns {
 						kept = append(kept, from)
 					}
 				}
