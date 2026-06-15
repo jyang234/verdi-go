@@ -403,6 +403,19 @@ which are real here:
   a generated corpus (renumbered closures, renamed named handlers, §9 churn), the
   review/contract analogue of the proposer self-clean property — the topology
   match a hand fixture had missed (R3/R7/R10).
+- **Breaking-contract over-fire on effect-emitter movement (R10 sibling) —
+  SHIPPED.** The same FQN-keying defect lived in the contract's effect surface:
+  it keyed per boundary edge (on the emitting function, the edge's `From`), so a
+  refactor that moved an emitter while the target stood — a renamed/extracted
+  publisher, or a consolidation pointing several callers at one helper (in
+  obligsvc, `loan.approved` is published by seven functions) — read as a
+  removed+added effect, a spurious breaking change. The delta now keys on the
+  effect TARGET SET (each published/consumed topic, outbound endpoint:
+  `contractEffects`), so a removal fires only when the target leaves the branch
+  entirely — the genuine break. It is independent of the effect ratchet
+  (`newWriteTargets` already keys on the write-label set), so the write ratchet is
+  unaffected. Locked by `TestContractEffectKeyedOnTargetNotEmitter` (rename,
+  extract-function, consolidation, genuine removal/addition controls).
 - **Universal self-clean invariant across inputs — SHIPPED.** R5–R8 were each a
   proposer/enforcer node-set gap a fixture missed.
   `TestProposeSelfCleanOverGeneratedGraphs` makes the invariant literal over a

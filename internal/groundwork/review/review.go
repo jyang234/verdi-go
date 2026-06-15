@@ -30,7 +30,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		Shape:            d.shape(),
 		Touches:          d.pkgDeltas(),
 		NewViolations:    newViolations,
-		Contract:         contractChanges(d, baseIx, branchIx),
+		Contract:         contractChanges(baseIx, branchIx),
 		Effects:          ioEffects(d),
 		RouteIO:          routeIODeltas(p, baseIx, branchIx, baseRW, branchRW),
 		NewWriteTargets:  newWriteTargets(p, base, branch),
@@ -190,7 +190,20 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 // unwired exported method, and a refactor-orphaned non-route closure are all
 // absent from the entrypoints join, so they carry no route name and never enter
 // this delta — that churn is internal structure, surfaced in the node/edge delta.
-func contractChanges(d graphDelta, baseIx, branchIx *graph.Index) []ContractChange {
+//
+// The effect surface is keyed the same way: on the SET of effect TARGETS (each
+// published topic, consumed topic, outbound endpoint), not per emitting edge. A
+// topic is "published" if ANY function publishes it, so the contract is a
+// set-membership fact, not a per-emitter one. Keying per edge (on the boundary
+// edge's From) over-fired on the same class as R10 — a refactor that moved the
+// emitting function while the target stood read as removed+added: a renamed or
+// extracted publisher, or a consolidation pointing several callers at one helper
+// (in obligsvc, loan.approved is published by seven functions; collapsing them
+// onto publishApproved fired six spurious breaking removals). Set-keying reports
+// a removal only when the target leaves the branch entirely — the genuine
+// contract break — and is independent of the effect_ratchet (newWriteTargets,
+// which already keys on the write-label set), so the write ratchet is unaffected.
+func contractChanges(baseIx, branchIx *graph.Index) []ContractChange {
 	var out []ContractChange
 
 	baseRoutes := externalRoutes(baseIx)
@@ -206,14 +219,19 @@ func contractChanges(d graphDelta, baseIx, branchIx *graph.Index) []ContractChan
 		}
 	}
 
-	for _, e := range d.effectsAdded {
-		if surface, name, ok := classifyContract(e); ok {
-			out = append(out, ContractChange{Op: "+", Surface: surface, Name: name})
+	baseEff := contractEffects(baseIx)
+	branchEff := contractEffects(branchIx)
+	for k, c := range branchEff {
+		if _, ok := baseEff[k]; !ok {
+			c.Op = "+"
+			out = append(out, c)
 		}
 	}
-	for _, e := range d.effectsRemoved {
-		if surface, name, ok := classifyContract(e); ok {
-			out = append(out, ContractChange{Op: "-", Surface: surface, Name: name, Breaking: true})
+	for k, c := range baseEff {
+		if _, ok := branchEff[k]; !ok {
+			c.Op = "-"
+			c.Breaking = true
+			out = append(out, c)
 		}
 	}
 
@@ -249,6 +267,28 @@ func externalRoutes(ix *graph.Index) map[string]bool {
 	for _, ep := range ix.Entrypoints() {
 		if (ep.Kind == "http" || ep.Kind == "consumer") && ep.Name != "" {
 			out[ep.Name] = true
+		}
+	}
+	return out
+}
+
+// contractEffects returns the set of inter-service effect targets a graph
+// exposes — each published topic, consumed topic, and outbound endpoint — keyed
+// by surface+name (DB effects excluded: the store is internal, not contract).
+// Like externalRoutes, this is the CONTRACT as a set-membership fact, deduped
+// across every emitting edge: a topic is published if any function publishes it,
+// so which function does is an implementation detail. Deduping here is what keeps
+// a refactor that moves the emitter (rename, extract-function, or consolidating
+// several callers onto one helper) from reading as a removed+added effect — the
+// per-edge keying over-fired on exactly that, the same class as R10.
+func contractEffects(ix *graph.Index) map[string]ContractChange {
+	out := map[string]ContractChange{}
+	for _, e := range ix.Edges() {
+		if !e.IsBoundary() {
+			continue
+		}
+		if surface, name, ok := classifyContract(e); ok {
+			out[surface+"\x00"+name] = ContractChange{Surface: surface, Name: name}
 		}
 	}
 	return out
