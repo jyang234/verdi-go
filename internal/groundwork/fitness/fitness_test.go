@@ -42,6 +42,22 @@ func layeredPolicy() *policy.Policy {
 	}
 }
 
+// The policy-vs-graph substrate mismatch is a DISCLOSURE (a caveat on the
+// substrate line), never a fitness Finding: Check is shared with review/verify,
+// so a finding here would leak into their base-vs-branch diff and flip a verdict.
+// Check must therefore stay silent on a mismatch — the caveat channel
+// (cmdFitness, provenanceCaveats) carries it. The caveat text itself is covered by
+// graph.TestSubstrateMismatchCaveat and review.TestReviewFlagsPolicyGraphSubstrateMismatch.
+func TestCheckEmitsNoSubstrateFinding(t *testing.T) {
+	g := &graph.Graph{Algo: "rta", Nodes: []graph.Node{{FQN: "svc.A", Tier: 1}}}
+	res := Check(&policy.Policy{Service: "svc", Version: 1, Substrate: "vta"}, graph.NewIndex(g))
+	for _, f := range res.Findings {
+		if f.Rule == "substrate" {
+			t.Errorf("Check must not emit a substrate finding (it leaks into review's diff); got %+v", f)
+		}
+	}
+}
+
 func TestPkgOf(t *testing.T) {
 	cases := map[string]string{
 		hGetUser: "example.com/layeredsvc/internal/handler",

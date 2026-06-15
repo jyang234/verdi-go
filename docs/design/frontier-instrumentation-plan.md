@@ -257,6 +257,16 @@ its effects, leaving only the irreducible A/B2 frontier. Default Build is unchan
 "strict-server"`. Soundness (R2) is enforced by the detector below and the
 no-false-positives test (oapisvc/loansvc recover nothing).
 
+**Consumer side (R9):** the groundwork decoder (`groundwork/graph.Edge`) now
+accepts and round-trips the per-edge `via` tag — without it `DisallowUnknownFields`
+rejected every reclaimed graph (`unknown field "via"`, exit 2), so the reclaimer was
+producible but not consumable through `init`/`fitness`/`verify`/`review`/`reach`.
+The substrate disclosure is extended too (`Graph.ReclaimCaveat`): when a graph
+carries reclaimed edges, the substrate line every verdict surface echoes appends
+`reclaim-informed: N via <reclaimer> …`, so a verdict that leaned on a reclaimed
+edge is auditable as such — the Algo/Caveats discipline (R3) extended to the
+reclaimer provenance.
+
 **What:** sound static-analysis passes that add the missing edges for a recognized
 B-shape. First target, measured as ~80% of the strict-server frontier:
 
@@ -361,12 +371,28 @@ which are real here:
   routes with empty cones — deserves its own deterministic signal ("N routes touch
   nothing; suspicious"), independent of any reclaimer. Cheap, generic, high-value
   for agents.
-- **Algo-provenance mismatch (field report §9).** A policy built on VTA but checked
-  on an RTA graph produced spurious violations. The graph already records `Algo`;
-  the frontier/verdict surfaces should flag a policy-vs-graph algo mismatch. Fits
-  the same provenance plumbing reclaimers need.
-- **Reclaimer provenance in verdicts.** Once edges have sources, a proof should be
-  able to state which reclaimers it depended on — auditability for reviewers.
+- **Algo-provenance mismatch (field report §9) — SHIPPED.** A policy built on VTA
+  but checked on an RTA graph produced spurious violations. `init` now records the
+  proposed-against algorithm in the policy's `substrate` field, and `fitness`/
+  `verify` flag a policy-vs-graph mismatch (`graph.SubstrateMismatchCaveat`): a
+  non-blocking Caution in fitness, a substrate caveat in the review gate, so the
+  spurious findings read as an analyzer artifact, not a regression. Reused the same
+  Algo/Caveats provenance plumbing.
+- **Reclaimer provenance in verdicts — SHIPPED (R9).** Edges carry a `via` source;
+  groundwork decodes it and `Graph.ReclaimCaveat` states on the substrate line that
+  a verdict leaned on reclaimed edges — auditability for reviewers.
+- **Breaking-contract over-fire on internal churn (field report §9) — SHIPPED.**
+  `review`/`verify` keyed the entrypoint contract surface on graph *roots*
+  (`Sources()`), so a closure renumbered by a refactor (run$4 → newHTTPServer$1) or
+  an internal function left rootless by a deleted backend read as a BREAKING
+  external-contract change. The surface is now keyed on the *external entrypoint*
+  join (`externalEntrypoints`: HTTP routes / consumed topics) — internal root and
+  closure churn is structural delta, not contract, and no longer blocks a merge.
+- **Universal self-clean invariant across inputs — SHIPPED.** R5–R8 were each a
+  proposer/enforcer node-set gap a fixture missed.
+  `TestProposeSelfCleanOverGeneratedGraphs` makes the invariant literal over a
+  generated graph corpus (random topologies, strict-server seams, the full effect
+  vocabulary), catching the next sibling before a field report does.
 
 ---
 

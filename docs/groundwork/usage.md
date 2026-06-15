@@ -136,6 +136,26 @@ on *different* algorithms, the mismatch is disclosed as a caveat (a delta across
 substrates can move for the analyzer's reasons, not the code's). A graph from a
 pre-provenance flowmap reads `substrate: unrecorded`.
 
+A graph built with `flowmap graph --reclaim` carries edges recovered at a
+framework dispatch seam (the oapi strict-server `wrapper→$1` hop), each tagged with
+the reclaimer in a `via` field. groundwork consumes that field and adds a
+`reclaim-informed: N via <reclaimer>` clause to the same substrate line, so a
+verdict that leaned on a reclaimed edge is auditable as such. Reclaimers only add
+sound edges, so a proof of *absence* over a reclaimed graph is at least as strong;
+the disclosure exists so a *reachable* verdict resting on a reclaimed edge is not
+mistaken for one the base graph already saw.
+
+`init` also records the algorithm it proposed against in the policy's `substrate`
+field, and `fitness`/`verify` flag a **policy-vs-graph** mismatch the same way: a
+policy proposed on `vta` but checked against an `rta` graph (the `flowmap graph`
+default) appends a substrate-mismatch note to the same provenance line, because
+`rta` over-approximates dynamic dispatch and can surface reachability findings
+`vta` ruled out — so the spurious findings read as an analyzer artifact, not a
+regression. It is a **disclosure, never a gate finding** (a finding would leak
+into `review`/`verify`'s base-vs-branch diff and mis-flip a verdict), so it
+discloses without blocking. The remedy it names: build the gate graph with the
+same `--algo`, or re-init the policy.
+
 ---
 
 ## The policy
@@ -148,6 +168,7 @@ own homework — so it is declarative and validated strictly on load.
 {
   "service": "layeredsvc",
   "version": 1,
+  "substrate": "vta",
   "layers": [
     {"name": "handler", "packages": ["example.com/layeredsvc/internal/handler"]},
     {"name": "app",     "packages": ["example.com/layeredsvc/internal/app"]},
@@ -414,7 +435,7 @@ three-valued, so green never means more than it should:
 ```console
 $ groundwork review policy.json base.json branch.json
 # MR structural review — BLOCK
-digest 4678af36712e5cf4… · recompute to verify (deterministic; not author-editable)
+digest adb67c06a1f6c8e6… · recompute to verify (deterministic; not author-editable)
 substrate: rta — rta from 3 discovered root(s)
 
 Shape: cross-package
@@ -423,10 +444,13 @@ Touches: handler(+1)
 ⛔ Introduces 1 invariant violation(s)
 - layering — handler → store skips 1 layer(s)
   - (*…/handler.Server).GetUserFast → (*…/store.Store).SelectUser
-
-🔌 External contract changed (additive)
-- + entrypoint handler.Server.GetUserFast
 ```
+
+(`GetUserFast` is a new exported handler method, but it is not bound to a route —
+it is a graph *root* without being an external *entrypoint* — so it is reported in
+the structural delta above, not as an external-contract change. Only a removed or
+added HTTP route / consumed topic moves the contract section; internal
+orphan-root and closure churn does not.)
 
 - **`BLOCK`** — a new invariant violation or a breaking contract change.
 - **`STRUCTURALLY-CLEAR`** — the shape changed but no invariant broke. *Not* a
@@ -440,6 +464,17 @@ edge — *same description, different computed verdict.* The artifact also repor
 shape, touched packages, contract movement (additive vs breaking), I/O effect
 changes, and which existing entrypoints the change is now live behind. Add
 `--json` to emit the canonical artifact for archival or `verify-artifact`.
+
+The **contract** section is the inter-service surface: named external
+entrypoints (HTTP routes and consumed topics, from the `entrypoints` join) plus
+bus publishes/consumes and outbound dependencies. Removing one is breaking. It is
+deliberately keyed on *named entrypoints*, not on every graph root: an unwired
+exported method, a closure renumbered by a refactor, or an internal function left
+rootless by a deleted backend are all roots but none are inter-service contract,
+so they surface in the structural delta, not as a (breaking) contract change. The
+trade-off is services-scoped — for a graph that exposes no routes/topics (or whose
+routes flowmap did not resolve into the entrypoints join) a removed root is not
+flagged here; such a removal shows in the node/edge delta instead.
 
 Two sections attribute write-surface movement beyond the global effect diff:
 
@@ -973,7 +1008,7 @@ it. Top-level sections:
 | Section | What it is | Notes |
 |---|---|---|
 | `nodes[]` | `{fqn, sig, tier, fallible}` per first-party function | sorted by fqn |
-| `edges[]` | `{from, to, tier, boundary?, concurrent?}`; `to` is an FQN or a `boundary:` label | `<dynamic>` in a label = unresolvable target, disclosed |
+| `edges[]` | `{from, to, tier, boundary?, concurrent?, via?}`; `to` is an FQN or a `boundary:` label | `<dynamic>` in a label = unresolvable target, disclosed; `via` names the reclaimer (`flowmap --reclaim`) that recovered the edge at a dispatch seam — a verdict over it self-discloses as reclaim-informed |
 | `blind_spots[]` | `{kind, site, detail}` — where the graph's knowledge stops | the soundness frontier |
 | `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
 | `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |

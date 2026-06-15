@@ -16,6 +16,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // boundaryPrefix marks an edge target that is a typed external sink (a DB op, an
@@ -154,6 +156,17 @@ type Edge struct {
 	Tier       int    `json:"tier"`
 	Boundary   string `json:"boundary,omitempty"`
 	Concurrent bool   `json:"concurrent,omitempty"`
+
+	// Via names the reclaimer that recovered this edge (flowmap's opt-in
+	// `--reclaim`), empty for a base call-graph edge. A reclaimed edge is one
+	// real execution can take that the builder lost at a framework dispatch seam
+	// (the oapi strict-server wrapper→closure hop) — reclaimers only ADD sound
+	// can-reach edges (R2), never remove one. groundwork decodes it on its own
+	// side of the trust boundary like every other graph-carried field: a
+	// reclaimed graph must be CONSUMABLE (init/fitness/verify/review/reach), and
+	// a verdict computed over it self-discloses that it leaned on a reclaimed
+	// substrate via ReclaimCaveat, the Algo/Caveats discipline extended.
+	Via string `json:"via,omitempty"`
 }
 
 // BlindSpot is one disclosed gap in the graph's knowledge. Site is a first-party
@@ -181,6 +194,55 @@ func ProvenanceLine(algo string, caveats []string) string {
 		line += " — " + strings.Join(caveats, "; ")
 	}
 	return line + "\n"
+}
+
+// ReclaimCaveat returns a substrate caveat disclosing that this graph carries
+// reclaimed edges (flowmap's opt-in `--reclaim`), or "" when it carries none. It
+// names each reclaimer and its edge count so a verdict computed over the graph is
+// AUDITABLE as reclaim-informed — the Algo/Caveats substrate discipline (R3)
+// extended to the reclaimer provenance. Folded into the caveats every verdict
+// surface already echoes (fitness/verify/review), so a reader sees on the same
+// substrate line that the verdict leaned on edges recovered at a dispatch seam.
+//
+// A proof of ABSENCE over a reclaimed graph is at least as strong as over the base
+// graph (reclaimers only add sound edges — R2 — so they can turn provenAbsent→
+// reachable, never the reverse); the disclosure exists so a REACHABLE verdict that
+// rests on a reclaimed edge is not mistaken for one the base graph already saw.
+func (g *Graph) ReclaimCaveat() string {
+	counts := map[string]int{}
+	for _, e := range g.Edges {
+		if e.Via != "" {
+			counts[e.Via]++
+		}
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	vias := setutil.SortedKeys(counts)
+	parts := make([]string, 0, len(vias))
+	for _, v := range vias {
+		parts = append(parts, fmt.Sprintf("%d via %s", counts[v], v))
+	}
+	return "reclaim-informed: " + strings.Join(parts, ", ") +
+		" edge(s) recovered at a dispatch seam (flowmap --reclaim) — a reachable verdict may rest on a reclaimed edge"
+}
+
+// SubstrateMismatchCaveat returns a disclosure when a policy proposed on
+// policyAlgo is being checked against a graph built on graphAlgo and the two
+// differ, or "" when there is nothing to flag (either is unrecorded, or they
+// agree). The algorithms are all sound, so a proof of absence holds on any of
+// them; they differ in PRECISION, so a coarser graph (rta over-approximates
+// dynamic dispatch) can show a reachability finding a refined one (vta) ruled
+// out — the field footgun where a vta-proposed policy swept with the rta default
+// produced spurious must_not_reach violations. Naming the mismatch lets a reader
+// treat such a finding as an analyzer artifact rather than a regression. Shared by
+// fitness (as a Caution) and the review gate (as a substrate caveat) so the two
+// surfaces word it identically — the Algo/Caveats provenance discipline (R3).
+func SubstrateMismatchCaveat(policyAlgo, graphAlgo string) string {
+	if policyAlgo == "" || graphAlgo == "" || policyAlgo == graphAlgo {
+		return ""
+	}
+	return fmt.Sprintf("substrate mismatch: policy proposed on %s, graph built on %s — the algorithms differ in precision, so a reachability finding may be an analyzer artifact, not a regression; build the gate graph with `flowmap graph --algo %s`, or re-init the policy on this graph", policyAlgo, graphAlgo, policyAlgo)
 }
 
 // IsBoundary reports whether the edge targets an external sink rather than a

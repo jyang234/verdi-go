@@ -12,12 +12,24 @@ import (
 // synthesized caveat discloses the mismatch, because a delta computed across
 // substrates can move for reasons that are the analyzer's, not the code's. Nil
 // when neither side recorded provenance (graphs from a pre-provenance flowmap).
-func provenanceCaveats(base, branch *graph.Graph) []string {
+func provenanceCaveats(policyAlgo string, base, branch *graph.Graph) []string {
 	var out []string
 	if base.Algo != "" && branch.Algo != "" && base.Algo != branch.Algo {
 		out = append(out, fmt.Sprintf("base graph built on %s, branch on %s — substrate differs; a delta may be the analyzer's, not the code's", base.Algo, branch.Algo))
 	}
+	// A policy proposed on one algorithm but gated against a graph built on
+	// another can surface spurious reachability findings (the algorithms differ
+	// in precision); flag it so the gate's findings are read correctly (§9).
+	if mc := graph.SubstrateMismatchCaveat(policyAlgo, branch.Algo); mc != "" {
+		out = append(out, mc)
+	}
 	out = append(out, branch.Caveats...)
+	// When the branch graph was built with `--reclaim`, the verdict was computed
+	// over a substrate that includes edges recovered at a dispatch seam; disclose
+	// it on the same substrate line so a reclaim-informed gate is auditable (R9).
+	if rc := branch.ReclaimCaveat(); rc != "" {
+		out = append(out, rc)
+	}
 	if len(out) == 0 {
 		return nil
 	}

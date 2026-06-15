@@ -40,7 +40,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		NewBlindSpots:    newBlindSpots(p, base, branch),
 		DBLabelDrift:     dbLabelDrift(base, branch),
 		Algo:             branch.Algo,
-		Caveats:          provenanceCaveats(base, branch),
+		Caveats:          provenanceCaveats(p.Substrate, base, branch),
 	}
 	a.Verdict = verdict(p, d, &a)
 	a.Digest = digestOf(a)
@@ -165,21 +165,34 @@ func newFindings(p *policy.Policy, baseIx, branchIx *graph.Index) (violations, c
 	return violations, cautions, standingCautions, baseRes.RouteWrites, branchRes.RouteWrites
 }
 
-// contractChanges reports inter-service surface movement: entrypoints (Sources)
-// and bus/outbound effects added or removed. DB effects are excluded — the store
-// is the service's own, not its contract. A removal is breaking.
+// contractChanges reports inter-service surface movement: entrypoints and
+// bus/outbound effects added or removed. DB effects are excluded — the store is
+// the service's own, not its contract. A removal is breaking.
+//
+// "Entrypoint" means a NAMED external entrypoint — an HTTP route or a consumed
+// topic (the graph's Entrypoints join), NOT every graph root. A root is the
+// graph's structural notion (a node with no first-party caller) and over-counts
+// the contract: an unwired exported method, a closure orphaned by an
+// extract-function refactor (run$4 → newHTTPServer$1), and an internal function
+// left rootless when a backend is deleted (pollMessages, Queue.Acknowledge) are
+// all roots but none are inter-service contract. Keying the entrypoint surface on
+// the external-entrypoint set (not Sources) is what keeps that internal identity
+// churn from reading as a breaking external-contract change (field report §9):
+// such churn is internal structure and surfaces in the node/edge delta, not here.
 func contractChanges(d graphDelta, baseIx, branchIx *graph.Index) []ContractChange {
 	var out []ContractChange
 
+	extBase := externalEntrypoints(baseIx)
+	extBranch := externalEntrypoints(branchIx)
 	baseSrc := setutil.StringSet(baseIx.Sources())
+	branchSrc := setutil.StringSet(branchIx.Sources())
 	for _, s := range branchIx.Sources() {
-		if !baseSrc[s] {
+		if !baseSrc[s] && extBranch[s] {
 			out = append(out, ContractChange{Op: "+", Surface: "entrypoint", Name: fitness.ShortName(s)})
 		}
 	}
-	branchSrc := setutil.StringSet(branchIx.Sources())
 	for _, s := range baseIx.Sources() {
-		if !branchSrc[s] {
+		if !branchSrc[s] && extBase[s] {
 			out = append(out, ContractChange{Op: "-", Surface: "entrypoint", Name: fitness.ShortName(s), Breaking: true})
 		}
 	}
@@ -204,6 +217,28 @@ func contractChanges(d graphDelta, baseIx, branchIx *graph.Index) []ContractChan
 		}
 		return out[i].Name < out[j].Name
 	})
+	return out
+}
+
+// externalEntrypoints returns the handler FQNs bound to a named external
+// entrypoint — an HTTP route or a consumed topic. It is how a graph ROOT is told
+// apart from internal structure: only a root that handles a route or topic is the
+// service's inter-service contract. A root absent from this set (an unwired
+// exported method, a refactor-orphaned closure, an internal function left
+// rootless by a deleted call site) is internal churn, not a contract change.
+//
+// When the graph carries no entrypoints join at all (a pre-entrypoints flowmap,
+// or a service with no detected external surface) this is empty, so no root
+// movement is reported as a contract change — correct for a service with no
+// declared external surface, and a deliberate trade: the precise external signal
+// over the structural over-approximation that cried wolf on internal churn.
+func externalEntrypoints(ix *graph.Index) map[string]bool {
+	out := map[string]bool{}
+	for _, ep := range ix.Entrypoints() {
+		if ep.Kind == "http" || ep.Kind == "consumer" {
+			out[ep.Fn] = true
+		}
+	}
 	return out
 }
 

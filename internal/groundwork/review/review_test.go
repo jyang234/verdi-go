@@ -66,9 +66,16 @@ func TestReviewStructurallyClear(t *testing.T) {
 	if a.Verdict != StructurallyClear {
 		t.Fatalf("verdict = %s, want STRUCTURALLY-CLEAR (violations: %v)", a.Verdict, a.NewViolations)
 	}
-	// The new endpoint is reported as an additive entrypoint, not a breaking change.
-	if len(a.Contract) != 1 || a.Contract[0].Op != "+" || a.Contract[0].Breaking {
-		t.Errorf("contract = %v, want one additive entrypoint", a.Contract)
+	// branch-good adds GetUserFast — a new exported handler METHOD that is not
+	// bound to any route (the entrypoints join is unchanged). It is a graph root
+	// but not an external entrypoint, so it is internal structure, not a contract
+	// change: the contract section stays empty and the new method surfaces in the
+	// structural delta instead (§9 — roots are not the contract).
+	if len(a.Contract) != 0 {
+		t.Errorf("contract = %v, want no external-contract change for an unwired exported method", a.Contract)
+	}
+	if a.Shape != CrossPackage {
+		t.Errorf("the new method must still register as a structural change; shape = %s", a.Shape)
 	}
 }
 
@@ -147,6 +154,173 @@ func TestReviewRecordsSubstrateAndMismatch(t *testing.T) {
 	}
 	if !disclosed {
 		t.Errorf("a base/branch substrate mismatch must be disclosed as a caveat; got %v", m.Caveats)
+	}
+}
+
+// Internal identity churn — a graph root that is not an external entrypoint —
+// must not read as a breaking external-contract change: a closure renumbered by a
+// refactor and an internal function left rootless by a deleted backend are both
+// roots but neither is the contract. A removed HTTP route (a real external
+// entrypoint) still blocks (§9).
+func TestContractDistinguishesInternalRootChurnFromExternalRemoval(t *testing.T) {
+	const (
+		routeFn  = "(*svc/internal/handler.Server).GetUser"
+		store    = "(*svc/internal/store.Store).Select"
+		internal = "svc/internal/worker.pollMessages"
+		closure  = "svc.newHTTPServer$1"
+	)
+	base := &graph.Graph{
+		Algo: "vta",
+		Nodes: []graph.Node{
+			{FQN: routeFn, Sig: "f", Tier: 1}, {FQN: store, Sig: "f", Tier: 2},
+			{FQN: internal, Sig: "f", Tier: 1}, {FQN: closure, Sig: "f", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: routeFn, To: store}, {From: internal, To: store}, {From: closure, To: store},
+		},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /users/{id}", Fn: routeFn}},
+	}
+	p := &policy.Policy{Service: "svc", Version: 1}
+
+	// Branch drops the internal root and the closure (their call sites removed):
+	// both become absent roots, neither is an entrypoint → no breaking contract.
+	internalChurn := &graph.Graph{
+		Algo:        "vta",
+		Nodes:       []graph.Node{{FQN: routeFn, Sig: "f", Tier: 1}, {FQN: store, Sig: "f", Tier: 2}},
+		Edges:       []graph.Edge{{From: routeFn, To: store}},
+		Entrypoints: base.Entrypoints,
+	}
+	a := Review(p, base, internalChurn)
+	for _, c := range a.Contract {
+		if c.Breaking {
+			t.Errorf("internal root/closure removal must not be a breaking contract change; got %+v", c)
+		}
+	}
+	if anyBreaking(a.Contract) {
+		t.Error("verdict must not be driven BREAKING by internal identity churn")
+	}
+
+	// Branch drops the HTTP route's handler — a real external entrypoint removal.
+	routeRemoved := &graph.Graph{
+		Algo: "vta",
+		Nodes: []graph.Node{
+			{FQN: store, Sig: "f", Tier: 2}, {FQN: internal, Sig: "f", Tier: 1}, {FQN: closure, Sig: "f", Tier: 1},
+		},
+		Edges:       []graph.Edge{{From: internal, To: store}, {From: closure, To: store}},
+		Entrypoints: base.Entrypoints,
+	}
+	b := Review(p, base, routeRemoved)
+	var sawBreakingRoute bool
+	for _, c := range b.Contract {
+		if c.Op == "-" && c.Surface == "entrypoint" && c.Breaking {
+			sawBreakingRoute = true
+		}
+	}
+	if !sawBreakingRoute {
+		t.Errorf("a removed HTTP route must be a breaking entrypoint contract change; got %+v", b.Contract)
+	}
+}
+
+// A policy proposed on one algorithm but gated against a branch graph built on
+// another must disclose the mismatch on the substrate line, so its potentially
+// spurious reachability findings are read as analyzer artifacts (§9). Silent when
+// the policy's substrate matches the branch's, or is unrecorded.
+func TestReviewFlagsPolicyGraphSubstrateMismatch(t *testing.T) {
+	mk := func() *graph.Graph {
+		return &graph.Graph{Algo: "rta", Nodes: []graph.Node{{FQN: "(*svc.S).Do", Sig: "func()", Tier: 1}}}
+	}
+	hasMismatch := func(cs []string) bool {
+		for _, c := range cs {
+			if strings.Contains(c, "substrate mismatch") {
+				return true
+			}
+		}
+		return false
+	}
+
+	a := Review(&policy.Policy{Service: "svc", Version: 1, Substrate: "vta"}, mk(), mk())
+	if !hasMismatch(a.Caveats) {
+		t.Errorf("a vta policy gated on an rta graph must disclose a substrate mismatch; got %v", a.Caveats)
+	}
+	if !strings.Contains(a.Render(), "substrate mismatch") {
+		t.Errorf("render must echo the mismatch; got:\n%s", a.Render())
+	}
+
+	if m := Review(&policy.Policy{Service: "svc", Version: 1, Substrate: "rta"}, mk(), mk()); hasMismatch(m.Caveats) {
+		t.Errorf("a matching substrate must not synthesize a mismatch caveat; got %v", m.Caveats)
+	}
+	if u := Review(&policy.Policy{Service: "svc", Version: 1}, mk(), mk()); hasMismatch(u.Caveats) {
+		t.Errorf("an unrecorded policy substrate must not synthesize a mismatch caveat; got %v", u.Caveats)
+	}
+}
+
+// The substrate mismatch must be a DISCLOSURE only — it must never enter the
+// base-vs-branch finding diff. A body-only MR (identical structure) judged across
+// a base/branch substrate switch must still abstain NO-STRUCTURAL-SIGNAL: the
+// mismatch is a build artifact, not signal about the change. (Regression: emitting
+// it as a fitness.Check Caution leaked it into NewCautions and flipped the verdict
+// to STRUCTURALLY-CLEAR.)
+func TestSubstrateMismatchDoesNotFlipBodyOnlyVerdict(t *testing.T) {
+	nodes := []graph.Node{{FQN: "(*svc.S).Do", Sig: "func()", Tier: 1}}
+	base := &graph.Graph{Algo: "vta", Nodes: nodes}
+	branch := &graph.Graph{Algo: "rta", Nodes: nodes} // identical structure, different algo
+	a := Review(&policy.Policy{Service: "svc", Version: 1, Substrate: "vta"}, base, branch)
+
+	if a.Verdict != NoStructuralSignal {
+		t.Errorf("a body-only change across a substrate switch must abstain; got %s (cautions=%v)", a.Verdict, a.NewCautions)
+	}
+	for _, c := range a.NewCautions {
+		if strings.Contains(c.Summary, "substrate") {
+			t.Errorf("the substrate mismatch must not appear as a new caution; got %+v", c)
+		}
+	}
+	// The disclosure itself is preserved — on the caveat line, not as a finding.
+	for _, c := range a.Caveats {
+		if strings.Contains(c, "substrate mismatch") {
+			return
+		}
+	}
+	t.Error("the substrate mismatch must still be disclosed as a caveat")
+}
+
+// A branch graph built with `--reclaim` was judged over a substrate that includes
+// edges recovered at a dispatch seam; the verdict must disclose it on the substrate
+// line so a reclaim-informed gate is auditable, not silently folded into a plain
+// pass (R9).
+func TestReviewDisclosesReclaimedSubstrate(t *testing.T) {
+	mk := func(reclaimed bool) *graph.Graph {
+		e := graph.Edge{From: "(*svc.S).Do", To: "(*svc.S).Do$1"}
+		if reclaimed {
+			e.Via = "strict-server"
+		}
+		return &graph.Graph{
+			Algo:  "vta",
+			Nodes: []graph.Node{{FQN: "(*svc.S).Do", Sig: "func()", Tier: 1}, {FQN: "(*svc.S).Do$1", Sig: "func()", Tier: 1}},
+			Edges: []graph.Edge{e},
+		}
+	}
+	p := &policy.Policy{Service: "svc", Version: 1}
+
+	a := Review(p, mk(true), mk(true))
+	var disclosed bool
+	for _, c := range a.Caveats {
+		if strings.Contains(c, "reclaim-informed") {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Errorf("a reclaimed branch substrate must be disclosed as a caveat; got %v", a.Caveats)
+	}
+	if !strings.Contains(a.Render(), "reclaim-informed") {
+		t.Errorf("render must echo the reclaim disclosure; got:\n%s", a.Render())
+	}
+
+	// A base (no --reclaim) branch discloses nothing.
+	b := Review(p, mk(false), mk(false))
+	for _, c := range b.Caveats {
+		if strings.Contains(c, "reclaim-informed") {
+			t.Errorf("a base branch substrate must not synthesize a reclaim caveat; got %q", c)
+		}
 	}
 }
 

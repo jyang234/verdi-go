@@ -33,6 +33,64 @@ func TestProvenanceLineAndRoundTrip(t *testing.T) {
 	}
 }
 
+// A graph from `flowmap graph --reclaim` carries a per-edge `via` provenance tag
+// (R9). groundwork must CONSUME it — the decoder rejected it before, so every
+// command died on a reclaimed graph — and ReclaimCaveat must disclose it so a
+// verdict computed over the reclaimed substrate is auditable as reclaim-informed.
+func TestReclaimEdgeRoundTripAndCaveat(t *testing.T) {
+	const j = `{"algo":"vta","nodes":[{"fqn":"svc/api.Wrapper.Create","sig":"f"},{"fqn":"svc/api.Wrapper.Create$1","sig":"f"}],"edges":[{"from":"svc/api.Wrapper.Create","to":"svc/api.Wrapper.Create$1","via":"strict-server"}],"blind_spots":[]}`
+	g, err := Load(strings.NewReader(j))
+	if err != nil {
+		t.Fatalf("a reclaimed graph (via field) must round-trip, got %v", err)
+	}
+	if len(g.Edges) != 1 || g.Edges[0].Via != "strict-server" {
+		t.Fatalf("via did not round-trip: edges=%+v", g.Edges)
+	}
+	rc := g.ReclaimCaveat()
+	if !strings.Contains(rc, "reclaim-informed") || !strings.Contains(rc, "1 via strict-server") {
+		t.Errorf("ReclaimCaveat = %q, want it to name the reclaimer and count", rc)
+	}
+	// The disclosure must ride the substrate line every verdict surface echoes.
+	line := ProvenanceLine(g.Algo, []string{rc})
+	if !strings.Contains(line, "substrate: vta") || !strings.Contains(line, "reclaim-informed") {
+		t.Errorf("provenance line = %q, want substrate + reclaim disclosure", line)
+	}
+}
+
+// A base (no --reclaim) graph carries no via, so ReclaimCaveat is silent — the
+// committed, byte-identical default graph must disclose nothing.
+func TestReclaimCaveatSilentOnBaseGraph(t *testing.T) {
+	const j = `{"nodes":[{"fqn":"a","sig":"f"}],"edges":[{"from":"a","to":"boundary:db SELECT users"}],"blind_spots":[]}`
+	g, err := Load(strings.NewReader(j))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rc := g.ReclaimCaveat(); rc != "" {
+		t.Errorf("ReclaimCaveat on a base graph = %q, want empty", rc)
+	}
+}
+
+// The substrate guard flags a policy-vs-graph algorithm mismatch (§9): a policy
+// proposed on one algorithm checked against a graph built on another can surface
+// spurious reachability findings (precision differs). It must stay silent when
+// either side is unrecorded or the two agree, and name both algorithms when they
+// differ so the reader can act (rebuild the graph, or re-init the policy).
+func TestSubstrateMismatchCaveat(t *testing.T) {
+	if got := SubstrateMismatchCaveat("vta", "rta"); !strings.Contains(got, "vta") || !strings.Contains(got, "rta") || !strings.Contains(got, "--algo vta") {
+		t.Errorf("mismatch must name both algos and the remedy; got %q", got)
+	}
+	for _, c := range []struct{ pol, gph string }{
+		{"vta", "vta"}, // agree
+		{"", "rta"},    // policy unrecorded
+		{"vta", ""},    // graph unrecorded
+		{"", ""},       // both unrecorded
+	} {
+		if got := SubstrateMismatchCaveat(c.pol, c.gph); got != "" {
+			t.Errorf("SubstrateMismatchCaveat(%q,%q) = %q, want silent", c.pol, c.gph, got)
+		}
+	}
+}
+
 func TestLoadRequiresNodes(t *testing.T) {
 	const j = `{"edges":[],"blind_spots":[]}`
 	if _, err := Load(strings.NewReader(j)); err == nil {
