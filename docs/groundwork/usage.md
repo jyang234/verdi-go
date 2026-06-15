@@ -423,7 +423,7 @@ three-valued, so green never means more than it should:
 ```console
 $ groundwork review policy.json base.json branch.json
 # MR structural review — BLOCK
-digest 4678af36712e5cf4… · recompute to verify (deterministic; not author-editable)
+digest adb67c06a1f6c8e6… · recompute to verify (deterministic; not author-editable)
 substrate: rta — rta from 3 discovered root(s)
 
 Shape: cross-package
@@ -432,10 +432,13 @@ Touches: handler(+1)
 ⛔ Introduces 1 invariant violation(s)
 - layering — handler → store skips 1 layer(s)
   - (*…/handler.Server).GetUserFast → (*…/store.Store).SelectUser
-
-🔌 External contract changed (additive)
-- + entrypoint handler.Server.GetUserFast
 ```
+
+(`GetUserFast` is a new exported handler method, but it is not bound to a route —
+it is a graph *root* without being an external *entrypoint* — so it is reported in
+the structural delta above, not as an external-contract change. Only a removed or
+added HTTP route / consumed topic moves the contract section; internal
+orphan-root and closure churn does not.)
 
 - **`BLOCK`** — a new invariant violation or a breaking contract change.
 - **`STRUCTURALLY-CLEAR`** — the shape changed but no invariant broke. *Not* a

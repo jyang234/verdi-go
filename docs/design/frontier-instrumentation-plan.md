@@ -381,6 +381,18 @@ which are real here:
 - **Reclaimer provenance in verdicts — SHIPPED (R9).** Edges carry a `via` source;
   groundwork decodes it and `Graph.ReclaimCaveat` states on the substrate line that
   a verdict leaned on reclaimed edges — auditability for reviewers.
+- **Breaking-contract over-fire on internal churn (field report §9) — SHIPPED.**
+  `review`/`verify` keyed the entrypoint contract surface on graph *roots*
+  (`Sources()`), so a closure renumbered by a refactor (run$4 → newHTTPServer$1) or
+  an internal function left rootless by a deleted backend read as a BREAKING
+  external-contract change. The surface is now keyed on the *external entrypoint*
+  join (`externalEntrypoints`: HTTP routes / consumed topics) — internal root and
+  closure churn is structural delta, not contract, and no longer blocks a merge.
+- **Universal self-clean invariant across inputs — SHIPPED.** R5–R8 were each a
+  proposer/enforcer node-set gap a fixture missed.
+  `TestProposeSelfCleanOverGeneratedGraphs` makes the invariant literal over a
+  generated graph corpus (random topologies, strict-server seams, the full effect
+  vocabulary), catching the next sibling before a field report does.
 
 ---
 

@@ -16,16 +16,9 @@
       "to": "(*example.com/layeredsvc/internal/store.Store).SelectUser"
     }
   ],
-  "contract_changes": [
-    {
-      "op": "+",
-      "surface": "entrypoint",
-      "name": "handler.Server.GetUserFast"
-    }
-  ],
   "algo": "rta",
   "caveats": [
     "rta from 3 discovered root(s)"
   ],
-  "digest": "4678af36712e5cf4d01e11439141bad5d63670616c5da341cafbac216f0b15e5"
+  "digest": "adb67c06a1f6c8e652696d4a73a916c886b94dec3514c35d293a2fc2678be5e3"
 }

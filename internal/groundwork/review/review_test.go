@@ -66,9 +66,16 @@ func TestReviewStructurallyClear(t *testing.T) {
 	if a.Verdict != StructurallyClear {
 		t.Fatalf("verdict = %s, want STRUCTURALLY-CLEAR (violations: %v)", a.Verdict, a.NewViolations)
 	}
-	// The new endpoint is reported as an additive entrypoint, not a breaking change.
-	if len(a.Contract) != 1 || a.Contract[0].Op != "+" || a.Contract[0].Breaking {
-		t.Errorf("contract = %v, want one additive entrypoint", a.Contract)
+	// branch-good adds GetUserFast — a new exported handler METHOD that is not
+	// bound to any route (the entrypoints join is unchanged). It is a graph root
+	// but not an external entrypoint, so it is internal structure, not a contract
+	// change: the contract section stays empty and the new method surfaces in the
+	// structural delta instead (§9 — roots are not the contract).
+	if len(a.Contract) != 0 {
+		t.Errorf("contract = %v, want no external-contract change for an unwired exported method", a.Contract)
+	}
+	if a.Shape != CrossPackage {
+		t.Errorf("the new method must still register as a structural change; shape = %s", a.Shape)
 	}
 }
 
@@ -147,6 +154,70 @@ func TestReviewRecordsSubstrateAndMismatch(t *testing.T) {
 	}
 	if !disclosed {
 		t.Errorf("a base/branch substrate mismatch must be disclosed as a caveat; got %v", m.Caveats)
+	}
+}
+
+// Internal identity churn — a graph root that is not an external entrypoint —
+// must not read as a breaking external-contract change: a closure renumbered by a
+// refactor and an internal function left rootless by a deleted backend are both
+// roots but neither is the contract. A removed HTTP route (a real external
+// entrypoint) still blocks (§9).
+func TestContractDistinguishesInternalRootChurnFromExternalRemoval(t *testing.T) {
+	const (
+		routeFn  = "(*svc/internal/handler.Server).GetUser"
+		store    = "(*svc/internal/store.Store).Select"
+		internal = "svc/internal/worker.pollMessages"
+		closure  = "svc.newHTTPServer$1"
+	)
+	base := &graph.Graph{
+		Algo: "vta",
+		Nodes: []graph.Node{
+			{FQN: routeFn, Sig: "f", Tier: 1}, {FQN: store, Sig: "f", Tier: 2},
+			{FQN: internal, Sig: "f", Tier: 1}, {FQN: closure, Sig: "f", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: routeFn, To: store}, {From: internal, To: store}, {From: closure, To: store},
+		},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /users/{id}", Fn: routeFn}},
+	}
+	p := &policy.Policy{Service: "svc", Version: 1}
+
+	// Branch drops the internal root and the closure (their call sites removed):
+	// both become absent roots, neither is an entrypoint → no breaking contract.
+	internalChurn := &graph.Graph{
+		Algo:        "vta",
+		Nodes:       []graph.Node{{FQN: routeFn, Sig: "f", Tier: 1}, {FQN: store, Sig: "f", Tier: 2}},
+		Edges:       []graph.Edge{{From: routeFn, To: store}},
+		Entrypoints: base.Entrypoints,
+	}
+	a := Review(p, base, internalChurn)
+	for _, c := range a.Contract {
+		if c.Breaking {
+			t.Errorf("internal root/closure removal must not be a breaking contract change; got %+v", c)
+		}
+	}
+	if anyBreaking(a.Contract) {
+		t.Error("verdict must not be driven BREAKING by internal identity churn")
+	}
+
+	// Branch drops the HTTP route's handler — a real external entrypoint removal.
+	routeRemoved := &graph.Graph{
+		Algo: "vta",
+		Nodes: []graph.Node{
+			{FQN: store, Sig: "f", Tier: 2}, {FQN: internal, Sig: "f", Tier: 1}, {FQN: closure, Sig: "f", Tier: 1},
+		},
+		Edges:       []graph.Edge{{From: internal, To: store}, {From: closure, To: store}},
+		Entrypoints: base.Entrypoints,
+	}
+	b := Review(p, base, routeRemoved)
+	var sawBreakingRoute bool
+	for _, c := range b.Contract {
+		if c.Op == "-" && c.Surface == "entrypoint" && c.Breaking {
+			sawBreakingRoute = true
+		}
+	}
+	if !sawBreakingRoute {
+		t.Errorf("a removed HTTP route must be a breaking entrypoint contract change; got %+v", b.Contract)
 	}
 }
 
