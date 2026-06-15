@@ -1,0 +1,331 @@
+# Frontier instrumentation — measuring and reclaiming the static frontier
+
+> **`PROPOSAL`** · exploratory, building the case · _drafted 2026-06-15_
+
+**Status:** measured, not yet built. A throwaway classifier and one committed
+fixture (`testdata/fixtures/strictsvc`, `TestStrictServerForwardStarvation`)
+established the gap is real and sizable; this note designs the proper version.
+The framing question this doc must answer for the owner: **how do we instrument
+the frontier without violating "determinism over everything"?**
+
+The toolset's job is *deterministic instrumentation for AI agents and human
+reviewers* — same code in, same verdict out, no guessing. The "frontier" is every
+place the static graph stops being able to answer (an unresolved dispatch, an
+opaque effect). This doc is about making the frontier a **first-class, measured,
+disclosed object** rather than an implicit hole — and about reclaiming the part of
+it that was never actually dynamic.
+
+---
+
+## 0. Thesis
+
+Three findings from the measurement drive the whole design:
+
+1. **The frontier is mostly not dynamic.** On the one topology that stresses it
+   (oapi strict-server, the production-common shape no fixture had), ~80% of the
+   frontier is **reclaimable static structure** — the call-graph builder not
+   crossing an `http.Handler` dispatch into a per-handler closure — not runtime
+   dynamism. The lever is better static analysis, not traces.
+2. **The dangerous frontier is silent.** On `strictsvc` the pipeline discloses
+   **zero** blind spots while **every** boundary effect (including a classified
+   `db DELETE`) is severed from the HTTP route that owns it. "What does `POST /x`
+   touch?" returns nothing, with no signal that the answer is wrong. This is a
+   silent-green of *structure*, distinct from the verdict silent-greens the
+   R-series closed — and it hurts the agent audience most (a human can dig; an
+   agent reads `blind_spots`, sees 0, and trusts it).
+3. **Determinism reorders the levers.** Reclaiming (sound static analysis) and
+   disclosing (describing the frontier) are deterministic; observing (traces) is
+   not. So traces are the *last* resort, never in the verdict — the opposite of
+   where the "opaque write surface" anxiety first points.
+
+The design is therefore three components behind a stable taxonomy: a **classifier**
+(measure), **structured disclosure** (surface), and **pluggable reclaimers**
+(shrink) — with traces fenced into a separate, clearly-labeled lane.
+
+---
+
+## 1. The doctrine check, first (because it constrains everything)
+
+Before any component, fix what is in and out of bounds. Every operation on the
+frontier is one of four kinds; only the first two touch the deterministic verdict:
+
+| Operation | Determinism | Touches verdict? | Verdict |
+|---|---|---|---|
+| **Reclaim** — add a statically-true edge the builder missed | deterministic | yes (more complete graph) | **IN** |
+| **Disclose** — describe the residual frontier | deterministic | no (read-only) | **IN** |
+| **Observe** — fill a frontier from traces | **non-deterministic** | only a separate lane | **fenced** |
+| **Resolve-by-guess** — narrow a dynamic set to a chosen value | deterministic but unsound | yes | **OUT** |
+
+**The load-bearing soundness argument for Reclaim.** Reclamation only ever *adds*
+edges. Adding a real edge to the graph can turn a `provenAbsent` into `reachable`
+(a stricter verdict) but can **never** turn `reachable` into `provenAbsent`. So
+reclamation cannot manufacture a false proof of absence — the one failure mode the
+whole framework exists to prevent. Even an *imprecise* reclaimer that occasionally
+adds an edge execution doesn't take is safe in the dangerous direction (it can
+only over-fire, a false positive, never a false all-clear). This is why
+reclamation is doctrine-compatible while resolve-by-guess is not: **the forbidden
+move is narrowing a dynamic target set to a guessed singleton** (e.g. resolving a
+`<dynamic>` topic to "the one we think it is"), because *that* can hide a real
+target and produce a false absence. Adding edges is sound-direction; removing or
+singularizing them is not.
+
+**Hard rules the rest of the doc inherits:**
+- R1. The deterministic verdict surface (`fitness`/`verify`/`review`) stays a pure
+  function of `(code, graph-algo)`. No component may make it depend on a trace
+  corpus, a clock, or a network.
+- R2. A reclaimer ships only with a proof (or test-backed argument) that it adds
+  edges real execution can take. Soundness is the admission ticket; precision is a
+  bonus. Unsound-but-useful is **out**.
+- R3. The classifier's A/B labels are **descriptive instrumentation**, never a
+  verdict input. A mislabel must never change a `fitness` outcome — it can only
+  misprioritize our own work. (Guards against the classifier's heuristics leaking
+  into soundness.)
+- R4. Observation (traces) lives in a physically separate artifact and may only
+  **escalate** a Caution to a Violation, never relax any verdict. It is labeled
+  trace-informed everywhere it surfaces.
+
+---
+
+## 2. The taxonomy (the design's type system)
+
+A stable, machine-readable classification of every frontier marker. This vocabulary
+is the generic backbone — components 1–3 all speak it.
+
+- **A — truly dynamic.** Resolved only at runtime: `<dynamic>` bus topics / HTTP
+  targets (`graphio/labels.go` emits these), reflection dispatch, plugin/registry
+  table dispatch. *Irreducible statically.* Disclose; optionally observe.
+- **B — reclaimable structure.** Statically determined but unconnected by the
+  current builder: the strict-server `$1` seam (forward-starvation), constant
+  values not folded, handler tables built from literals. *Reclaimable, sound.*
+  This is where the static lever lives.
+- **B2 — reclaimable by code change.** Opaque only because the *source* is
+  non-constant: `db ExecContext` from runtime-built SQL. The consumer can make it
+  constant and get a real proof; we can't reclaim it for them, but we can disclose
+  the ask precisely. *Consumer-reclaimable.*
+- **C — over-approximation.** Sound but imprecise: HighFanOut shared-middleware
+  dispatch (`blindspots/blindspots.go`; see `wrapper-fanout-investigation.md`).
+  The width is real; VTA narrows it but it stays wide. *Not blindness — precision.*
+
+Each frontier marker the pipeline produces gets exactly one bin. The classifier
+assigns it; disclosure reports it; reclaimers register against B; the consumer
+acts on B2; C is a known-and-accepted posture.
+
+---
+
+## 3. Component 1 — the frontier classifier (productize the throwaway)
+
+**What:** given any analyzer-produced graph, emit a deterministic inventory of its
+frontier, binned A/B/B2/C, with per-marker location and (for B) a reclaimer hint.
+
+**Where:** a `flowmap frontier <dir>` subcommand (and a library the tests call),
+output a sorted JSON artifact + a human view — same dual-output discipline as
+`boundary`/`graph`.
+
+**Inputs:** the graph (`graphio.Graph`) plus the markers already in it — boundary
+effect labels, `blind_spots`, and *derived* structural markers (orphan-root
+closures whose lexical parent exists; HTTP-entrypoint roots with empty cones).
+
+**Classification rules (deterministic, documented, descriptive only — R3):**
+- effect label contains `<dynamic>` → **A**
+- `boundary:db <verb>` with an unreadable verb (method-name fallback in
+  `dbLabel`) → **B2**
+- blind spot kind ∈ {reflect, unsafe, cgo, go:linkname} → **A**; {HighFanOut} → **C**
+- a `$N` closure that is a root (no caller) whose de-`$N` parent is a graph node →
+  **B** (severed seam), with the parent recorded as the reclaim target
+- an entrypoint root with an empty forward cone → **B** (starved route), flagged
+  prominently (it breaks attribution)
+
+**Output (per marker):** `{kind, bin, site, owner?, reclaimer_hint?}`, plus
+roll-ups: counts per bin, and the two headline ratios — *reclaimable share*
+(B / total) and *attribution loss* (entrypoints with empty cones / entrypoints).
+
+**Why generic:** it speaks the taxonomy, not any one framework. It runs on
+loansvc, dogfood, strictsvc, and a future real service identically. **Its job is
+to keep us honest about prevalence** — we build a reclaimer (component 3) for a
+shape only when the classifier shows that shape is common, not because one field
+report named it. That is the answer to "are we hyper-molding": the classifier is
+the anti-molding instrument.
+
+**Determinism:** pure function of the graph; sorted, stable; no verdict coupling.
+
+---
+
+## 4. Component 2 — structured frontier disclosure
+
+**The gap it closes:** today `blind_spots` carries only the
+reflect/HighFanOut/unsafe family (`graph.go` `BlindSpot`); structural starvation
+(severed closures, empty-cone routes) is **implicit in topology** and invisible to
+a consumer reading the disclosure. Finding 2: the agent reads 0 and trusts it.
+
+**What:** promote the derived B-markers into the graph's disclosed frontier as a
+new, typed section (or an extension of `blind_spots` with a `bin`/`reason` field),
+so the frontier is something a consumer can *read*, not *reconstruct*. An agent
+asking "can I trust this route's effect list?" gets a direct, machine-readable
+"no — this route's cone is severed at `<site>` (kind: strict-server-seam, bin: B)."
+
+**Determinism & doctrine:** disclosure is read-only w.r.t. verdicts (R1). It does
+**not** change a `fitness` result; it changes what the consumer is *told*. This is
+the "instrument the wall" move from the field discussion — for the irreducible-A
+remainder it is the *only* honest option, and even for B it is what carries the
+gap until a reclaimer lands.
+
+**Consumer surfaces:** the ground card / review already echo provenance; they gain
+a frontier summary. The three-valued verdict is unchanged — a `noPathFound`
+Caution can now cite the structured frontier instead of prose.
+
+---
+
+## 5. Component 3 — pluggable reclaimers (shrink B, soundly)
+
+**What:** sound static-analysis passes that add the missing edges for a recognized
+B-shape. First target, measured as ~80% of the strict-server frontier:
+
+> **strict-server-seam reclaimer** — when a `ServerInterfaceWrapper` method builds
+> an `http.HandlerFunc(closure)`, stores it in an `http.Handler`, and dispatches
+> via `ServeHTTP`, add the edge `wrapper → closure`. The edge is statically true
+> (execution always runs that closure); adding it is sound (R2) and reconnects the
+> whole severed chain to the route.
+
+**Architecture — generic interface, specific plugins.** This is the explicit
+answer to "generic vs hyper-focused":
+
+```
+type Reclaimer interface {
+    // Match reports the edges this reclaimer can soundly add for a node, or nil.
+    // Each returned edge MUST be one real execution can take (R2).
+    Reclaim(res *analyze.Result, fn ssa.Function) []Edge
+    Name() string          // provenance: which reclaimer added the edge
+    Bin() string           // always "B"; for the inventory
+}
+```
+
+- The **framework** (registry, the "edge carries its reclaimer provenance" plumbing,
+  the inventory integration) is generic and shape-agnostic.
+- Each **reclaimer** is necessarily shape-specific — you cannot reclaim the oapi/chi
+  seam without modeling oapi/chi — but it plugs into the generic interface, is
+  independently sound, and is **gated by measured prevalence**: the classifier says
+  which shapes earn a reclaimer.
+- Reclaimed edges carry provenance (which reclaimer, vs the base call-graph), so a
+  verdict can self-certify its substrate (the `Algo`/`Caveats` discipline in
+  `graph.go`, extended). A reviewer can see "this reachability used the strict-
+  server reclaimer."
+
+This keeps us neither hyper-molded (the core is generic; the taxonomy and
+classifier are framework-blind) nor over-general (we don't build speculative
+reclaimers for shapes the measurement says are rare).
+
+**Relationship to prior art.** `wrapper-fanout-investigation.md` shipped `--algo`
+and showed VTA narrows the shared-middleware HighFanOut (C) but not below the real
+width. That is a *different* facet (too-many-callees at a shared site) from
+forward-starvation (no-callee into the per-handler closure). VTA does not fix
+starvation — we measured `strictsvc` *under VTA* and the cones are still empty. So
+the reclaimer is genuinely new work, complementary to the shipped `--algo` lever.
+
+---
+
+## 6. Traces — the fenced lane (deferred, for completeness)
+
+Per the doctrine, observation never enters the deterministic verdict (R4). Two
+sound, presence-only uses, both **out of scope for v1** and recorded so the design
+is complete:
+
+- **Bus `<dynamic>` resolution (A).** The corpus already captures producer/consumer
+  ops (`ingest/gate.go`); resolving a `<dynamic>` publisher to *observed* topics is
+  the only way to recover cross-service continuity static can't. Surfaces as a
+  distinct trace-informed card in `chains`, never folded into static `Cards`.
+- **Opaque-write escalation (B2).** A DB-span corpus (which the effects golden
+  deliberately *excludes* today) could upgrade an opaque-write route's Caution to a
+  Violation on observed mutation. Sound because presence proves reachability; it
+  never relaxes.
+
+Both require **per-edge provenance** (proven / observed / opaque) and a corpus-
+coverage accounting the current addition-only gate deliberately refuses — so they
+are explicitly *not* a per-graph "trace mode" flag. See the field discussion and
+`post-hoc-behavioral-ingestion.md`. **v1 ships none of this**; the deterministic
+core must stand alone first.
+
+---
+
+## 7. Other gaps to consider
+
+Beyond the strict-server seam, the classifier should bin (and we should decide a
+posture for) these. Most are unmeasured today — the classifier is how we find out
+which are real here:
+
+| Gap | Bin | Posture |
+|---|---|---|
+| Reflection dispatch (`reflect.Value.Call`) | A | disclose; never resolve |
+| Plugin / registry tables (`map[string]Handler`) | A (mostly) | disclose; a literal-only table is B (reclaimable) |
+| Config / data-driven routing | A | disclose |
+| Interface DI (constructor-injected impls) | C→B | VTA narrows; a single-binding interface is reclaimable |
+| Generics instantiation | B | ensure instantiations are nodes, not a frontier |
+| Struct-field / map-stored callbacks | B or A | literal-assigned = B; runtime-assigned = A |
+| `defer`/goroutine spawn edges | (modeled) | already `Concurrent`; verify no starvation analogue |
+| cgo / unsafe / go:linkname | A | disclose (already blind spots) |
+| Dynamic outbound HTTP/RPC target | A | `<dynamic>` already; same treatment as bus |
+| ORM / query-builder SQL | B2 | consumer-reclaimable; disclose the ask |
+
+**Meta-gaps (not frontier markers, but adjacent and worth folding in):**
+- **Entrypoint→effect attribution as a first-class check.** Our headline finding —
+  routes with empty cones — deserves its own deterministic signal ("N routes touch
+  nothing; suspicious"), independent of any reclaimer. Cheap, generic, high-value
+  for agents.
+- **Algo-provenance mismatch (field report §9).** A policy built on VTA but checked
+  on an RTA graph produced spurious violations. The graph already records `Algo`;
+  the frontier/verdict surfaces should flag a policy-vs-graph algo mismatch. Fits
+  the same provenance plumbing reclaimers need.
+- **Reclaimer provenance in verdicts.** Once edges have sources, a proof should be
+  able to state which reclaimers it depended on — auditability for reviewers.
+
+---
+
+## 8. Determinism risk register
+
+Explicit list of where this work could slip the doctrine, and the guardrail:
+
+| Risk | Guardrail |
+|---|---|
+| A reclaimer adds an edge execution can't take, and it's load-bearing for a *bypass* finding | Edges only ever make `must_not_reach` over-fire / `must_pass_through` see more bypasses — safe direction (R2). Still: every reclaimer is test-backed against a real fixture. |
+| The classifier's A/B heuristic leaks into a verdict | R3: classifier output is never a `fitness` input; a mislabel can only misprioritize our work. Enforced by keeping the classifier in a package the verdict surfaces don't import. |
+| Trace observation quietly relaxes a verdict | R4: separate artifact, escalate-only, labeled trace-informed; the deterministic verdict never reads it. |
+| "Resolve" creeps in (singularizing a `<dynamic>`) | Forbidden by R2's framing — narrowing a dynamic set is the one move that can hide a target. Reclaimers *add*; they never *singularize*. Reviewed per-PR. |
+| Reclaimed graph becomes non-reproducible | Reclaimers are pure functions of the SSA; output stays byte-identical (the `--stamp`/regen discipline). No clock, no corpus. |
+| We over-build generic machinery for one case | The classifier gates reclaimer work by measured prevalence; no speculative reclaimers. |
+
+---
+
+## 9. Phasing (measurement-driven)
+
+1. **Classifier + attribution check (component 1 + the meta-gap).** Generic, no
+   verdict coupling, immediate value: turns the throwaway into a standing,
+   deterministic number across all fixtures. Lowest risk, highest leverage for
+   "where is the frontier actually." Ships the strictsvc inventory as a golden.
+2. **Structured disclosure (component 2).** Surface the B-frontier so agents stop
+   reading a false 0. Read-only w.r.t. verdicts.
+3. **First reclaimer (component 3): strict-server seam.** Only after 1 confirms
+   prevalence on a real (not just fixture) corpus. Sound, provenance-tagged. The
+   `strictsvc` characterization test flips to green-attribution when it lands.
+4. **(Deferred) trace lane.** Only once 1–3 stand, and only as the fenced,
+   escalate-only artifact of §6.
+
+---
+
+## 10. Open questions for the owner
+
+- **Disclosure shape:** extend `blind_spots` with a `bin`/`reason`, or a new typed
+  `frontier` section? (Schema-evolution cost vs clarity.)
+- **Reclaimer trust surface:** do reclaimed edges need to be *visibly distinct* in
+  the graph JSON (so a skeptical reviewer can diff base vs reclaimed), or is
+  per-edge provenance enough?
+- **Prevalence bar:** what share, on what corpus, justifies a new reclaimer? (Avoids
+  both molding-to-one-case and a long tail of brittle framework plugins.)
+- **B2 ergonomics:** is "make the SQL constant" disclosed per-site actionable
+  enough, or do we want a codemod-grade hint?
+
+---
+
+*Companion artifacts: `testdata/fixtures/strictsvc` (the measured topology) and
+`internal/static/boundary/strictserver_test.go` (the deterministic characterization
+that flips when component 3 lands). Prior art: `wrapper-fanout-investigation.md`
+(the HighFanOut facet + `--algo`), `post-hoc-behavioral-ingestion.md` (the trace
+lane), field report §9 (algo provenance) and §10 (dynamic frontier).*
