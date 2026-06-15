@@ -215,16 +215,33 @@ Caution can now cite the structured frontier instead of prose.
 
 ---
 
-## 5. Component 3 — pluggable reclaimers (shrink B, soundly)
+## 5. Component 3 — pluggable reclaimers (shrink B, soundly) — SHIPPED (opt-in)
+
+**Built:** `internal/static/reclaim` with the first reclaimer (`StrictServer`),
+folded in by `graphio.ApplyReclaimers` and exposed opt-in as `flowmap graph
+--reclaim` / `flowmap frontier --reclaim`. On strictsvc it recovers the three
+wrapper→`$1` edges the builder lost at the `http.Handler` dispatch, and the frontier
+goes from **100% attribution loss / 6 B markers → 0% / 0 B** — every route reaches
+its effects, leaving only the irreducible A/B2 frontier. Default Build is unchanged
+(reclaimers are opt-in, D2), so no golden churns. Each edge carries `via:
+"strict-server"`. Soundness (R2) is enforced by the detector below and the
+no-false-positives test (oapisvc/loansvc recover nothing).
 
 **What:** sound static-analysis passes that add the missing edges for a recognized
 B-shape. First target, measured as ~80% of the strict-server frontier:
 
 > **strict-server-seam reclaimer** — when a `ServerInterfaceWrapper` method builds
 > an `http.HandlerFunc(closure)`, stores it in an `http.Handler`, and dispatches
-> via `ServeHTTP`, add the edge `wrapper → closure`. The edge is statically true
-> (execution always runs that closure); adding it is sound (R2) and reconnects the
-> whole severed chain to the route.
+> via `ServeHTTP`, add the edge `wrapper → closure`. Adding it is sound (R2) and
+> reconnects the whole severed chain to the route.
+>
+> **As built**, soundness is enforced by a flow check, not the framework name: the
+> edge is emitted ONLY when the closure value provably FLOWS, within the method, to
+> a `ServeHTTP` receiver (traced back through MakeClosure/MakeInterface/ChangeType/
+> Phi). With empty middleware `handler.ServeHTTP(w,r)` IS the closure call directly,
+> so it CAN be invoked — a true can-reach edge; a closure the method merely PASSES
+> elsewhere (a sort comparator, a route registration) never reaches a `ServeHTTP`
+> receiver and is left alone. That flow requirement is the concrete form of Gate 2.
 
 **Architecture — generic interface, specific plugins.** This is the explicit
 answer to "generic vs hyper-focused":
@@ -348,9 +365,12 @@ Explicit list of where this work could slip the doctrine, and the guardrail:
    read-only `frontier` section (`graphio.Build` emits it, `Index.Frontier()` reads
    it, the manifest ratchet pins it) so agents read the B-frontier instead of a
    false 0. Verdict-neutral.
-3. **First reclaimer (component 3): strict-server seam.** Only after 1 confirms
-   prevalence on a real (not just fixture) corpus. Sound, provenance-tagged. The
-   `strictsvc` characterization test flips to green-attribution when it lands.
+3. **First reclaimer (component 3): strict-server seam. ✅ DONE (opt-in).** Shipped
+   sound + provenance-tagged behind `--reclaim`; closes the strictsvc seam (100%→0%
+   attribution loss). Opt-in is exactly what lets it ship before the D4 prevalence
+   bar is met on a real corpus: it changes no default graph, and a reviewer can diff
+   base-vs-reclaimed. **Promoting it to default-on remains gated on D4** — confirm
+   the shape's prevalence on a real (non-fixture) strict-server service first.
 4. **(Deferred) trace lane.** Only once 1–3 stand, and only as the fenced,
    escalate-only artifact of §6.
 

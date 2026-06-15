@@ -118,6 +118,7 @@ func cmdGraph(args []string) error {
 	entry := fs.String("entry", "", `scope to the subgraph reachable from this entry point (e.g. "POST /loan-application")`)
 	stamp := fs.String("stamp", "", "identity stamp (e.g. the commit SHA) recorded in the graph; consumers can verify with --expect")
 	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta" (refines interface-dense dispatch — fewer spurious callees), "cha" (rootless fallback)`)
+	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers (opt-in; adds provenance-tagged edges that close the strict-server seam)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -134,6 +135,9 @@ func cmdGraph(args []string) error {
 	g, err := graphio.Build(res, *entry)
 	if err != nil {
 		return err
+	}
+	if *reclaimFlag {
+		graphio.ApplyReclaimers(g, res)
 	}
 	// The stamp is caller-supplied, never derived: deriving it (from git HEAD,
 	// a timestamp) would make the graph a function of more than the code and
@@ -158,6 +162,7 @@ func cmdFrontier(args []string) error {
 	fs := flag.NewFlagSet("frontier", flag.ContinueOnError)
 	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta" (refines interface-dense dispatch), "cha"`)
 	asJSON := fs.Bool("json", false, "emit the full marker inventory as canonical JSON")
+	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers before classifying (shows the frontier with the seam closed)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -174,6 +179,9 @@ func cmdFrontier(args []string) error {
 	g, err := graphio.Build(res, "")
 	if err != nil {
 		return err
+	}
+	if *reclaimFlag {
+		graphio.ApplyReclaimers(g, res)
 	}
 	// Build already classified and embedded the frontier section; summarize it.
 	rep := frontier.Summarize(g.Frontier, len(g.Entrypoints))
@@ -821,8 +829,8 @@ usage: flowmap <command> [flags] [dir]
 
 commands:
   boundary [--check] [dir]   generate the gated boundary contract (--check: verify currency)
-  graph [--entry R] [--algo A] [dir]  print the non-gated call-graph view (--algo rta|vta|cha; default rta)
-  frontier [--algo A] [--json] [dir]  classify the static frontier (A/B/B2/C) — measurement, not a gate
+  graph [--entry R] [--algo A] [--reclaim] [dir]  print the non-gated call-graph view (--reclaim closes sound dispatch seams)
+  frontier [--algo A] [--reclaim] [--json] [dir]  classify the static frontier (A/B/B2/C) — measurement, not a gate
   diff <a.json> <b.json>     print the structural change set between two golden traces
   coverage [--flows D] [dir] boundary effects no committed flow exercises
   behavior ingest <traces>   map an OTLP/JSON trace export to boundary effects

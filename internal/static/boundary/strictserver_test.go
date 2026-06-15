@@ -38,10 +38,11 @@ func strictsvcDir() string {
 //
 // This is the forward-starvation behind R3/R7: a Category-B frontier (reclaimable
 // static structure, NOT runtime dynamism), and the pipeline discloses ZERO blind
-// spots for it. When the builder learns to cross `http.HandlerFunc.ServeHTTP` (or
-// the oapi wrapper pattern) into the per-handler closure, these assertions flip —
-// the wrapper cones stop being empty and the effects attribute to their routes.
-// That is the WIN; update this test when it happens.
+// spots for it. This test pins the DEFAULT (un-reclaimed) build: the strict-server
+// reclaimer (internal/static/reclaim, opt-in via `flowmap graph --reclaim`) now
+// crosses exactly this seam and closes it — TestApplyReclaimersClosesSeam asserts
+// the reclaimed graph attributes every effect to its route. The default stays
+// starved by design (reclaimers are opt-in, D2), which is what this test guards.
 func TestStrictServerForwardStarvation(t *testing.T) {
 	res, err := analyze.Analyze(strictsvcDir(), callgraph.Options{Algo: callgraph.AlgoVTA})
 	if err != nil {

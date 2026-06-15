@@ -20,6 +20,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 	"github.com/jyang234/golang-code-graph/internal/static/obligations"
+	"github.com/jyang234/golang-code-graph/internal/static/reclaim"
 	"github.com/jyang234/golang-code-graph/internal/static/roots"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
 )
@@ -110,6 +111,13 @@ type Edge struct {
 	Tier       int    `json:"tier"`
 	Boundary   string `json:"boundary,omitempty"`
 	Concurrent bool   `json:"concurrent,omitempty"`
+
+	// Via names the reclaimer that recovered this edge, empty for a base
+	// call-graph edge (Phase 3 / D2). A reclaimed edge is one real execution can
+	// take that the builder lost at a dispatch seam; carrying its provenance lets a
+	// reviewer diff base-vs-reclaimed and a verdict self-certify which reclaimers
+	// it leaned on.
+	Via string `json:"via,omitempty"`
 }
 
 // Build renders the full first-party graph of res. If entry is non-empty, the
@@ -282,6 +290,39 @@ func frontierInput(g *Graph) *frontier.Input {
 		in.Entrypoints = append(in.Entrypoints, frontier.InEntry{Fn: ep.Fn, Name: ep.Name})
 	}
 	return in
+}
+
+// ApplyReclaimers runs the sound dispatch-seam reclaimers (reclaim package) over
+// res and folds the recovered edges into g, re-sorting and re-classifying the
+// frontier so it reflects the reclaimed graph. It is OPT-IN (D2): Build never calls
+// it, so the default graph — and every committed golden — is unchanged; a caller
+// asks for it explicitly (`flowmap graph --reclaim`). Each added edge is one real
+// execution can take (R2) and carries its reclaimer in Via, so a reviewer can diff
+// base-vs-reclaimed. Returns the number of edges added. Only edges between existing
+// nodes that are not already present are folded in.
+func ApplyReclaimers(g *Graph, res *analyze.Result) int {
+	nodes := make(map[string]bool, len(g.Nodes))
+	for _, n := range g.Nodes {
+		nodes[n.FQN] = true
+	}
+	existing := make(map[[2]string]bool, len(g.Edges))
+	for _, e := range g.Edges {
+		existing[[2]string{e.From, e.To}] = true
+	}
+	added := 0
+	for _, e := range reclaim.StrictServer(res) {
+		if !nodes[e.From] || !nodes[e.To] || existing[[2]string{e.From, e.To}] {
+			continue
+		}
+		g.Edges = append(g.Edges, Edge{From: e.From, To: e.To, Tier: 2, Via: e.Via})
+		existing[[2]string{e.From, e.To}] = true
+		added++
+	}
+	if added > 0 {
+		sortGraph(g)
+		g.Frontier = frontier.Classify(frontierInput(g))
+	}
+	return added
 }
 
 // obligationSummaries hands the engine its production inputs (CX-2): the
