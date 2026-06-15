@@ -25,7 +25,10 @@ import (
 // guide as a LATENT FINDING, because "your inferred architecture is already
 // violated here" is itself one of init's most valuable outputs.
 func Propose(ix *graph.Index, service string) (*policy.Policy, string) {
-	p := &policy.Policy{Service: service, Version: 1}
+	// Record the substrate the proposal was measured on, so a later gate can flag
+	// a policy-vs-graph algorithm mismatch (the precision footgun) rather than
+	// reporting its spurious findings as regressions.
+	p := &policy.Policy{Service: service, Version: 1, Substrate: ix.Algo()}
 	var g guide
 	g.intro(service)
 

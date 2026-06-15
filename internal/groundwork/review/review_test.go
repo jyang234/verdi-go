@@ -150,6 +150,39 @@ func TestReviewRecordsSubstrateAndMismatch(t *testing.T) {
 	}
 }
 
+// A policy proposed on one algorithm but gated against a branch graph built on
+// another must disclose the mismatch on the substrate line, so its potentially
+// spurious reachability findings are read as analyzer artifacts (§9). Silent when
+// the policy's substrate matches the branch's, or is unrecorded.
+func TestReviewFlagsPolicyGraphSubstrateMismatch(t *testing.T) {
+	mk := func() *graph.Graph {
+		return &graph.Graph{Algo: "rta", Nodes: []graph.Node{{FQN: "(*svc.S).Do", Sig: "func()", Tier: 1}}}
+	}
+	hasMismatch := func(cs []string) bool {
+		for _, c := range cs {
+			if strings.Contains(c, "substrate mismatch") {
+				return true
+			}
+		}
+		return false
+	}
+
+	a := Review(&policy.Policy{Service: "svc", Version: 1, Substrate: "vta"}, mk(), mk())
+	if !hasMismatch(a.Caveats) {
+		t.Errorf("a vta policy gated on an rta graph must disclose a substrate mismatch; got %v", a.Caveats)
+	}
+	if !strings.Contains(a.Render(), "substrate mismatch") {
+		t.Errorf("render must echo the mismatch; got:\n%s", a.Render())
+	}
+
+	if m := Review(&policy.Policy{Service: "svc", Version: 1, Substrate: "rta"}, mk(), mk()); hasMismatch(m.Caveats) {
+		t.Errorf("a matching substrate must not synthesize a mismatch caveat; got %v", m.Caveats)
+	}
+	if u := Review(&policy.Policy{Service: "svc", Version: 1}, mk(), mk()); hasMismatch(u.Caveats) {
+		t.Errorf("an unrecorded policy substrate must not synthesize a mismatch caveat; got %v", u.Caveats)
+	}
+}
+
 // A branch graph built with `--reclaim` was judged over a substrate that includes
 // edges recovered at a dispatch seam; the verdict must disclose it on the substrate
 // line so a reclaim-informed gate is auditable, not silently folded into a plain

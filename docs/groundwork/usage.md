@@ -136,6 +136,14 @@ on *different* algorithms, the mismatch is disclosed as a caveat (a delta across
 substrates can move for the analyzer's reasons, not the code's). A graph from a
 pre-provenance flowmap reads `substrate: unrecorded`.
 
+`init` also records the algorithm it proposed against in the policy's `substrate`
+field, and `fitness`/`verify` flag a **policy-vs-graph** mismatch the same way: a
+policy proposed on `vta` but checked against an `rta` graph (the `flowmap graph`
+default) raises a non-blocking substrate caution, because `rta` over-approximates
+dynamic dispatch and can surface reachability findings `vta` ruled out — so the
+spurious findings read as an analyzer artifact, not a regression. The remedy it
+names: build the gate graph with the same `--algo`, or re-init the policy.
+
 ---
 
 ## The policy
@@ -148,6 +156,7 @@ own homework — so it is declarative and validated strictly on load.
 {
   "service": "layeredsvc",
   "version": 1,
+  "substrate": "vta",
   "layers": [
     {"name": "handler", "packages": ["example.com/layeredsvc/internal/handler"]},
     {"name": "app",     "packages": ["example.com/layeredsvc/internal/app"]},

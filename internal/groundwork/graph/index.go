@@ -275,5 +275,10 @@ func (ix *Index) EffectOrder() []EffectOrderFact { return ix.g.EffectOrder }
 // verdict reads it.
 func (ix *Index) Frontier() *FrontierSection { return ix.g.Frontier }
 
+// Algo returns the call-graph construction algorithm the graph was built on
+// (rta|vta|cha), or "" when unrecorded — the substrate a verdict over this graph
+// is computed on, and what a policy's recorded Substrate is checked against.
+func (ix *Index) Algo() string { return ix.g.Algo }
+
 // Entrypoints returns the graph's named roots (routes, topics) with handlers.
 func (ix *Index) Entrypoints() []Entrypoint { return ix.g.Entrypoints }

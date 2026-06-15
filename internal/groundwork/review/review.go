@@ -40,7 +40,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		NewBlindSpots:    newBlindSpots(p, base, branch),
 		DBLabelDrift:     dbLabelDrift(base, branch),
 		Algo:             branch.Algo,
-		Caveats:          provenanceCaveats(base, branch),
+		Caveats:          provenanceCaveats(p.Substrate, base, branch),
 	}
 	a.Verdict = verdict(p, d, &a)
 	a.Digest = digestOf(a)

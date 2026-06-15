@@ -371,12 +371,16 @@ which are real here:
   routes with empty cones — deserves its own deterministic signal ("N routes touch
   nothing; suspicious"), independent of any reclaimer. Cheap, generic, high-value
   for agents.
-- **Algo-provenance mismatch (field report §9).** A policy built on VTA but checked
-  on an RTA graph produced spurious violations. The graph already records `Algo`;
-  the frontier/verdict surfaces should flag a policy-vs-graph algo mismatch. Fits
-  the same provenance plumbing reclaimers need.
-- **Reclaimer provenance in verdicts.** Once edges have sources, a proof should be
-  able to state which reclaimers it depended on — auditability for reviewers.
+- **Algo-provenance mismatch (field report §9) — SHIPPED.** A policy built on VTA
+  but checked on an RTA graph produced spurious violations. `init` now records the
+  proposed-against algorithm in the policy's `substrate` field, and `fitness`/
+  `verify` flag a policy-vs-graph mismatch (`graph.SubstrateMismatchCaveat`): a
+  non-blocking Caution in fitness, a substrate caveat in the review gate, so the
+  spurious findings read as an analyzer artifact, not a regression. Reused the same
+  Algo/Caveats provenance plumbing.
+- **Reclaimer provenance in verdicts — SHIPPED (R9).** Edges carry a `via` source;
+  groundwork decodes it and `Graph.ReclaimCaveat` states on the substrate line that
+  a verdict leaned on reclaimed edges — auditability for reviewers.
 
 ---
 

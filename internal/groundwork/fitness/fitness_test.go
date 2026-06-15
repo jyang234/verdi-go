@@ -42,6 +42,39 @@ func layeredPolicy() *policy.Policy {
 	}
 }
 
+// A policy proposed on one algorithm but checked against a graph built on another
+// must surface a (non-blocking) substrate Caution, so its spurious reachability
+// findings are read as analyzer artifacts, not regressions (§9). It stays silent
+// when the algorithms agree or either side is unrecorded.
+func TestCheckFlagsSubstrateMismatch(t *testing.T) {
+	mismatchCaution := func(res Result) bool {
+		for _, f := range res.Cautions() {
+			if f.Rule == "substrate" {
+				return true
+			}
+		}
+		return false
+	}
+	g := &graph.Graph{Algo: "rta", Nodes: []graph.Node{{FQN: "svc.A", Tier: 1}}}
+	ix := graph.NewIndex(g)
+
+	res := Check(&policy.Policy{Service: "svc", Version: 1, Substrate: "vta"}, ix)
+	if !mismatchCaution(res) {
+		t.Errorf("a vta-proposed policy on an rta graph must raise a substrate caution; got %+v", res.Cautions())
+	}
+	if !res.OK() {
+		t.Error("the substrate mismatch must be advisory (Caution), not gate-failing")
+	}
+
+	// Agreement and unrecorded sides are silent.
+	if res := Check(&policy.Policy{Service: "svc", Version: 1, Substrate: "rta"}, ix); mismatchCaution(res) {
+		t.Error("matching substrate must not raise a caution")
+	}
+	if res := Check(&policy.Policy{Service: "svc", Version: 1}, ix); mismatchCaution(res) {
+		t.Error("an unrecorded policy substrate must not raise a caution")
+	}
+}
+
 func TestPkgOf(t *testing.T) {
 	cases := map[string]string{
 		hGetUser: "example.com/layeredsvc/internal/handler",

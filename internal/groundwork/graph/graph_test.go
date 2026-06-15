@@ -70,6 +70,27 @@ func TestReclaimCaveatSilentOnBaseGraph(t *testing.T) {
 	}
 }
 
+// The substrate guard flags a policy-vs-graph algorithm mismatch (§9): a policy
+// proposed on one algorithm checked against a graph built on another can surface
+// spurious reachability findings (precision differs). It must stay silent when
+// either side is unrecorded or the two agree, and name both algorithms when they
+// differ so the reader can act (rebuild the graph, or re-init the policy).
+func TestSubstrateMismatchCaveat(t *testing.T) {
+	if got := SubstrateMismatchCaveat("vta", "rta"); !strings.Contains(got, "vta") || !strings.Contains(got, "rta") || !strings.Contains(got, "--algo vta") {
+		t.Errorf("mismatch must name both algos and the remedy; got %q", got)
+	}
+	for _, c := range []struct{ pol, gph string }{
+		{"vta", "vta"}, // agree
+		{"", "rta"},    // policy unrecorded
+		{"vta", ""},    // graph unrecorded
+		{"", ""},       // both unrecorded
+	} {
+		if got := SubstrateMismatchCaveat(c.pol, c.gph); got != "" {
+			t.Errorf("SubstrateMismatchCaveat(%q,%q) = %q, want silent", c.pol, c.gph, got)
+		}
+	}
+}
+
 func TestLoadRequiresNodes(t *testing.T) {
 	const j = `{"edges":[],"blind_spots":[]}`
 	if _, err := Load(strings.NewReader(j)); err == nil {

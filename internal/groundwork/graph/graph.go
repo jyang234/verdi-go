@@ -230,6 +230,24 @@ func (g *Graph) ReclaimCaveat() string {
 		" edge(s) recovered at a dispatch seam (flowmap --reclaim) — a reachable verdict may rest on a reclaimed edge"
 }
 
+// SubstrateMismatchCaveat returns a disclosure when a policy proposed on
+// policyAlgo is being checked against a graph built on graphAlgo and the two
+// differ, or "" when there is nothing to flag (either is unrecorded, or they
+// agree). The algorithms are all sound, so a proof of absence holds on any of
+// them; they differ in PRECISION, so a coarser graph (rta over-approximates
+// dynamic dispatch) can show a reachability finding a refined one (vta) ruled
+// out — the field footgun where a vta-proposed policy swept with the rta default
+// produced spurious must_not_reach violations. Naming the mismatch lets a reader
+// treat such a finding as an analyzer artifact rather than a regression. Shared by
+// fitness (as a Caution) and the review gate (as a substrate caveat) so the two
+// surfaces word it identically — the Algo/Caveats provenance discipline (R3).
+func SubstrateMismatchCaveat(policyAlgo, graphAlgo string) string {
+	if policyAlgo == "" || graphAlgo == "" || policyAlgo == graphAlgo {
+		return ""
+	}
+	return fmt.Sprintf("substrate mismatch: policy proposed on %s, graph built on %s — the algorithms differ in precision, so a reachability finding may be an analyzer artifact, not a regression; build the gate graph with `flowmap graph --algo %s`, or re-init the policy on this graph", policyAlgo, graphAlgo, policyAlgo)
+}
+
 // IsBoundary reports whether the edge targets an external sink rather than a
 // first-party function.
 func (e Edge) IsBoundary() bool { return strings.HasPrefix(e.To, boundaryPrefix) }

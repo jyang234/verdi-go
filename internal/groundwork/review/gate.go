@@ -81,7 +81,7 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string) GateResul
 		NewWriteTargets:  writeTargets,
 		StandingCautions: standingCautions,
 		Algo:             branch.Algo,
-		Caveats:          provenanceCaveats(base, branch),
+		Caveats:          provenanceCaveats(p.Substrate, base, branch),
 	}
 	// StandingCautions are deliberately absent from this conjunction: they
 	// disclose, they do not gate.

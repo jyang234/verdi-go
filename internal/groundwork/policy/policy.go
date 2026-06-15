@@ -19,8 +19,21 @@ import (
 
 // Policy is the whole declared architecture of one service.
 type Policy struct {
-	Service           string            `json:"service"`
-	Version           int               `json:"version"`
+	Service string `json:"service"`
+	Version int    `json:"version"`
+
+	// Substrate records the call-graph algorithm (rta|vta|cha) of the graph this
+	// policy was PROPOSED against (`groundwork init`). It is provenance, not a
+	// gate input: a reachability proof is sound on any algorithm, but the
+	// algorithms differ in PRECISION, so checking a policy against a graph built
+	// on a different one can surface spurious findings — a route init proved
+	// read-only under a refined substrate (vta) can appear to reach a write under
+	// a coarser one (rta over-approximates dynamic dispatch). fitness/verify flag
+	// that mismatch so the spurious findings are read as an analyzer artifact, not
+	// a regression. Absent on a hand-authored or pre-provenance policy: empty means
+	// "unrecorded", never a substrate.
+	Substrate string `json:"substrate,omitempty"`
+
 	Layers            []Layer           `json:"layers,omitempty"`
 	Layering          *Layering         `json:"layering,omitempty"`
 	MustNotReach      []ReachRule       `json:"must_not_reach,omitempty"`
