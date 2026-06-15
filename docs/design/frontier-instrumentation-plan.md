@@ -158,8 +158,9 @@ reflect/HighFanOut/unsafe family (`graph.go` `BlindSpot`); structural starvation
 a consumer reading the disclosure. Finding 2: the agent reads 0 and trusts it.
 
 **What:** promote the derived B-markers into the graph's disclosed frontier as a
-new, typed section (or an extension of `blind_spots` with a `bin`/`reason` field),
-so the frontier is something a consumer can *read*, not *reconstruct*. An agent
+new, typed `frontier` section (D1 — kept separate from the verdict-coupled
+`blind_spots`), so the frontier is something a consumer can *read*, not
+*reconstruct*. An agent
 asking "can I trust this route's effect list?" gets a direct, machine-readable
 "no — this route's cone is severed at `<site>` (kind: strict-server-seam, bin: B)."
 
@@ -205,10 +206,13 @@ type Reclaimer interface {
   seam without modeling oapi/chi — but it plugs into the generic interface, is
   independently sound, and is **gated by measured prevalence**: the classifier says
   which shapes earn a reclaimer.
-- Reclaimed edges carry provenance (which reclaimer, vs the base call-graph), so a
-  verdict can self-certify its substrate (the `Algo`/`Caveats` discipline in
-  `graph.go`, extended). A reviewer can see "this reachability used the strict-
-  server reclaimer."
+- Reclaimed edges carry per-edge provenance (a `via` field naming the reclaimer,
+  empty for base call-graph edges — D2), so a verdict can self-certify its
+  substrate (the `Algo`/`Caveats` discipline in `graph.go`, extended) and a
+  reviewer can see "this reachability used the strict-server reclaimer." Reclaimers
+  are **opt-in behind a flag** (D2), mirroring the `--algo` default-conservative /
+  refine-opt-in precedent: the base graph is unchanged and the reclaimed graph is
+  an explicit, diffable superset.
 
 This keeps us neither hyper-molded (the core is generic; the taxonomy and
 classifier are framework-blind) nor over-general (we don't build speculative
@@ -310,17 +314,55 @@ Explicit list of where this work could slip the doctrine, and the guardrail:
 
 ---
 
-## 10. Open questions for the owner
+## 10. Decisions (resolved 2026-06-15)
 
-- **Disclosure shape:** extend `blind_spots` with a `bin`/`reason`, or a new typed
-  `frontier` section? (Schema-evolution cost vs clarity.)
-- **Reclaimer trust surface:** do reclaimed edges need to be *visibly distinct* in
-  the graph JSON (so a skeptical reviewer can diff base vs reclaimed), or is
-  per-edge provenance enough?
-- **Prevalence bar:** what share, on what corpus, justifies a new reclaimer? (Avoids
-  both molding-to-one-case and a long tail of brittle framework plugins.)
-- **B2 ergonomics:** is "make the SQL constant" disclosed per-site actionable
-  enough, or do we want a codemod-grade hint?
+D1, D2, and D3 are locked below; they share one implementation
+(provenance/disclosure metadata on graph objects) and follow the repo's existing
+conventions. D4 is resolved to its qualitative form; the quantitative bar is the
+one standing TODO, deferred until a representative corpus exists.
+
+- **D1 — Disclosure shape: a new typed `frontier` section, NOT an overload of
+  `blind_spots`.** Two reasons: (a) `blind_spots` is already verdict-coupled —
+  `frontierBlindSiteWith` turns any in-cone blind spot into a `noPathFound`
+  Caution, so adding structural-starvation markers there would let component-2
+  disclosure change verdicts, violating R1; a separate section is verdict-neutral
+  by construction. (b) Semantics: `blind_spots` connotes *irreducible* gaps (A/C);
+  a B-marker is reclaimable and *transient* — it disappears when its reclaimer
+  lands — so it must not inflate the count an agent reads as fundamental blindness.
+  `blind_spots` is unchanged; `frontier` carries the full taxonomy + `bin`/`owner`/
+  `reclaimer_hint`. *Fork if the owner wants starvation to ABSTAIN the verdict
+  (fail-safe over disclose-only): then it belongs in `blind_spots` after all. We
+  chose disclose-only because the `$N` verdict gap is already covered by
+  groundwork's R7 name-expansion; the durable verdict fix is the reclaimer, not a
+  Caution flood.*
+- **D2 — Reclaimer trust: per-edge provenance (a `via` field on `Edge`),
+  reclaimers OPT-IN behind a flag.** Per-edge provenance subsumes "visibly
+  distinct" — distinctness is a filter or a base-vs-reclaimed diff away — and it is
+  what lets a proof self-certify which reclaimers it used (the §7 auditability
+  meta-gap). Opt-in mirrors the shipped `--algo` precedent (conservative default,
+  refinement opt-in): the base graph stays unchanged, the reclaimed graph is an
+  explicit diffable superset. Promote to default-on only after a real-corpus
+  soundness bake. *Fork: a proven-sound reclaimer could justify default-on sooner
+  than `--algo` did — a trust-vs-friction call for the owner.*
+- **D3 — B2 ergonomics: actionable per-site disclosure, NO codemod.** Emit the
+  exact call site + reason (arg 0 non-constant → verb unreadable) + the concrete
+  ask ("hoist the SQL to a `const`"). For an agent that site+ask IS the work item —
+  B2 is just component 2 applied to opaque writes, and reuses D1's `reclaimer_hint`
+  plumbing. A codemod is over-reach: rewriting query construction is risky and
+  framework-specific, stepping the analyzer into refactoring.
+- **D4 — Prevalence bar: two qualitative gates now; the percentage deferred.** A
+  shape earns a reclaimer only if it passes BOTH: (Gate 1, breadth) it comes from a
+  *named framework/codegen pattern* recurring across a CLASS of services, not one
+  bespoke codebase — kills the long-tail-of-one-offs risk; (Gate 2, soundness) the
+  reclaim is a *local, statically-provable edge-add* (closure lexically present,
+  unconditionally invoked), reviewable in isolation, not a cross-procedural
+  heuristic. Strict-server passes both; reflection and registry-table dispatch pass
+  Gate 1 but fail Gate 2 → they stay disclosed, never reclaimed — the line falls
+  out of the doctrine, not a magic number. **Standing TODO:** a quantitative
+  prevalence threshold, blocked on a representative multi-service corpus (dogfood is
+  framework-free; the fleet is unseen). The classifier reports prevalence
+  opportunistically (§3) so the number accrues for later tightening; v1 does not
+  block on it.
 
 ---
 
