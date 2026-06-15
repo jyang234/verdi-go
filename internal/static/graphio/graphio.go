@@ -433,6 +433,10 @@ func sortGraph(g *Graph) {
 	// Total order over every Edge field: a comparator that ignored Boundary and
 	// Concurrent left equal-keyed edges in build order — deterministic only as
 	// long as the pre-sort slice happened to be, a latent output-stability trap.
+	// Via is included for the same reason (dedupEdges compares full struct equality,
+	// so a comparator that omitted Via could order two Via-differing edges by build
+	// order while dedup kept both — a stability gap if a future reclaimer emits a
+	// Via edge parallel to a base From/To).
 	sort.Slice(g.Edges, func(i, j int) bool {
 		a, b := g.Edges[i], g.Edges[j]
 		if a.From != b.From {
@@ -447,7 +451,10 @@ func sortGraph(g *Graph) {
 		if a.Boundary != b.Boundary {
 			return a.Boundary < b.Boundary
 		}
-		return !a.Concurrent && b.Concurrent
+		if a.Concurrent != b.Concurrent {
+			return !a.Concurrent && b.Concurrent
+		}
+		return a.Via < b.Via
 	})
 	g.Edges = dedupEdges(g.Edges)
 }

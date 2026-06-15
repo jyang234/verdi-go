@@ -1,6 +1,26 @@
 package frontier
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
+)
+
+// Exhaustiveness guard: every blind-spot kind must have an EXPLICIT bin decision in
+// blindSpotBin (recognized==true). When a new blindspots.Kind is added, this fails
+// until it is classified — so a kind that is actually reclaimable cannot silently
+// fall through the catch-all default into bin A (the fail-open #5 flagged).
+func TestBlindSpotBinCoversAllKinds(t *testing.T) {
+	for _, k := range blindspots.Kinds() {
+		if _, ok := blindSpotBin(string(k)); !ok {
+			t.Errorf("blindspots.Kind %q has no explicit frontier bin — add it to blindSpotBin", k)
+		}
+	}
+	// And an unknown kind is reported unrecognized (disclosed as A, but flagged).
+	if _, ok := blindSpotBin("SomeFutureKind"); ok {
+		t.Error("an unrecognized kind must report recognized==false")
+	}
+}
 
 // readableDBVerb is the discriminator between a constant-SQL verb the labeler read
 // (uppercase: SELECT/DELETE/...) and a method-name fallback it emits for

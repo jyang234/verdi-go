@@ -84,7 +84,10 @@ func cmdBoundary(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	dir := dirArg(fs)
+	dir, err := dirArg(fs)
+	if err != nil {
+		return err
+	}
 
 	c, err := boundary.Generate(dir)
 	if err != nil {
@@ -122,7 +125,10 @@ func cmdGraph(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	dir := dirArg(fs)
+	dir, err := dirArg(fs)
+	if err != nil {
+		return err
+	}
 
 	opt, err := algoOption(*algo)
 	if err != nil {
@@ -166,7 +172,10 @@ func cmdFrontier(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	dir := dirArg(fs)
+	dir, err := dirArg(fs)
+	if err != nil {
+		return err
+	}
 
 	opt, err := algoOption(*algo)
 	if err != nil {
@@ -185,6 +194,7 @@ func cmdFrontier(args []string) error {
 	}
 	// Build already classified and embedded the frontier section; summarize it.
 	rep := frontier.Summarize(g.Frontier, len(g.Entrypoints))
+	rep.Algo = g.Algo // carry the call-graph algorithm into the --json provenance
 	if *asJSON {
 		b, err := canonjson.Marshal(rep)
 		if err != nil {
@@ -255,7 +265,10 @@ func cmdCoverage(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	dir := dirArg(fs)
+	dir, err := dirArg(fs)
+	if err != nil {
+		return err
+	}
 	gdir := *flowsDir
 	if gdir == "" {
 		gdir = defaultFlowsDir(dir)
@@ -815,11 +828,22 @@ func parsePermuted(fs *flag.FlagSet, args []string) (string, error) {
 
 // dirArg returns the first positional argument, defaulting to the current
 // directory.
-func dirArg(fs *flag.FlagSet) string {
-	if d := fs.Arg(0); d != "" {
-		return d
+// dirArg returns the positional directory argument (defaulting to "."). It errors
+// if a flag was placed AFTER the directory: Go's flag package stops parsing at the
+// first non-flag token, so `flowmap <cmd> <dir> --x` would otherwise silently drop
+// --x. Surfacing it turns a silent no-op (e.g. an ignored --reclaim that looks like
+// success) into a clear message.
+func dirArg(fs *flag.FlagSet) (string, error) {
+	rest := fs.Args()
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			return "", fmt.Errorf("%s: flags must come before the directory argument (got %q)", fs.Name(), a)
+		}
 	}
-	return "."
+	if len(rest) > 0 {
+		return rest[0], nil
+	}
+	return ".", nil
 }
 
 func usage() {

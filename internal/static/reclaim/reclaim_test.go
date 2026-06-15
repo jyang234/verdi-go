@@ -48,10 +48,17 @@ func TestStrictServerReclaimsTheSeam(t *testing.T) {
 		if base := strings.TrimSuffix(e.To, "$1"); base != e.From {
 			t.Errorf("edge does not connect a method to its own closure: %s -> %s", e.From, e.To)
 		}
-		got[shortName(e.From)] = true
+		got[e.From] = true
 	}
 	for _, op := range []string{"CreateEventTypeTemplate", "SyncEventTypes", "GetHealth"} {
-		if !got["api.ServerInterfaceWrapper."+op] {
+		want := "api.ServerInterfaceWrapper)." + op
+		found := false
+		for from := range got {
+			if strings.HasSuffix(from, want) {
+				found = true
+			}
+		}
+		if !found {
 			t.Errorf("missing recovered edge for %s; got %v", op, got)
 		}
 	}
@@ -108,12 +115,4 @@ func TestApplyReclaimersClosesSeam(t *testing.T) {
 			t.Errorf("reclaimed graph must carry no seam marker, got %+v", m)
 		}
 	}
-}
-
-func shortName(fqn string) string {
-	s := strings.TrimPrefix(fqn, "(")
-	if i := strings.LastIndexByte(s, '/'); i >= 0 {
-		s = s[i+1:]
-	}
-	return strings.ReplaceAll(strings.ReplaceAll(s, ")", ""), "*", "")
 }

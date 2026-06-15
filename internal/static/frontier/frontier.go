@@ -73,6 +73,7 @@ type InEntry struct{ Fn, Name string }
 // two headline ratios — reclaimable share (B of all) and attribution loss (routes
 // that reach no effect, of all routes).
 type Report struct {
+	Algo               string      `json:"algo,omitempty"` // call-graph algorithm provenance (rta|vta|cha)
 	Markers            []Marker    `json:"markers"`
 	Counts             map[Bin]int `json:"counts"`
 	Entrypoints        int         `json:"entrypoints"`
@@ -166,19 +167,18 @@ func Classify(in *Input) []Marker {
 	// seam rather than a guess: it separates a dispatch-severed route (strict-server)
 	// from a genuine no-op stub (an empty handler owns no effect closure, so it is
 	// not flagged — nothing to reclaim).
-	starved := 0
 	for _, ep := range in.Entrypoints {
 		if !severedParent[ep.Fn] || reaches[ep.Fn] {
 			continue
 		}
-		starved++
 		add(Marker{Kind: "starved-entrypoint", Bin: BinB, Site: ep.Fn, Owner: ep.Name,
 			ReclaimerHint: "route reaches no effect directly, but its own severed closure does — handler chain cut at the dispatch seam"})
 	}
 
 	// Disclosed blind spots, binned by kind.
 	for _, bs := range in.BlindSpots {
-		add(Marker{Kind: bs.Kind, Bin: blindSpotBin(bs.Kind), Site: bs.Site})
+		bin, _ := blindSpotBin(bs.Kind)
+		add(Marker{Kind: bs.Kind, Bin: bin, Site: bs.Site})
 	}
 
 	sort.Slice(markers, func(i, j int) bool {
@@ -295,13 +295,23 @@ func readableDBVerb(label string) bool {
 	return true
 }
 
-func blindSpotBin(kind string) Bin {
-	if kind == string(blindspots.HighFanOut) {
-		return BinC
+// blindSpotBin maps a blind-spot kind to its taxonomy bin. The second result is
+// false for a kind this classifier does not yet recognize: it is disclosed as A
+// (irreducible) conservatively, but TestBlindSpotBinCoversAllKinds iterates
+// blindspots.Kinds() and fails when a new kind is added without an explicit
+// decision here — so a kind that is actually reclaimable cannot SILENTLY land in A
+// (the fail-open the catch-all default would otherwise cause).
+func blindSpotBin(kind string) (Bin, bool) {
+	switch kind {
+	case string(blindspots.HighFanOut):
+		return BinC, true // over-approximation, not blindness
+	case string(blindspots.Reflect), string(blindspots.Unsafe),
+		string(blindspots.Cgo), string(blindspots.Linkname),
+		string(blindspots.UnresolvedDispatch), string(blindspots.NonConstantBoundaryArg):
+		return BinA, true // runtime/irreducible frontier
+	default:
+		return BinA, false // unrecognized — disclosed as A, but the guard test flags it
 	}
-	// reflect, unsafe, cgo, go:linkname, UnresolvedDispatch, NonConstantBoundaryArg
-	// — all runtime/irreducible frontiers.
-	return BinA
 }
 
 func allDigits(s string) bool {
