@@ -8,7 +8,13 @@ import "regexp"
 var (
 	uuidRe    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	numericRe = regexp.MustCompile(`^\d+$`)
-	rfc3339Re = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`)
+	// The timezone is OPTIONAL and the date/time separator may be 'T' or a space:
+	// a zone-less timestamp (a MySQL DATETIME "2026-06-16 12:00:00", a zone-less
+	// time.Time format) is per-run volatile exactly like a zoned one, so failing
+	// to template it would leak the raw value into the golden and break the
+	// byte-identical guarantee. A full HH:MM:SS time component is still required so
+	// a bare date is not swept up.
+	rfc3339Re = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$`)
 )
 
 // placeholder reports whether val looks like a generated value and, if so,

@@ -19,7 +19,8 @@
     {
       "fqn": "(*example.com/obligsvc/internal/store.Store).BeginTxC",
       "sig": "func (*store.Store).BeginTxC() (*store.Tx, *store.TxError)",
-      "tier": 3
+      "tier": 3,
+      "fallible": true
     },
     {
       "fqn": "(*example.com/obligsvc/internal/store.Store).Release",
@@ -399,15 +400,13 @@
       "from": "example.com/obligsvc/internal/app.DeferredPublish",
       "to": "boundary:bus PUBLISH loan.approved",
       "tier": 1,
-      "boundary": "outbound-async",
-      "concurrent": true
+      "boundary": "outbound-async"
     },
     {
       "from": "example.com/obligsvc/internal/app.DeferredPublishAudited",
       "to": "boundary:bus PUBLISH loan.approved",
       "tier": 1,
-      "boundary": "outbound-async",
-      "concurrent": true
+      "boundary": "outbound-async"
     },
     {
       "from": "example.com/obligsvc/internal/app.DeferredPublishAudited",
@@ -496,8 +495,7 @@
     {
       "from": "example.com/obligsvc/internal/app.HoldSem",
       "to": "(*example.com/obligsvc/internal/store.Store).Release",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.OpenSend",
@@ -542,14 +540,12 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferAnnotate",
       "to": "example.com/obligsvc/internal/app.TransferAnnotate$1",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferAnnotate",
       "to": "example.com/obligsvc/internal/app.TransferAnnotate$2",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferAnnotate$1",
@@ -574,8 +570,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferClosure",
       "to": "example.com/obligsvc/internal/app.TransferClosure$1",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferClosure$1",
@@ -585,7 +580,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferConcrete",
       "to": "(*example.com/obligsvc/internal/store.Store).BeginTxC",
-      "tier": 3
+      "tier": 2
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferConcrete",
@@ -595,8 +590,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferConcrete",
       "to": "example.com/obligsvc/internal/app.TransferConcrete$1",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferConcrete$1",
@@ -616,8 +610,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferDefer",
       "to": "(*example.com/obligsvc/internal/store.Tx).Rollback",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferDefer",
@@ -632,8 +625,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferDeferHelper",
       "to": "example.com/obligsvc/internal/app.closeTx",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferDeferHelper",
@@ -668,8 +660,7 @@
     {
       "from": "example.com/obligsvc/internal/app.TransferRecoverNamed",
       "to": "example.com/obligsvc/internal/app.handle",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "example.com/obligsvc/internal/app.TransferViaHelper",

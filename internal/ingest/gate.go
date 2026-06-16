@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/ir"
 )
@@ -95,19 +96,21 @@ func BoundaryEffects(root *ir.CanonicalSpan) []string {
 }
 
 // isBoundaryEffect reports whether a span is an inter-service boundary effect,
-// classified by its span Kind — the same vocabulary the coverage join uses —
-// rather than by parsing opkey's rendered string, so a change to op-key
-// formatting cannot silently empty the effect set (and quietly flip the gate
-// green). Inbound entries (server/consumer) and published events (producer) are
+// classified primarily by its span Kind — the same vocabulary the coverage join
+// uses. Inbound entries (server/consumer) and published events (producer) are
 // effects; an outbound client call is an effect unless it is a DB operation,
 // which is behavioral-only and excluded from the inter-service boundary exactly
-// as the static contract excludes it; internal compute is never an effect.
+// as the static contract excludes it; internal compute is never an effect. The
+// one op-string test — excluding DB client spans — keys on opkey.DBPrefix, the
+// SAME constant opkey renders the key with, so a change to op-key formatting
+// updates both in lockstep and cannot silently empty the effect set (and quietly
+// flip the gate green).
 func isBoundaryEffect(s *ir.CanonicalSpan) bool {
 	switch s.Kind {
 	case ir.KindProducer, ir.KindConsumer, ir.KindServer:
 		return true
 	case ir.KindClient:
-		return !strings.HasPrefix(s.Op, "DB ")
+		return !strings.HasPrefix(s.Op, opkey.DBPrefix)
 	default:
 		return false
 	}

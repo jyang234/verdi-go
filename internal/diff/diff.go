@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -380,8 +381,9 @@ func isContract(s *ir.CanonicalSpan) bool {
 }
 
 // isDBOp reports whether an op is a database operation ("DB <system> <op>
-// <table>"), which the canonical-key step keys with a "DB " prefix.
-func isDBOp(op string) bool { return strings.HasPrefix(op, "DB ") }
+// <table>"), keyed on opkey.DBPrefix — the same constant opkey renders the key
+// with — so this test cannot drift from the op-key format.
+func isDBOp(op string) bool { return strings.HasPrefix(op, opkey.DBPrefix) }
 
 // changedAttrKeys returns the sorted keys whose values differ (added, removed, or
 // modified) between two attribute maps.

@@ -8,6 +8,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/sqlverb"
 )
 
 // Propose derives a baseline policy from a graph's measured facts — the
@@ -278,19 +279,22 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 }
 
 // dbWriteTargets is the canonical target list for every proposed rule that
-// ratchets "no write reaches here" — the FULL set of DB write verbs IsWrite
-// recognizes (budget.go), returned fresh so callers can append (proposeReadOnly
-// adds bus PUBLISH) without aliasing a shared backing array. The proposers
-// decide what to ratchet using IsWrite, so the emitted rule must enumerate the
-// same verbs: the INSERT/UPDATE/DELETE triple the rules used to hard-code left
-// a future concurrent/leaked MERGE/REPLACE/UPSERT able to slip the gate even
-// though IsWrite counts it as a write — the rule was strictly weaker than the
-// check that built it (R6 follow-up).
+// ratchets "no write reaches here" — one "boundary:db <VERB>" selector per verb
+// in sqlverb.MutatingVerbs(), the SAME set IsWrite gates on (budget.go →
+// sqlverb.Mutating). Deriving the list mechanically (rather than hand-typing the
+// verbs) is what keeps the emitted rule from being strictly weaker than the
+// check that built it: a verb added to sqlverb now reaches both IsWrite and the
+// proposed target set at once, so a future concurrent/leaked write using it
+// cannot slip the gate (the R6 regression). Returned fresh so callers can append
+// (proposeReadOnly adds bus PUBLISH) without aliasing a shared backing array;
+// TestDBWriteTargetsMatchSQLVerb guards the parity.
 func dbWriteTargets() []string {
-	return []string{
-		"boundary:db INSERT", "boundary:db UPDATE", "boundary:db DELETE",
-		"boundary:db UPSERT", "boundary:db MERGE", "boundary:db REPLACE",
+	verbs := sqlverb.MutatingVerbs()
+	out := make([]string, len(verbs))
+	for i, v := range verbs {
+		out[i] = "boundary:db " + v
 	}
+	return out
 }
 
 // dbCallPhrase renders the canonical description of opaque DB effect labels —
