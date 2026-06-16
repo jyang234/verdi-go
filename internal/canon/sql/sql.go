@@ -25,6 +25,10 @@ var keywords = map[string]bool{
 	"in": true, "join": true, "left": true, "right": true, "inner": true, "outer": true,
 	"on": true, "as": true, "order": true, "by": true, "group": true, "having": true,
 	"limit": true, "offset": true, "returning": true, "null": true, "is": true, "not": true,
+	// The mutating verbs sqlverb.Mutating recognizes beyond INSERT/UPDATE/DELETE.
+	// They must tokenize as keywords (upper-cased) so operationAndTable derives the
+	// same upper-case op the static labeler emits; USING introduces a MERGE source.
+	"merge": true, "upsert": true, "replace": true, "using": true,
 }
 
 // Normalize tokenizes raw SQL into its canonical structural form.
@@ -98,18 +102,26 @@ func tokenize(raw string) []string {
 }
 
 var (
-	inList   = regexp.MustCompile(`\(\s*\?(\s*,\s*\?)*\s*\)`)
-	multiRow = regexp.MustCompile(`\(\?\)(\s*,\s*\(\?\))+`)
-	wsRun    = regexp.MustCompile(`\s+`)
+	// inClause and valuesClause collapse only the placeholder lists whose
+	// cardinality is legitimately variable: IN (?, ?, …) and one-or-more VALUES
+	// rows (?, …), (?, …). Both are ANCHORED to their keyword so a SQL function
+	// call's argument list (coalesce(?, ?)) is left intact — collapsing that would
+	// merge structurally distinct statements (coalesce(?, ?) vs coalesce(?, ?, ?))
+	// under one canonical key and report "no change" where the SQL shape changed.
+	inClause     = regexp.MustCompile(`\bIN\s*\(\s*\?(\s*,\s*\?)*\s*\)`)
+	valuesClause = regexp.MustCompile(`\bVALUES\s*\(\s*\?(\s*,\s*\?)*\s*\)(\s*,\s*\(\s*\?(\s*,\s*\?)*\s*\))*`)
+	wsRun        = regexp.MustCompile(`\s+`)
 )
 
-// assemble joins tokens with single spaces and collapses parenthesized
-// placeholder lists (IN (?, ?, ?) → IN (?)) and multi-row VALUES groups
-// ((?), (?) → (?)), so cardinality in the statement does not perturb the golden.
+// assemble joins tokens with single spaces and collapses the variable-cardinality
+// placeholder lists — IN (?, ?, ?) → IN (?) and multi-row VALUES (?), (?) →
+// VALUES (?) — so a statement's value count does not perturb the golden. A
+// function-call argument list is NOT a variable-cardinality clause and is left
+// untouched (see inClause/valuesClause).
 func assemble(toks []string) string {
 	out := strings.Join(toks, " ")
-	out = inList.ReplaceAllString(out, "(?)")
-	out = multiRow.ReplaceAllString(out, "(?)")
+	out = inClause.ReplaceAllString(out, "IN (?)")
+	out = valuesClause.ReplaceAllString(out, "VALUES (?)")
 	out = wsRun.ReplaceAllString(out, " ")
 	return strings.TrimSpace(out)
 }
@@ -122,7 +134,9 @@ func operationAndTable(toks []string) (op, table string) {
 	}
 	op = toks[0]
 	switch op {
-	case "INSERT", "DELETE":
+	case "INSERT", "DELETE", "MERGE", "REPLACE", "UPSERT":
+		// MERGE/REPLACE/UPSERT target their table after INTO, like INSERT; DELETE
+		// after FROM. identAfter accepts either so the verb set stays in one case.
 		table = identAfter(toks, map[string]bool{"INTO": true, "FROM": true})
 	case "UPDATE":
 		table = updateTable(toks)

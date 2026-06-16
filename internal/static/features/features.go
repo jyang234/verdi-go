@@ -4,10 +4,11 @@
 // outbound HTTP seam — and the rules that turn a callee plus its call site into a
 // Boundary/Effect/Origin/Fallible/Concurrent tuple.
 //
-// Effect is set honestly: mutate/read are known only at the boundary via hints
-// (db.Exec→mutate, db.Query→read), an outbound call to a peer service is io (not
-// read, so it tiers as ext-sync = 1, while a DB read tiers as ext-read = 2), and
-// first-party internals fall to compute → tier 3.
+// Effect is set honestly: a DB call's mutate/read is read off the SQL VERB of a
+// constant statement (and fails closed to io when the statement is not constant,
+// never asserting a read it cannot prove); an outbound call to a peer service is
+// io (not read, so it tiers as ext-sync = 1, while a DB read tiers as ext-read =
+// 2), and first-party internals fall to compute → tier 3.
 package features
 
 import (
@@ -16,8 +17,10 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/jyang234/golang-code-graph/internal/canon/sql"
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/model"
+	"github.com/jyang234/golang-code-graph/internal/sqlverb"
 	"github.com/jyang234/golang-code-graph/internal/tiermap"
 )
 
@@ -68,7 +71,7 @@ func (e *Extractor) Edge(caller, callee *ssa.Function, site ssa.CallInstruction)
 	case e.hints.IsHTTP(callee):
 		f.Boundary, f.Effect = model.BoundaryOutboundSync, model.EffectIO
 	case e.hints.IsDB(callee):
-		f.Boundary, f.Effect = model.BoundaryOutboundSync, dbEffect(callee)
+		f.Boundary, f.Effect = model.BoundaryOutboundSync, dbEffect(callee, site)
 	default:
 		f.Boundary, f.Effect = e.structural(caller, callee), model.EffectCompute
 	}
@@ -122,48 +125,83 @@ func (e *Extractor) isFirstParty(pkgPath string) bool {
 		(pkgPath == e.modulePath || strings.HasPrefix(pkgPath, e.modulePath+"/"))
 }
 
-// dbEffect maps a DB method to its effect by name: Query*→read, Exec*→mutate.
-func dbEffect(fn *ssa.Function) model.Effect {
-	switch {
-	case strings.HasPrefix(fn.Name(), "Query"):
-		return model.EffectRead
-	case strings.HasPrefix(fn.Name(), "Exec"):
-		return model.EffectMutate
-	default:
-		return model.EffectIO
+// dbEffect classifies a DB boundary call's effect from the SQL VERB when the
+// statement is a compile-time constant, and fails closed otherwise. The driver
+// method name alone is NOT a sound signal: Postgres `INSERT … RETURNING` rides
+// QueryContext, so a Query* method can mutate. A read (EffectRead → the lower
+// ext-read tier) is therefore asserted ONLY when a constant statement's verb is
+// SELECT. A known non-SELECT non-mutating verb is io (not a read assertion); a
+// mutating verb is mutate. When the statement is not constant the verb is
+// unknown, so it falls back to the method-name HINT but still never asserts a
+// read — Exec* mutates, everything else (Query* included) is io. This mirrors how
+// the write surface (budget.go) treats an unreadable Query* as "might mutate"
+// rather than a proven read.
+func dbEffect(callee *ssa.Function, site ssa.CallInstruction) model.Effect {
+	if op := constSQLOp(site); op != "" {
+		switch {
+		case sqlverb.Mutating(op):
+			return model.EffectMutate
+		case op == "SELECT":
+			return model.EffectRead
+		default:
+			return model.EffectIO
+		}
 	}
+	if strings.HasPrefix(callee.Name(), "Exec") {
+		return model.EffectMutate
+	}
+	return model.EffectIO
 }
 
-// isConcurrentSite reports whether the call is a `go` or `defer` dispatch. This is
-// the direct SSA signal; a closure dispatched concurrently by a library such as
-// errgroup is not detected here (the behavioral pipeline owns runtime concurrency).
-func isConcurrentSite(site ssa.CallInstruction) bool {
-	switch site.(type) {
-	case *ssa.Go, *ssa.Defer:
-		return true
-	default:
-		return false
+// constSQLOp returns the upper-cased SQL verb of the call's statement argument
+// when it is a compile-time constant, else "". It reads the statement through
+// the SAME canonical normalizer (canon/sql) the op key uses, so the verb dbEffect
+// classifies on cannot drift from the rendered DB op.
+func constSQLOp(site ssa.CallInstruction) string {
+	args := StringArgs(site)
+	if len(args) >= 1 {
+		if stmt, ok := ConstString(args[0]); ok {
+			return sql.Normalize(stmt).Operation
+		}
 	}
+	return ""
+}
+
+// isConcurrentSite reports whether the call is a `go` dispatch — the direct SSA
+// signal for a concurrently-executing (potentially racing) call. A `defer` is
+// NOT concurrent: it runs synchronously at function exit on the same goroutine,
+// so feeding it to the no_concurrent_reach gate as a racy edge would produce a
+// false Violation. A closure dispatched concurrently by a library such as
+// errgroup is also not detected here (the behavioral pipeline owns runtime
+// concurrency).
+func isConcurrentSite(site ssa.CallInstruction) bool {
+	_, ok := site.(*ssa.Go)
+	return ok
 }
 
 // Fallible reports whether fn returns or propagates an error.
 func Fallible(fn *ssa.Function) bool { return fn != nil && returnsError(fn.Signature) }
 
-// returnsError reports whether sig has an error result.
+// returnsError reports whether sig has an error result. A result counts when its
+// type IMPLEMENTS error — not only the bare `error` interface but a concrete
+// error type like *pkg.TxError — so fallibility here agrees with the obligations
+// / effect-order surface (obligations.isErrorType, also types.Implements). Exact-
+// identity matching would under-report fallibility for concrete error returns and
+// make the two trusted surfaces disagree on whether a function can fail.
 func returnsError(sig *types.Signature) bool {
 	if sig == nil {
 		return false
 	}
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
-		if types.Identical(res.At(i).Type(), errorType) {
+		if types.Implements(res.At(i).Type(), errorInterface) {
 			return true
 		}
 	}
 	return false
 }
 
-var errorType = types.Universe.Lookup("error").Type()
+var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 
 // PkgPath returns fn's defining package path, or "" for a synthetic function
 // (nil ssa Pkg). It is the single source of truth for package attribution shared

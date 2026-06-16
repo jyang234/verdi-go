@@ -1,6 +1,9 @@
 package sql
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeStripsLiterals(t *testing.T) {
 	cases := []struct {
@@ -76,6 +79,52 @@ func TestOperationAndTableUpdateQualifier(t *testing.T) {
 		n := Normalize(c.raw)
 		if n.Operation != "UPDATE" || n.Table != c.table {
 			t.Errorf("Normalize(%q) = {op:%q table:%q}, want UPDATE/%q", c.raw, n.Operation, n.Table, c.table)
+		}
+	}
+}
+
+// TestNormalizeKeepsFunctionCallArity pins that the placeholder-list collapse is
+// scoped to variable-cardinality clauses (IN-lists, VALUES rows) and does NOT
+// collapse a SQL function call's argument list. coalesce(?, ?) and
+// coalesce(?, ?, ?) are structurally distinct statements; collapsing both to
+// coalesce (?) would merge them under one canonical key and report "no change"
+// where the SQL shape actually changed.
+func TestNormalizeKeepsFunctionCallArity(t *testing.T) {
+	two := Normalize("SELECT coalesce(?, ?) FROM t").Statement
+	three := Normalize("SELECT coalesce(?, ?, ?) FROM t").Statement
+	if two == three {
+		t.Errorf("function-call arity collapsed: %q == %q (distinct statements merged)", two, three)
+	}
+	if !strings.Contains(two, "? , ?") {
+		t.Errorf("function-call placeholders were collapsed: %q", two)
+	}
+	// The IN-list and VALUES collapses must still hold (their cardinality IS
+	// variable and legitimately churns the golden otherwise).
+	if got := Normalize("SELECT * FROM t WHERE id IN (1, 2, 3)").Statement; got != "SELECT * FROM t WHERE id IN (?)" {
+		t.Errorf("IN-list no longer collapses: %q", got)
+	}
+	if got := Normalize("INSERT INTO t (a, b) VALUES (1, 2), (3, 4)").Statement; got != "INSERT INTO t ( a , b ) VALUES (?)" {
+		t.Errorf("multi-row VALUES no longer collapses: %q", got)
+	}
+}
+
+// TestOperationAndTableMergeReplaceUpsert pins that the verbs sqlverb.Mutating
+// treats as writes (MERGE/UPSERT/REPLACE) are parsed with their operation
+// upper-cased and their target table extracted, identically to INSERT — so the
+// canonical op key for a MERGE matches the static labeler's and the table is not
+// dropped.
+func TestOperationAndTableMergeReplaceUpsert(t *testing.T) {
+	cases := []struct {
+		raw, op, table string
+	}{
+		{"MERGE INTO accounts USING staging ON accounts.id = staging.id", "MERGE", "accounts"},
+		{"REPLACE INTO sessions (id, data) VALUES ($1, $2)", "REPLACE", "sessions"},
+		{"UPSERT INTO counters (k, n) VALUES ($1, $2)", "UPSERT", "counters"},
+	}
+	for _, c := range cases {
+		n := Normalize(c.raw)
+		if n.Operation != c.op || n.Table != c.table {
+			t.Errorf("Normalize(%q) = {op:%q table:%q}, want {op:%q table:%q}", c.raw, n.Operation, n.Table, c.op, c.table)
 		}
 	}
 }

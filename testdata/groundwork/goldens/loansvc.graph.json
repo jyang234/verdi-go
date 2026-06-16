@@ -227,8 +227,7 @@
     {
       "from": "(*example.com/loansvc/internal/client.Client).Call",
       "to": "(*example.com/loansvc/internal/client.Client).Call$1",
-      "tier": 3,
-      "concurrent": true
+      "tier": 3
     },
     {
       "from": "(*example.com/loansvc/internal/client.Client).Call",

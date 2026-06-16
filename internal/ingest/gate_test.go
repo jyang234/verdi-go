@@ -6,8 +6,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// TestBoundaryEffectDBExclusionTracksOpKey couples the DB-client exclusion in
+// isBoundaryEffect to opkey's RENDERED prefix rather than a hand-copied literal:
+// the op is produced by opkey.Of itself, so if op-key formatting ever changed,
+// this exclusion would have to follow it or the test fails. This is the
+// regression guard for the drift that a hard-coded "DB " literal allowed.
+func TestBoundaryEffectDBExclusionTracksOpKey(t *testing.T) {
+	dbOp, _ := opkey.Of(ir.KindClient, map[string]string{
+		"db.system": "postgresql", "db.operation": "SELECT", "db.sql.table": "applicants",
+	}, "")
+	if !strings.HasPrefix(dbOp, opkey.DBPrefix) {
+		t.Fatalf("opkey rendered DB op %q without the DB prefix; test setup is stale", dbOp)
+	}
+	if isBoundaryEffect(&ir.CanonicalSpan{Op: dbOp, Kind: ir.KindClient}) {
+		t.Errorf("DB client op %q must be excluded from boundary effects", dbOp)
+	}
+	// A non-DB outbound client call IS a boundary effect.
+	httpOp, _ := opkey.Of(ir.KindClient, map[string]string{
+		"http.request.method": "GET", "peer.service": "credit-bureau", "http.route": "/score",
+	}, "")
+	if !isBoundaryEffect(&ir.CanonicalSpan{Op: httpOp, Kind: ir.KindClient}) {
+		t.Errorf("outbound HTTP client op %q must be a boundary effect", httpOp)
+	}
+}
 
 // TestCompareEffectsNoNewEffects pins the D-PH3 semantics: only effects observed
 // but absent from the golden are "added" (gate-failing); golden effects not
