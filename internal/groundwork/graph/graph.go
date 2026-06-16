@@ -280,9 +280,10 @@ func AlgoMismatchCaveat(baseAlgo, branchAlgo string) string {
 // tool artifact (a relabeled effect, an SSA-order shift). Naming the producer skew
 // lets a reader treat such a delta as a tool artifact, not a code change (R11). It
 // is the producer dimension of the Stamp/Algo provenance family — the code identity
-// is bound at the gate via --expect and the algo via SubstrateMismatchCaveat; this
-// closes the last comparable-inputs dimension. Shared so review and verify word it
-// identically (one source of truth).
+// is bound at the gate via --expect and the base↔branch algo via AlgoMismatchCaveat
+// (with SubstrateMismatchCaveat guarding the policy-vs-graph algo); this closes the
+// last comparable-inputs dimension. Shared so review and verify word it identically
+// (one source of truth).
 func ToolMismatchCaveat(baseTool, branchTool string) string {
 	if baseTool == "" || branchTool == "" || baseTool == branchTool {
 		return ""
