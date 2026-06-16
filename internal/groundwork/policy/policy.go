@@ -206,7 +206,7 @@ func (r *BlindSpotRatchet) Allows(kind, site string) bool {
 		if a.Kind != "" && a.Kind != kind {
 			continue
 		}
-		if site == a.Site || hasPrefix(site, a.Site) {
+		if site == a.Site || strings.HasPrefix(site, a.Site) {
 			return true
 		}
 	}
@@ -251,7 +251,7 @@ func (r *EffectRatchet) Allows(label string) bool {
 		return false
 	}
 	for _, a := range r.Allow {
-		if label == a.Target || hasPrefix(label, a.Target) {
+		if label == a.Target || strings.HasPrefix(label, a.Target) {
 			return true
 		}
 	}
@@ -453,7 +453,7 @@ func (p *Policy) LayerOf(pkgPath string) string {
 	best, bestLen := "", -1
 	for _, l := range p.Layers {
 		for _, pre := range l.Packages {
-			if hasPrefix(pkgPath, pre) && len(pre) > bestLen {
+			if MatchPrefix(pkgPath, pre) && len(pre) > bestLen {
 				best, bestLen = l.Name, len(pre)
 			}
 		}
@@ -481,7 +481,34 @@ func (p *Policy) LayerNames() []string {
 	return out
 }
 
-func hasPrefix(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+// MatchPrefix reports whether s equals prefix or is bound by it AT AN IDENTIFIER
+// BOUNDARY: the byte of s immediately after the prefix must be a non-identifier
+// byte (e.g. '.', '/', ' ', '['). This is the one matcher every gate, ratchet,
+// and layer assignment uses to decide "does this pattern name this symbol?", so a
+// prefix can name a function, a receiver type, a whole package path, or a boundary
+// label and bind all its members ("...internal/app" → "...internal/app/sub",
+// "db INSERT" → "db INSERT users") WITHOUT a bare strings.HasPrefix splitting an
+// identifier and binding an UNRELATED symbol — the prefix-collision that let scope
+// "app" admit a sibling package "application", an exception "GetUser" suppress
+// "GetUserAvatar", and a ratchet "users" allow a new "users_audit" write target.
+// fitness.matchAny delegates here so the rule-pattern matcher and the gate matcher
+// can never diverge. An exact match always binds.
+func MatchPrefix(s, prefix string) bool {
+	if s == prefix {
+		return true
+	}
+	return len(s) > len(prefix) && strings.HasPrefix(s, prefix) && !isIdentByte(s[len(prefix)])
+}
+
+// isIdentByte reports whether b can appear inside a Go identifier, so a prefix
+// ending immediately before it would split that identifier rather than bind it at
+// a boundary. FQNs, package paths, and boundary labels here are ASCII.
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		('a' <= b && b <= 'z') ||
+		('A' <= b && b <= 'Z') ||
+		('0' <= b && b <= '9')
+}
 
 // noSelector rejects the entrypoint:* selector in a position where it has no
 // defined meaning. Selectors are only valid where a rule kind explicitly

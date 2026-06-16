@@ -65,6 +65,14 @@ func Load(path string) (*Contract, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("groundwork/contract: %s: %w", path, err)
 	}
+	// A real boundary contract always names its service. An empty ("{}"), null,
+	// or truncated file decodes to a zero Contract without error, and Compare
+	// would then read every base route/event as a breaking removal — a spurious
+	// BLOCK attributed to a contract change that is really just a malformed input.
+	// Fail closed on the missing service name instead.
+	if strings.TrimSpace(c.Service) == "" {
+		return nil, fmt.Errorf("groundwork/contract: %s: missing service name (empty or malformed contract)", path)
+	}
 	return &c, nil
 }
 

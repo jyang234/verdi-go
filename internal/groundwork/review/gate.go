@@ -109,7 +109,11 @@ func scopeEscapes(d graphDelta, scope []string) []string {
 
 func withinScope(pkg string, scope []string) bool {
 	for _, s := range scope {
-		if pkg == s || strings.HasPrefix(pkg, s) {
+		// Identifier-boundary match (not bare HasPrefix): a scope of
+		// "...internal/app" admits its sub-packages ("...internal/app/sub") but
+		// must NOT admit the sibling "...internal/application", which a bare
+		// prefix would silently let escape the gate.
+		if policy.MatchPrefix(pkg, s) {
 			return true
 		}
 	}

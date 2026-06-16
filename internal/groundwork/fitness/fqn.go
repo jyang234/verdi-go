@@ -77,36 +77,26 @@ func ShortName(fqn string) string {
 func MatchesAny(s string, patterns []string) bool { return matchAny(s, patterns) }
 
 // matchAny reports whether s equals any pattern or is bound by one as a prefix
-// AT AN IDENTIFIER BOUNDARY. A prefix binds only when the byte of s immediately
-// after the pattern is a non-identifier byte (e.g. '.', '$', '/', '[', ' '), so a
-// pattern can name a function, a receiver type, a whole package, or a boundary
-// system and bind all its members — `(*pkg.T)` → `(*pkg.T).M`, `pkg` → `pkg.Fn`,
-// `Fn` → its generated closures `Fn$1`, `boundary:bus PUBLISH` → `... orders` —
-// without a textual prefix that splits an identifier and binds an UNRELATED symbol.
-// The bare-HasPrefix form let `GetUser` bind the distinct route `GetUserAvatar`
-// (and a package `app` bind `apps`): the prefix-collision that let init's read-only
-// proposal sweep in a sibling route's writes and mis-attribute its effects (R7
-// review). An exact match always binds.
+// AT AN IDENTIFIER BOUNDARY. It delegates to policy.MatchPrefix — the ONE
+// boundary-aware matcher shared by every gate, ratchet, and layer assignment — so
+// the rule-pattern matcher here can never diverge from the matcher the gates use.
+// A prefix binds only when the byte of s immediately after the pattern is a
+// non-identifier byte (e.g. '.', '$', '/', '[', ' '), so a pattern can name a
+// function, a receiver type, a whole package, or a boundary system and bind all
+// its members — `(*pkg.T)` → `(*pkg.T).M`, `pkg` → `pkg.Fn`, `Fn` → its generated
+// closures `Fn$1`, `boundary:bus PUBLISH` → `... orders` — without a textual prefix
+// that splits an identifier and binds an UNRELATED symbol. The bare-HasPrefix form
+// let `GetUser` bind the distinct route `GetUserAvatar` (and a package `app` bind
+// `apps`): the prefix-collision that let init's read-only proposal sweep in a
+// sibling route's writes and mis-attribute its effects (R7 review). An exact match
+// always binds.
 func matchAny(s string, patterns []string) bool {
 	for _, p := range patterns {
-		if s == p {
-			return true
-		}
-		if len(s) > len(p) && strings.HasPrefix(s, p) && !isIdentByte(s[len(p)]) {
+		if policy.MatchPrefix(s, p) {
 			return true
 		}
 	}
 	return false
-}
-
-// isIdentByte reports whether b can appear inside a Go identifier, so a prefix
-// ending immediately before it would split that identifier rather than bind it at
-// a boundary. FQNs and boundary labels here are ASCII.
-func isIdentByte(b byte) bool {
-	return b == '_' ||
-		('a' <= b && b <= 'z') ||
-		('A' <= b && b <= 'Z') ||
-		('0' <= b && b <= '9')
 }
 
 // bindFroms is the ONE entry by which a From-bearing rule kind
