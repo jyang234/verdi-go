@@ -48,10 +48,17 @@ func Propose(ix *graph.Index, service string) (*policy.Policy, string) {
 // entry-most packages in the package call DAG. A cycle anywhere withdraws the
 // proposal — guessed layers on a cyclic codebase produce noise, not a ratchet.
 func proposeLayers(ix *graph.Index, p *policy.Policy, g *guide) {
-	rootPkg := ""
+	// A graph can span more than one binary (e.g. a server and a worker), each
+	// with its own composition root. Collect EVERY .main's package, not just the
+	// last one iterated — keying on the last (ix.Nodes() is sorted) silently
+	// dropped all but the alphabetically-final root, exempting one binary's root
+	// while ranking another's as an ordinary layer.
+	rootPkgs := map[string]bool{}
 	for _, fqn := range ix.Nodes() {
 		if strings.HasSuffix(fqn, ".main") {
-			rootPkg = PkgOf(fqn)
+			if pkg := PkgOf(fqn); pkg != "" {
+				rootPkgs[pkg] = true
+			}
 		}
 	}
 
@@ -62,7 +69,7 @@ func proposeLayers(ix *graph.Index, p *policy.Policy, g *guide) {
 			continue
 		}
 		a, b := PkgOf(e.From), PkgOf(e.To)
-		if a == "" || b == "" || a == rootPkg || b == rootPkg {
+		if a == "" || b == "" || rootPkgs[a] || rootPkgs[b] {
 			continue
 		}
 		pkgs[a], pkgs[b] = true, true
@@ -138,10 +145,7 @@ func proposeLayers(ix *graph.Index, p *policy.Policy, g *guide) {
 		}
 		p.Layers = append(p.Layers, policy.Layer{Name: name, Packages: members})
 	}
-	roots := []string{}
-	if rootPkg != "" {
-		roots = append(roots, rootPkg)
-	}
+	roots := setutil.SortedKeys(rootPkgs)
 	p.Layering = &policy.Layering{Roots: roots}
 
 	names := make([]string, len(p.Layers))
@@ -149,9 +153,9 @@ func proposeLayers(ix *graph.Index, p *policy.Policy, g *guide) {
 		names[i] = l.Name
 	}
 	g.section("Layers: proposed from the package call DAG",
-		fmt.Sprintf("Order (top→bottom): **%s**, ranked by call depth; the composition root `%s` is exempt.\n\n"+
+		fmt.Sprintf("Order (top→bottom): **%s**, ranked by call depth; the composition root(s) `%s` are exempt.\n\n"+
 			"**Tighten by**: renaming the auto-named layers, and moving any package the inference mis-ranked — the layer map is YOUR claim, this is only the measured starting point.\n"+
-			"**Delete if**: this service intentionally has no layered shape.", strings.Join(names, " → "), rootPkg))
+			"**Delete if**: this service intentionally has no layered shape.", strings.Join(names, " → "), strings.Join(roots, ", ")))
 }
 
 // proposeWaypoint searches for a function (generalized to its receiver type

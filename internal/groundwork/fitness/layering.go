@@ -2,7 +2,6 @@ package fitness
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
@@ -108,10 +107,13 @@ func isRootPkg(roots []string, pkg string) bool {
 }
 
 // exempted reports whether the edge from→to is allow-listed. From/To in an
-// exception are prefixes, so an entry can name one edge, a type, or a package.
+// exception bind at an identifier boundary (policy.MatchPrefix, not bare
+// HasPrefix), so an entry can name one edge, a type, or a package without an
+// exception for "app.Get → store.Find" silently also exempting the unrelated
+// "app.GetUserAvatar → store.FindByID".
 func exempted(allow []policy.Exception, from, to string) bool {
 	for _, ex := range allow {
-		if strings.HasPrefix(from, ex.From) && strings.HasPrefix(to, ex.To) {
+		if policy.MatchPrefix(from, ex.From) && policy.MatchPrefix(to, ex.To) {
 			return true
 		}
 	}

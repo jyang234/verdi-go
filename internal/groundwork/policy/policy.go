@@ -187,8 +187,10 @@ type BlindSpotRatchet struct {
 }
 
 // BlindSpotException is one reviewed-and-accepted blind spot. Site matches the
-// blind spot's site exactly or by prefix (the same convention as a layering
-// Exception); an empty Kind matches any kind.
+// blind spot's site exactly or as an identifier-boundary prefix (policy.MatchPrefix,
+// the same convention as a layering Exception) — a bare prefix would let an entry
+// for "reflectutil" silently also allow a new, distinct "reflectutil2" blind spot.
+// An empty Kind matches any kind.
 type BlindSpotException struct {
 	Kind   string `json:"kind,omitempty"`
 	Site   string `json:"site"`
@@ -206,7 +208,7 @@ func (r *BlindSpotRatchet) Allows(kind, site string) bool {
 		if a.Kind != "" && a.Kind != kind {
 			continue
 		}
-		if site == a.Site || hasPrefix(site, a.Site) {
+		if MatchPrefix(site, a.Site) {
 			return true
 		}
 	}
@@ -236,8 +238,12 @@ type EffectRatchet struct {
 }
 
 // EffectException is one reviewed-and-accepted write target. Target matches the
-// effect label (sans "boundary:", e.g. "db INSERT audit_log") exactly or by
-// prefix; empty targets are rejected at load (a "" would allow every write).
+// effect label (sans "boundary:", e.g. "db INSERT audit_log") exactly or as an
+// identifier-boundary prefix (policy.MatchPrefix): an op-level target like
+// "db INSERT" still binds every INSERT (the space is a boundary), but a
+// table-level target "db INSERT users" no longer silently also allows a new,
+// distinct "db INSERT users_audit" write — list such tables explicitly. Empty
+// targets are rejected at load (a "" would allow every write).
 type EffectException struct {
 	Target string `json:"target"`
 	Reason string `json:"reason,omitempty"`
@@ -251,7 +257,7 @@ func (r *EffectRatchet) Allows(label string) bool {
 		return false
 	}
 	for _, a := range r.Allow {
-		if label == a.Target || hasPrefix(label, a.Target) {
+		if MatchPrefix(label, a.Target) {
 			return true
 		}
 	}
@@ -453,7 +459,7 @@ func (p *Policy) LayerOf(pkgPath string) string {
 	best, bestLen := "", -1
 	for _, l := range p.Layers {
 		for _, pre := range l.Packages {
-			if hasPrefix(pkgPath, pre) && len(pre) > bestLen {
+			if MatchPrefix(pkgPath, pre) && len(pre) > bestLen {
 				best, bestLen = l.Name, len(pre)
 			}
 		}
@@ -481,7 +487,34 @@ func (p *Policy) LayerNames() []string {
 	return out
 }
 
-func hasPrefix(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+// MatchPrefix reports whether s equals prefix or is bound by it AT AN IDENTIFIER
+// BOUNDARY: the byte of s immediately after the prefix must be a non-identifier
+// byte (e.g. '.', '/', ' ', '['). This is the one matcher every gate, ratchet,
+// and layer assignment uses to decide "does this pattern name this symbol?", so a
+// prefix can name a function, a receiver type, a whole package path, or a boundary
+// label and bind all its members ("...internal/app" → "...internal/app/sub",
+// "db INSERT" → "db INSERT users") WITHOUT a bare strings.HasPrefix splitting an
+// identifier and binding an UNRELATED symbol — the prefix-collision that let scope
+// "app" admit a sibling package "application", an exception "GetUser" suppress
+// "GetUserAvatar", and a ratchet "users" allow a new "users_audit" write target.
+// fitness.matchAny delegates here so the rule-pattern matcher and the gate matcher
+// can never diverge. An exact match always binds.
+func MatchPrefix(s, prefix string) bool {
+	if s == prefix {
+		return true
+	}
+	return len(s) > len(prefix) && strings.HasPrefix(s, prefix) && !isIdentByte(s[len(prefix)])
+}
+
+// isIdentByte reports whether b can appear inside a Go identifier, so a prefix
+// ending immediately before it would split that identifier rather than bind it at
+// a boundary. FQNs, package paths, and boundary labels here are ASCII.
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		('a' <= b && b <= 'z') ||
+		('A' <= b && b <= 'Z') ||
+		('0' <= b && b <= '9')
+}
 
 // noSelector rejects the entrypoint:* selector in a position where it has no
 // defined meaning. Selectors are only valid where a rule kind explicitly

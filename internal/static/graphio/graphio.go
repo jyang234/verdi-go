@@ -433,7 +433,24 @@ func committedEffect(label string) bool {
 	}
 	if strings.HasPrefix(label, "boundary:db ") {
 		op := strings.Fields(strings.TrimPrefix(label, "boundary:db "))
-		return len(op) > 0 && (op[0] == "INSERT" || op[0] == "UPDATE" || op[0] == "DELETE")
+		return len(op) > 0 && mutatingSQLOp(op[0])
+	}
+	return false
+}
+
+// mutatingSQLOp reports whether a SQL verb the labeler read off a constant
+// statement commits a row mutation. The set is kept in parity with
+// fitness.IsWrite (budget.go) — INSERT/UPDATE/DELETE/UPSERT/MERGE/REPLACE — so
+// the partial-effect disclosure here and the I/O-budget write surface there agree
+// on what counts as a committed write. A DB op the labeler could NOT read (a
+// dynamic statement that fell back to the driver method name, e.g. "Exec") is
+// deliberately NOT treated as committed here: it flows through the separate
+// unclassified-DB-label caution channel instead of being silently asserted as a
+// definite write.
+func mutatingSQLOp(op string) bool {
+	switch op {
+	case "INSERT", "UPDATE", "DELETE", "UPSERT", "MERGE", "REPLACE":
+		return true
 	}
 	return false
 }
