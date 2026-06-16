@@ -215,7 +215,10 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 		}
 		concurrent := len(members) > 1
 		if concurrent {
-			sort.SliceStable(members, func(i, j int) bool { return members[i].Op < members[j].Op })
+			// Same tie-break as the post-hoc path: op key then canonical subtree
+			// signature, so two same-op concurrent siblings are ordered
+			// run-independently and a race never perturbs the byte-identical IR.
+			bySig(members)
 		}
 		groups = append(groups, ir.ChildGroup{Concurrent: concurrent, Members: members})
 	}
@@ -284,15 +287,6 @@ func (c *canonicalizer) groupPostHoc(kids []*capture.Span, childrenOf map[string
 		comps[r] = append(comps[r], i)
 	}
 	sort.SliceStable(roots, func(i, j int) bool { return comps[roots[i]][0] < comps[roots[j]][0] })
-
-	bySig := func(ms []*ir.CanonicalSpan) {
-		sort.SliceStable(ms, func(i, j int) bool {
-			if ms[i].Op != ms[j].Op {
-				return ms[i].Op < ms[j].Op
-			}
-			return signature(ms[i]) < signature(ms[j])
-		})
-	}
 
 	units := make([]unit, 0, len(roots))
 	for _, r := range roots {
@@ -531,6 +525,19 @@ func (c *canonicalizer) discards() ir.DiscardManifest {
 func signature(s *ir.CanonicalSpan) string {
 	b, _ := canonjson.Marshal(s)
 	return string(b)
+}
+
+// bySig orders members by op key then canonical subtree signature. It is the
+// single ordering both the in-process and post-hoc paths apply to concurrent /
+// unordered siblings: a same-op tie is broken by subtree content, never by
+// run-dependent start time, so a race cannot perturb the byte-identical IR.
+func bySig(ms []*ir.CanonicalSpan) {
+	sort.SliceStable(ms, func(i, j int) bool {
+		if ms[i].Op != ms[j].Op {
+			return ms[i].Op < ms[j].Op
+		}
+		return signature(ms[i]) < signature(ms[j])
+	})
 }
 
 func normalizeStatus(s string) string {
