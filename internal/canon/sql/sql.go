@@ -94,7 +94,12 @@ func tokenize(raw string) []string {
 				toks = append(toks, strings.ToLower(word))
 			}
 		default:
-			toks = append(toks, string(c))
+			// Emit the raw byte verbatim. string([]byte{c}) preserves c exactly;
+			// string(c) would interpret the byte as a rune and re-encode a non-ASCII
+			// byte (>=0x80, e.g. a UTF-8 identifier outside quotes) into a different,
+			// longer byte sequence — corrupting the statement and breaking the
+			// idempotence the canonical form depends on (FuzzNormalizeIdempotent).
+			toks = append(toks, string([]byte{c}))
 			i++
 		}
 	}
