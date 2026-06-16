@@ -1,0 +1,40 @@
+name: fuzz
+# The PR gate (go test) only replays each fuzz target's seed corpus. This nightly
+# job actually EXPLORES beyond the seeds, so a loader panic on novel untrusted
+# input is caught here rather than in production. A crash fails the job and the
+# offending input is uploaded for a local repro.
+on:
+  schedule:
+    - cron: "0 7 * * *" # nightly, 07:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false # one target crashing must not hide the others
+      matrix:
+        include:
+          - pkg: ./internal/groundwork/graph
+            target: FuzzGraphLoad
+          - pkg: ./internal/groundwork/contract
+            target: FuzzContractLoad
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+      - name: fuzz ${{ matrix.target }}
+        run: go test ${{ matrix.pkg }} -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 5m
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/
+          if-no-files-found: ignore
