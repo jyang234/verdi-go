@@ -116,11 +116,16 @@ usage:
   groundwork mcp --service <name>=<graph.json> ...      same server holding several services' maps (+ fleet-events lens)
   groundwork mcp ... --http <addr> [--token <secret>]    team-shared streamable-HTTP transport (token required off loopback)
   groundwork chains <graph.json>... [--service <name>=<graph.json>]... [--policy <p.json>]...  cross-service effect chains (CX-5, observational)
-  groundwork fitness <policy.json> <graph.json> evaluate the policy's invariants (non-zero exit on violation)
-  groundwork review <policy> <base.json> <branch.json> [--json]   computed MR review artifact (BLOCK exits non-zero)
-  groundwork verify <policy> <base> <branch> [--scope p,q] [--json] pre-flight gate: new violations, scope creep, breaking contract
+  groundwork fitness <policy.json> <graph.json> [--expect <sha>] evaluate the policy's invariants (non-zero exit on violation)
+  groundwork review <policy> <base.json> <branch.json> [--expect <sha>] [--json]   computed MR review artifact (BLOCK exits non-zero)
+  groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
-  groundwork verify-artifact <artifact> <policy> <base> <branch>  prove an artifact is authentic (not tampered/stale)
+  groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
+
+The gate commands (fitness/review/verify/verify-artifact) take --expect <sha> to
+bind the verdict to the code under review: it must equal the stamp the graph was
+produced with (flowmap graph --stamp <sha>), so a stale graph can't gate the
+wrong code. Set GROUNDWORK_REQUIRE_STAMP=1 in CI to make --expect mandatory.
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
   groundwork transcript <calls.jsonl> [--json]   summarize an mcp --log transcript: sessions, tool/service mix, cross-service hops
   groundwork init <graph.json> [--name <svc>] [--guide <out.md>]  propose a baseline policy from measured facts
@@ -231,6 +236,36 @@ func verifyStamp(g *graph.Graph, expect string, hasExpect bool) error {
 		return fmt.Errorf("graph stamp %q does not match --expect %q — this is not the graph for the code you think it is", g.Stamp, expect)
 	}
 	return nil
+}
+
+// requireStampEnv, when set truthy, makes the identity check MANDATORY on the
+// verdict-bearing gate commands. In CI you set it so a forgotten --expect (or an
+// unstamped graph) fails the gate loudly instead of silently gating whatever
+// graph the command was handed — the difference between "the check exists" and
+// "the check can't be skipped".
+const requireStampEnv = "GROUNDWORK_REQUIRE_STAMP"
+
+func stampRequired() bool {
+	switch strings.ToLower(os.Getenv(requireStampEnv)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// verifyGateStamp is verifyStamp for the verdict-bearing gate commands
+// (fitness/review/verify/verify-artifact). It is identical to verifyStamp —
+// opt-in, silent when not asked — except that when requireStampEnv is set, an
+// absent --expect is itself an error. That closes the gap where a gate could run
+// (and PASS) against a graph whose identity to the code under review was never
+// checked: a stale-but-schema-valid graph would otherwise produce a confident,
+// wrong green. For a two-graph command the stamp binds the BRANCH graph — the
+// code being gated — not the historical base.
+func verifyGateStamp(g *graph.Graph, expect string, hasExpect bool) error {
+	if !hasExpect && stampRequired() {
+		return fmt.Errorf("%s is set but no --expect was given: a gate command must bind its verdict to the code under review — pass --expect <sha>, the same value used for `flowmap graph --stamp <sha>`", requireStampEnv)
+	}
+	return verifyStamp(g, expect, hasExpect)
 }
 
 // cmdGround prints the pre-edit grounding card for one function: identity,
@@ -435,12 +470,13 @@ func serviceNameFromPath(path string) string {
 // when any invariant is broken.
 func cmdFitness(args []string) error {
 	sarif, args := takeFlag(args, "--sarif", "-sarif")
+	expect, hasExpect, args := takeValueFlag(args, "--expect", "-expect")
 	fs := flag.NewFlagSet("fitness", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: groundwork fitness <policy.json> <graph.json> [--sarif]")
+		return fmt.Errorf("usage: groundwork fitness <policy.json> <graph.json> [--expect <sha>] [--sarif]")
 	}
 	p, err := policy.Load(fs.Arg(0))
 	if err != nil {
@@ -448,6 +484,9 @@ func cmdFitness(args []string) error {
 	}
 	g, err := graph.LoadFile(fs.Arg(1))
 	if err != nil {
+		return err
+	}
+	if err := verifyGateStamp(g, expect, hasExpect); err != nil {
 		return err
 	}
 	res := fitness.Check(p, graph.NewIndex(g))
@@ -540,11 +579,15 @@ func ruleCount(p *policy.Policy) int {
 // A BLOCK verdict exits non-zero so the same command can back a CI gate.
 func cmdReview(args []string) error {
 	asJSON, rest := takeFlag(args, "--json", "-json")
+	expect, hasExpect, rest := takeValueFlag(rest, "--expect", "-expect")
 	if len(rest) != 3 {
-		return fmt.Errorf("usage: groundwork review <policy.json> <base-graph.json> <branch-graph.json> [--json]")
+		return fmt.Errorf("usage: groundwork review <policy.json> <base-graph.json> <branch-graph.json> [--expect <sha>] [--json]")
 	}
 	p, base, branch, err := loadReviewInputs(rest[0], rest[1], rest[2])
 	if err != nil {
+		return err
+	}
+	if err := verifyGateStamp(branch, expect, hasExpect); err != nil {
 		return err
 	}
 	art := review.Review(p, base, branch)
@@ -571,13 +614,17 @@ func cmdReview(args []string) error {
 // --scope, or on a breaking contract change. Exits non-zero on BLOCK.
 func cmdVerify(args []string) error {
 	scopeArg, _, rest := takeValueFlag(args, "--scope", "-scope")
+	expect, hasExpect, rest := takeValueFlag(rest, "--expect", "-expect")
 	asJSON, rest := takeFlag(rest, "--json", "-json")
 	if len(rest) != 3 {
-		return fmt.Errorf("usage: groundwork verify <policy.json> <base-graph.json> <branch-graph.json> [--scope pkg,pkg] [--json]")
+		return fmt.Errorf("usage: groundwork verify <policy.json> <base-graph.json> <branch-graph.json> [--scope pkg,pkg] [--expect <sha>] [--json]")
 	}
 	scope := splitComma(scopeArg)
 	p, base, branch, err := loadReviewInputs(rest[0], rest[1], rest[2])
 	if err != nil {
+		return err
+	}
+	if err := verifyGateStamp(branch, expect, hasExpect); err != nil {
 		return err
 	}
 	g := review.Gate(p, base, branch, scope)
@@ -648,12 +695,13 @@ func splitComma(s string) []string {
 // cmdVerifyArtifact recomputes an artifact from the source graphs and reports
 // whether it is authentic, tampered, or stale. The graphs must be CI-trusted.
 func cmdVerifyArtifact(args []string) error {
+	expect, hasExpect, args := takeValueFlag(args, "--expect", "-expect")
 	fs := flag.NewFlagSet("verify-artifact", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 4 {
-		return fmt.Errorf("usage: groundwork verify-artifact <artifact.json> <policy.json> <base-graph.json> <branch-graph.json>")
+		return fmt.Errorf("usage: groundwork verify-artifact <artifact.json> <policy.json> <base-graph.json> <branch-graph.json> [--expect <sha>]")
 	}
 	art, err := review.LoadArtifact(fs.Arg(0))
 	if err != nil {
@@ -661,6 +709,9 @@ func cmdVerifyArtifact(args []string) error {
 	}
 	p, base, branch, err := loadReviewInputs(fs.Arg(1), fs.Arg(2), fs.Arg(3))
 	if err != nil {
+		return err
+	}
+	if err := verifyGateStamp(branch, expect, hasExpect); err != nil {
 		return err
 	}
 	res := review.VerifyArtifact(art, p, base, branch)

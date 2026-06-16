@@ -84,3 +84,19 @@ jobs:
         run: |
           testdata/groundwork/regen.sh
           git diff --exit-code testdata/groundwork/goldens
+      # Dogfood the stamp gate: a verdict must be bound to the code under review.
+      # These assertions are verdict-independent — they check the identity binding
+      # (a mismatched stamp, and a missing --expect under enforcement) both fail —
+      # so this step proves the wiring without coupling to the fixture's verdict.
+      - name: groundwork stamp binding
+        run: |
+          set -euo pipefail
+          go run ./cmd/flowmap graph --stamp "$GITHUB_SHA" testdata/groundwork/layeredsvc > /tmp/stamped.graph.json
+          pol=testdata/groundwork/policies/layeredsvc.json
+          if go run ./cmd/groundwork fitness "$pol" /tmp/stamped.graph.json --expect deadbeef; then
+            echo "FAIL: a mismatched --expect was not rejected" >&2; exit 1
+          fi
+          if GROUNDWORK_REQUIRE_STAMP=1 go run ./cmd/groundwork fitness "$pol" /tmp/stamped.graph.json; then
+            echo "FAIL: a missing --expect under GROUNDWORK_REQUIRE_STAMP was not rejected" >&2; exit 1
+          fi
+          echo "stamp binding enforced"
