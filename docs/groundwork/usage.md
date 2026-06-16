@@ -370,20 +370,20 @@ policy for "layeredsvc" (v1) — valid
 
 ```
 groundwork reach <graph> <fqn>                          explore one function's blast radius
-groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] <graph>   incident triage card
-groundwork ground <graph> <fqn> [--policy …]            pre-edit grounding card: what binds this function
-groundwork exceptions <policy> <graph>                  audit allow-lists; flag dead entries
+groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] [--expect <stamp>] [--json] <graph>   incident triage card
+groundwork ground <graph> <fqn> [--policy …] [--json]   pre-edit grounding card: what binds this function
+groundwork exceptions <policy> <graph> [--json]         audit allow-lists; flag dead entries
 groundwork init <graph> [--name …] [--out …] [--guide …]   propose a baseline policy from measured facts
 groundwork mcp <graph> [--policy …] [--expect …] [--log …]  serve the lenses as MCP tools over stdio
 groundwork mcp --service <name>=<graph> …               one server, several services' maps (+ fleet-events, chains)
 groundwork mcp … --http <addr> [--token <secret>]       team-shared streamable-HTTP transport
 groundwork chains <graph>… [--service <name>=<graph>]… [--policy <p>]…   cross-service effect chains (CX-5, observational)
 groundwork transcript <calls.jsonl> [--json]            summarize an mcp --log transcript (the E4 reader)
-groundwork fitness <policy> <graph>                     evaluate invariants against one graph
-groundwork review <policy> <base> <branch> [--json]     computed MR review artifact
-groundwork verify <policy> <base> <branch> [--scope …]  fail-closed pre-flight gate
+groundwork fitness <policy> <graph> [--expect <sha>] [--sarif]   evaluate invariants against one graph
+groundwork review <policy> <base> <branch> [--expect <sha>] [--json]     computed MR review artifact
+groundwork verify <policy> <base> <branch> [--scope …] [--expect <sha>] [--json]  fail-closed pre-flight gate
 groundwork diff <base-contract> <branch-contract>       inter-service contract diff
-groundwork verify-artifact <artifact> <policy> <base> <branch>   prove an artifact authentic
+groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]   prove an artifact authentic
 groundwork policy-check <policy>                         validate a policy
 ```
 
