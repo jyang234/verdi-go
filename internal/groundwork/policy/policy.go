@@ -187,8 +187,10 @@ type BlindSpotRatchet struct {
 }
 
 // BlindSpotException is one reviewed-and-accepted blind spot. Site matches the
-// blind spot's site exactly or by prefix (the same convention as a layering
-// Exception); an empty Kind matches any kind.
+// blind spot's site exactly or as an identifier-boundary prefix (policy.MatchPrefix,
+// the same convention as a layering Exception) — a bare prefix would let an entry
+// for "reflectutil" silently also allow a new, distinct "reflectutil2" blind spot.
+// An empty Kind matches any kind.
 type BlindSpotException struct {
 	Kind   string `json:"kind,omitempty"`
 	Site   string `json:"site"`
@@ -206,7 +208,7 @@ func (r *BlindSpotRatchet) Allows(kind, site string) bool {
 		if a.Kind != "" && a.Kind != kind {
 			continue
 		}
-		if site == a.Site || strings.HasPrefix(site, a.Site) {
+		if MatchPrefix(site, a.Site) {
 			return true
 		}
 	}
@@ -236,8 +238,12 @@ type EffectRatchet struct {
 }
 
 // EffectException is one reviewed-and-accepted write target. Target matches the
-// effect label (sans "boundary:", e.g. "db INSERT audit_log") exactly or by
-// prefix; empty targets are rejected at load (a "" would allow every write).
+// effect label (sans "boundary:", e.g. "db INSERT audit_log") exactly or as an
+// identifier-boundary prefix (policy.MatchPrefix): an op-level target like
+// "db INSERT" still binds every INSERT (the space is a boundary), but a
+// table-level target "db INSERT users" no longer silently also allows a new,
+// distinct "db INSERT users_audit" write — list such tables explicitly. Empty
+// targets are rejected at load (a "" would allow every write).
 type EffectException struct {
 	Target string `json:"target"`
 	Reason string `json:"reason,omitempty"`
@@ -251,7 +257,7 @@ func (r *EffectRatchet) Allows(label string) bool {
 		return false
 	}
 	for _, a := range r.Allow {
-		if label == a.Target || strings.HasPrefix(label, a.Target) {
+		if MatchPrefix(label, a.Target) {
 			return true
 		}
 	}
