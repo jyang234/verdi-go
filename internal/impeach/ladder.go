@@ -6,6 +6,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/ir"
 )
 
 // The downgrade ladder (plan §4): the five ordered rungs that turn a Phase-0
@@ -57,11 +58,14 @@ const (
 // impeachment may only ever be promoted on provenance the caller can attest, so
 // absence biases toward abstention, never a false IMPEACHMENT (tenet 2).
 type Provenance struct {
-	// TraceIdentity is the code identity (typically the deployed commit) of the
-	// code that produced the corpus, matched against the graph's Stamp by the
-	// code-identity rung. "" is "unestablished" and forces VERSION-SKEW by
-	// representation (§5): a negative cannot be impeached against code we cannot
-	// prove the trace ran.
+	// TraceIdentity is the caller's INJECTED code identity for a committed
+	// (stampless) corpus — the gated commit the corpus represents, the behavioral
+	// analog of CI passing `--stamp $SHA` to the graph. For a LIVE corpus the
+	// traces self-describe through their own Stamp and this is left empty; Audit
+	// reconciles the two (resolveIdentity), so a supplied identity that CONTRADICTS
+	// a stamp the traces carry fails closed to unestablished. "" is unestablished
+	// and forces VERSION-SKEW by representation (§5): a negative cannot be
+	// impeached against code we cannot prove the trace ran.
 	TraceIdentity string
 	// Capture is the self-declared capture fidelity: production | integration |
 	// synthetic. Only production/integration clears capture-fidelity; "" and any
@@ -223,3 +227,50 @@ func rungCaptureFidelity(prov Provenance) Rung {
 // q quotes a value for rung evidence, rendering "" as a visible empty literal so an
 // unestablished input reads as "" rather than vanishing into the surrounding text.
 func q(s string) string { return strconv.Quote(s) }
+
+// resolveIdentity reconciles the corpus's two possible code-identity sources into
+// one value for the code-identity rung. A LIVE corpus self-describes through the
+// traces' own Stamp (corpusIdentity); a committed, stampless corpus takes the
+// caller's injected Provenance.TraceIdentity. When BOTH are present they must
+// agree — a supplied identity that contradicts the corpus is a caller error, and
+// fails CLOSED to "" (unestablished) rather than letting either win silently.
+func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
+	derived := corpusIdentity(traces)
+	switch {
+	case derived == "":
+		return prov.TraceIdentity // stampless corpus ⇒ caller injection (committed path)
+	case prov.TraceIdentity == "":
+		return derived // self-describing live corpus
+	case derived == prov.TraceIdentity:
+		return derived
+	default:
+		return "" // injected identity contradicts the corpus ⇒ fail closed
+	}
+}
+
+// corpusIdentity is the single code identity the trace corpus self-describes, or
+// "" when it does not establish one. It fails CLOSED: every non-nil trace must
+// carry the SAME non-empty Stamp; an unstamped trace, a disagreement (mixed
+// deploys), or an empty corpus yields "" — never a guessed or majority identity.
+func corpusIdentity(traces []*ir.CanonicalTrace) string {
+	id := ""
+	seen := false
+	for _, t := range traces {
+		if t == nil {
+			continue
+		}
+		seen = true
+		switch {
+		case t.Stamp == "":
+			return "" // an unstamped trace ⇒ no single identity (fail closed)
+		case id == "":
+			id = t.Stamp
+		case id != t.Stamp:
+			return "" // mixed deploys ⇒ no single identity (fail closed)
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return id
+}

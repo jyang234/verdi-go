@@ -91,8 +91,12 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 		service = cfg.Service
 	}
 	trace := &ir.CanonicalTrace{
-		Flow:          cf.Flow,
-		Service:       service,
+		Flow:    cf.Flow,
+		Service: service,
+		// Carry the code-identity stamp verbatim; it is run-varying provenance
+		// excluded from snapshot equality, never derived here (deriving from git
+		// HEAD would make the trace a function of more than the captured behavior).
+		Stamp:         cf.Stamp,
 		SchemaVersion: ir.SchemaVersion,
 		Root:          rootSpan,
 		Discards:      c.discards(),

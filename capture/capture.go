@@ -96,12 +96,25 @@ type SpanLink struct {
 	SpanID  string
 }
 
+// CodeStampAttr is the OTel RESOURCE attribute carrying the deployed code
+// identity (typically the commit SHA) of the emitting service — the behavioral
+// mirror of the static graph's --stamp, matched by the behavioral-impeachment
+// ladder's code-identity rung. It is flowmap-specific (no OTel semantic
+// convention pins a deployed-commit resource attribute) and the ONE owner of the
+// name, so ingest (post-hoc) and the in-process harness key it identically.
+const CodeStampAttr = "flowmap.code.stamp"
+
 // CapturedFlow is the harness's output and the canonicalizer's input
 // (harness §7). Complete=false is a hard stop: the canonicalizer must refuse to
 // snapshot a truncated trace.
 type CapturedFlow struct {
-	Flow     string
-	Service  string // the self lifeline (OTel resource service.name)
+	Flow    string
+	Service string // the self lifeline (OTel resource service.name)
+	// Stamp is the code identity (deployed commit) read from the CodeStampAttr
+	// resource attribute (post-hoc) or set by the harness WithCodeStamp option
+	// (in-process). It rides through to ir.CanonicalTrace.Stamp, where it is
+	// excluded from snapshot equality. Empty when the capture carried no stamp.
+	Stamp    string
 	Trigger  TriggerKind
 	Mode     CaptureMode
 	Spans    []Span

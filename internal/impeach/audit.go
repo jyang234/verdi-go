@@ -108,6 +108,10 @@ type Observation struct {
 // laundered into a false "absent" negative (tenet 4: a negative holds only
 // outside the disclosed blind spots).
 func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace, prov Provenance) Report {
+	// Resolve the corpus's code identity: a LIVE corpus self-describes through the
+	// traces' own Stamp; a committed (stampless) corpus takes the caller's injected
+	// identity. The resolution feeds the ladder's code-identity rung.
+	prov.TraceIdentity = resolveIdentity(traces, prov)
 	r := Report{
 		Service:           service,
 		GraphStamp:        ix.Stamp(),

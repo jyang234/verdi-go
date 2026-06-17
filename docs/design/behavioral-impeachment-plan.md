@@ -460,14 +460,15 @@ doing; but fed only by the existing otelaws-only effect vocabulary it would abst
 on exactly the highest-value target (a false-`NEVER` on `db DELETE`), so the corpus
 must carry DB effects before the probe is meaningful.
 
-**Next (Phases 0–1 done):** the read-only detector and the ladder are both
-landed and measured healthy, so the read-only floor is in. Phase 2 (severance L0)
-is the next build. The **standing prerequisite** for a Phase-1 impeachment to be
-*meaningful* on a real corpus — rather than always capping at `VERSION-SKEW` — is
-the capture-side code-identity stamp (§12.1, §14-D): the ladder's `code-identity`
-rung consumes it, and the trace model carries no commit stamp today. Until it
-ships, impeachments are demonstrable only under caller-supplied provenance (as in
-the impeachsvc promotion test), never minted from production capture.
+**Next (Phases 0–1 + the capture-side stamp done):** the read-only detector and
+the ladder are landed and measured healthy, and the **capture-side code-identity
+stamp** that the `code-identity` rung consumes is now wired end to end (§12.1,
+§14-E): a live corpus self-describes its deploy through `flowmap.code.stamp`, so a
+Phase-1 impeachment is meaningful on real captured behavior rather than only under
+a caller assertion. A committed corpus stays stampless and takes the gated
+identity at audit time. **Phase 2 (severance L0) is the next build.** The remaining
+stamp-adjacent gap is the base-vs-branch *gate* identity (§12.2), which only binds
+at Phase 5.
 
 ---
 
@@ -510,8 +511,16 @@ The risk is admitted in exactly the order it can be retired.**
 1. **The capture-side code-identity stamp.** `code-identity` (§4 rung 2) needs the
    trace to carry the deployed commit. Which resource attribute, and how the capture
    harness sets it, is unspecified — it is the hinge of the whole ladder.
-   **STANDING** — a capture-pipeline decision for Phase 1, not Phase 0 (§14-D); the
-   ingest model carries no commit stamp today.
+   **RESOLVED (§14-E)** — a flowmap-specific OTel **resource** attribute
+   `flowmap.code.stamp` (`capture.CodeStampAttr`, one owner), read post-hoc by
+   `otlpjson`/`ingest` and set in-process by the harness `WithCodeStamp` option,
+   rides to `ir.CanonicalTrace.Stamp`. It mirrors the graph's `--stamp`:
+   caller-supplied, never derived, and **excluded from snapshot equality** (a
+   committed golden stays stampless, so it never churns per deploy — identity is
+   injected at audit time, the live corpus self-describes). `impeach.Audit`
+   reconciles the two sources (`resolveIdentity`) and fails closed on a mixed or
+   contradicted identity. The base-vs-branch *gate* framing (§12.2) is still its own
+   STANDING piece for Phase 5.
 2. **Corpus governance for a gate.** A committed corpus is reproducible but can go
    stale against the reachable surface; a live corpus is current but non-portable.
    The behavior-goldens model (`*.effects.json`, `--update`) is the likely answer but
@@ -621,3 +630,23 @@ PROVEN / VIOLATED / CANT-PROVE). The code spells them across two layers:
   carries only `Synthesized bool`. Phase 0 is L0 (entry+effect anchors) and needs none
   of them; this is recorded so Phase 1 (rung 2, §12.1) and Phase 3 (the map, §7) budget
   the capture-pipeline work honestly rather than assuming a field that isn't there.
+  *(Update: the deployed-commit stamp **now exists** — §14-E. `CaptureProvenance`
+  (rung 5) and the `flowmap.fqn` tags (Phase 3) remain absent.)*
+
+**E — The capture-side code-identity stamp, wired (resolves §12.1).** Built before
+Phase 2 to make the `code-identity` rung meaningful on a real corpus. The deployed
+commit travels as a flowmap-specific OTel **resource** attribute,
+`flowmap.code.stamp` (`capture.CodeStampAttr` — one owner, keyed identically by
+both capture paths): `otlpjson` folds it off the resource and `ingest` lifts it
+onto the per-service `CapturedFlow.Stamp` (failing closed on a mixed-deploy
+disagreement), and the in-process harness sets it via `WithCodeStamp`. The
+canonicalizer carries it to `ir.CanonicalTrace.Stamp`. It deliberately mirrors the
+static graph's `--stamp` discipline: **caller-supplied, never derived** (deriving
+from git HEAD would make the trace a function of more than the captured behavior),
+and **excluded from snapshot equality** (`golden.canonicalBytes` zeroes it and the
+`-update` writer is stampless, so a committed golden never carries a run-varying
+stamp and never churns per deploy). `impeach.Audit` reconciles the corpus-carried
+identity with an optionally-injected one (`resolveIdentity`): the live corpus
+self-describes, the committed corpus takes the gated SHA, and any contradiction or
+mixed corpus fails closed to `VERSION-SKEW`. Determinism is preserved throughout —
+the report stays a pure function of `(graph, corpus)`.

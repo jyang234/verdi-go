@@ -73,6 +73,42 @@ func TestGroupPerServiceSplit(t *testing.T) {
 	}
 }
 
+// TestGroupLiftsCodeStamp proves the deployed code-identity stamp (folded onto
+// spans from the OTel resource by otlpjson) is lifted onto the per-service
+// CapturedFlow, so the behavioral-impeachment ladder can match it against the
+// static graph's stamp.
+func TestGroupLiftsCodeStamp(t *testing.T) {
+	const sha = "deadbeefcafe"
+	spans := []capture.Span{
+		span("1", "", "loan", "loansvc", ir.KindServer, map[string]string{capture.CodeStampAttr: sha}),
+		span("2", "1", "loan", "loansvc", ir.KindProducer, map[string]string{"messaging.destination.name": "loan.approved", capture.CodeStampAttr: sha}),
+	}
+	flows := Group(spans)
+	if len(flows) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(flows))
+	}
+	if flows[0].Flow.Stamp != sha {
+		t.Errorf("CapturedFlow.Stamp = %q, want %q", flows[0].Flow.Stamp, sha)
+	}
+}
+
+// TestGroupCodeStampFailsClosedOnDisagreement: a bucket whose spans carry
+// DIFFERENT stamps (two deploys of one service in one export) yields no single
+// identity, so the lifted stamp drops to "" rather than picking one — fail closed.
+func TestGroupCodeStampFailsClosedOnDisagreement(t *testing.T) {
+	spans := []capture.Span{
+		span("1", "", "loan", "loansvc", ir.KindServer, map[string]string{capture.CodeStampAttr: "sha-A"}),
+		span("2", "1", "loan", "loansvc", ir.KindClient, map[string]string{capture.CodeStampAttr: "sha-B"}),
+	}
+	flows := Group(spans)
+	if len(flows) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(flows))
+	}
+	if flows[0].Flow.Stamp != "" {
+		t.Errorf("disagreeing stamps must fail closed to \"\", got %q", flows[0].Flow.Stamp)
+	}
+}
+
 // TestGroupSynthesizesRootForPublisherOnly: a service that only publishes (no
 // inbound entry span in the fragment) gets a synthesized internal root so
 // canonicalization sees one tree.

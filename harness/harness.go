@@ -47,16 +47,18 @@ type TB interface {
 // recorder, plus the service's real HTTP handler. Construct it with NewInProcess
 // and drive it with HTTP or Event.
 type App struct {
-	t       TB
-	handler http.Handler
-	rec     *tracetest.SpanRecorder
-	tp      *sdktrace.TracerProvider
-	prop    propagation.TextMapPropagator
-	service string
+	t         TB
+	handler   http.Handler
+	rec       *tracetest.SpanRecorder
+	tp        *sdktrace.TracerProvider
+	prop      propagation.TextMapPropagator
+	service   string
+	codeStamp string
 }
 
 type options struct {
-	service string
+	service   string
+	codeStamp string
 }
 
 // Option configures NewInProcess.
@@ -65,6 +67,15 @@ type Option func(*options)
 // WithService sets the self-lifeline service name recorded as the OTel resource
 // service.name and stamped onto the canonical trace.
 func WithService(name string) Option { return func(o *options) { o.service = name } }
+
+// WithCodeStamp sets the code-identity stamp (typically the deployed commit SHA)
+// carried onto the canonical trace's Stamp — the behavioral mirror of the static
+// graph's --stamp, matched by the behavioral-impeachment ladder's code-identity
+// rung. It is EXCLUDED from snapshot equality and never written to a committed
+// golden (golden.canonicalBytes zeroes it), so it does not churn a flow test's
+// golden; it is meaningful for a live in-memory audit, not for the committed
+// corpus. Empty (the default) keeps the trace stampless.
+func WithCodeStamp(stamp string) Option { return func(o *options) { o.codeStamp = stamp } }
 
 // The OTel pipeline is installed once per process and shared by every harness.
 // The OTel global tracer provider is a process-wide singleton that binds
@@ -109,7 +120,7 @@ func NewInProcess(t TB, handler http.Handler, opts ...Option) *App {
 		fn(&o)
 	}
 	install()
-	return &App{t: t, handler: handler, rec: sharedRecorder, tp: sharedProvider, prop: sharedProp, service: o.service}
+	return &App{t: t, handler: handler, rec: sharedRecorder, tp: sharedProvider, prop: sharedProp, service: o.service, codeStamp: o.codeStamp}
 }
 
 // goroutineAttr is the span attribute the start processor stamps with the
@@ -220,6 +231,7 @@ func (p *Pending) Capture(opt CaptureOptions) (*capture.CapturedFlow, error) {
 	cf := &capture.CapturedFlow{
 		Flow:     p.flow,
 		Service:  a.service,
+		Stamp:    a.codeStamp,
 		Trigger:  p.trigger,
 		Mode:     capture.ModeInProcess,
 		Spans:    scoped,

@@ -41,7 +41,12 @@ func Compare(got *ir.CanonicalTrace, dir, name string, update bool) error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		b, err := got.Marshal()
+		// A committed golden is STAMPLESS — the code-identity Stamp is run-varying
+		// provenance (the deployed commit), so writing it would churn the file each
+		// deploy and stale-skew every later audit against it, exactly as the static
+		// graph golden carries no --stamp. Identity is injected at audit time.
+		cp := stampless(got)
+		b, err := cp.Marshal()
 		if err != nil {
 			return err
 		}
@@ -93,14 +98,26 @@ func changeSet(want, got *ir.CanonicalTrace, wantBytes, gotBytes string) string 
 	return b.String()
 }
 
-// canonicalBytes serializes a trace with the Discards manifest zeroed, so
-// equality rests on flow structure alone and never on the review-only record of
-// what was dropped. A marshal failure must propagate: swallowed, both sides of
-// the assertion would serialize to "" and the gate would vacuously pass.
+// canonicalBytes serializes a trace with the Discards manifest AND the
+// code-identity Stamp zeroed, so equality rests on flow structure alone — never on
+// the review-only record of what was dropped, nor on the run-varying deploy stamp
+// (a stamped live capture must assert equal to its stampless committed golden). A
+// marshal failure must propagate: swallowed, both sides of the assertion would
+// serialize to "" and the gate would vacuously pass.
 func canonicalBytes(t *ir.CanonicalTrace) ([]byte, error) {
-	cp := *t
+	cp := stampless(t)
 	cp.Discards = ir.DiscardManifest{}
 	return cp.Marshal()
+}
+
+// stampless returns a shallow copy of t with the code-identity Stamp zeroed. The
+// stamp is run-varying provenance excluded from snapshot equality (mirroring how
+// Discards is excluded); both the written golden and the comparison go through it
+// so a committed golden is byte-identical whether or not the capture was stamped.
+func stampless(t *ir.CanonicalTrace) ir.CanonicalTrace {
+	cp := *t
+	cp.Stamp = ""
+	return cp
 }
 
 // Slug turns a flow name into a stable file stem: a leading path or method is

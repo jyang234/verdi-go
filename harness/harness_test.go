@@ -93,6 +93,48 @@ func TestHTTPCaptureCanonicalizes(t *testing.T) {
 	}
 }
 
+// TestWithCodeStampCarriesToTrace proves the in-process capture path for the
+// code-identity stamp: WithCodeStamp rides through the CapturedFlow onto the
+// canonical trace's Stamp (the behavioral mirror of the graph's --stamp), so an
+// in-process audit can establish the corpus identity. The default (no option)
+// leaves the trace stampless.
+func TestWithCodeStampCarriesToTrace(t *testing.T) {
+	const commit = "deadbeefcafe"
+	app := harness.NewInProcess(t, instrumentedSUT(0), harness.WithService("loansvc"), harness.WithCodeStamp(commit))
+	cf, err := app.HTTP("POST", "/loan-application", nil).Capture(harness.CaptureOptions{
+		Markers: happyMarkers(),
+		Quiet:   10 * time.Millisecond,
+		Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf.Stamp != commit {
+		t.Errorf("CapturedFlow.Stamp = %q, want %q", cf.Stamp, commit)
+	}
+	tr, err := canon.Canonicalize(*cf, nil)
+	if err != nil {
+		t.Fatalf("Canonicalize: %v", err)
+	}
+	if tr.Stamp != commit {
+		t.Errorf("trace Stamp = %q, want %q", tr.Stamp, commit)
+	}
+
+	// Default: stampless.
+	app2 := harness.NewInProcess(t, instrumentedSUT(0), harness.WithService("loansvc"))
+	cf2, err := app2.HTTP("POST", "/loan-application", nil).Capture(harness.CaptureOptions{
+		Markers: happyMarkers(),
+		Quiet:   10 * time.Millisecond,
+		Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf2.Stamp != "" {
+		t.Errorf("default capture should be stampless, got %q", cf2.Stamp)
+	}
+}
+
 // TestTimingStableConcurrency is the fast-vs-slow check: lengthening one errgroup
 // leg must not change the concurrent grouping (canon §3.3 rule 3).
 func TestTimingStableConcurrency(t *testing.T) {

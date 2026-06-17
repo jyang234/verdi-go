@@ -36,8 +36,19 @@ const SchemaVersion = "flowmap.trace/v1"
 // CanonicalTrace is the deterministic representation of one exercised flow.
 // Equality of two traces (ignoring Discards) is the snapshot assertion.
 type CanonicalTrace struct {
-	Flow          string          `json:"flow"`
-	Service       string          `json:"service"`
+	Flow    string `json:"flow"`
+	Service string `json:"service"`
+	// Stamp is the code identity (typically the deployed commit SHA) of the code
+	// that produced this trace — the behavioral mirror of the static graph's
+	// Stamp, so a consumer can verify a trace and a graph describe the SAME code
+	// (the behavioral-impeachment ladder's code-identity rung). Like Discards it is
+	// EXCLUDED from snapshot equality (golden.canonicalBytes zeroes it) and a
+	// committed golden never carries it: the stamp is run-varying provenance, so
+	// baking it in would churn the golden each deploy and stale-skew every later
+	// audit — exactly why the static graph golden carries no --stamp either.
+	// Populated only on a LIVE capture (an OTel resource attribute or the harness
+	// WithCodeStamp option); injected at audit time for a committed corpus.
+	Stamp         string          `json:"stamp,omitempty"`
 	SchemaVersion string          `json:"schema_version"`
 	Root          *CanonicalSpan  `json:"root"`
 	Discards      DiscardManifest `json:"discards"`

@@ -3,6 +3,7 @@ package golden
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/ir"
@@ -43,6 +44,37 @@ func TestRoundTrip(t *testing.T) {
 	// A re-compare against the just-written golden passes.
 	if err := Compare(tr, dir, tr.Flow, false); err != nil {
 		t.Errorf("compare after update should pass: %v", err)
+	}
+}
+
+// TestStampExcludedFromEquality is the determinism guard for the code-identity
+// stamp: a stamped LIVE capture must assert equal to its STAMPLESS committed
+// golden (the stamp is run-varying provenance, like Discards), and the written
+// golden must itself be stampless — so a committed golden is byte-identical
+// whether or not the capture carried a stamp, and never churns per deploy.
+func TestStampExcludedFromEquality(t *testing.T) {
+	dir := t.TempDir()
+	tr := sample() // stampless
+	if err := Compare(tr, dir, tr.Flow, true); err != nil {
+		t.Fatal(err)
+	}
+	// The written golden carries no stamp even if the capture had one.
+	stamped := sample()
+	stamped.Stamp = "deadbeefcafe"
+	dir2 := t.TempDir()
+	if err := Compare(stamped, dir2, stamped.Flow, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir2, Slug(stamped.Flow)+".golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "deadbeefcafe") {
+		t.Errorf("committed golden leaked the run-varying stamp:\n%s", raw)
+	}
+	// A stamped capture compares equal to the stampless committed golden.
+	if err := Compare(stamped, dir, tr.Flow, false); err != nil {
+		t.Errorf("stamp must be excluded from equality, got: %v", err)
 	}
 }
 
