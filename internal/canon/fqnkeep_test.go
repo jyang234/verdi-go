@@ -82,6 +82,80 @@ func TestFQNTaggedInternalKeptUntaggedDropped(t *testing.T) {
 	}
 }
 
+// TestFQNEmptyTagDoesNotKeep isolates the keep predicate on a NON-EMPTY tag: a
+// tier-3 internal span carrying an explicit empty flowmap.fqn ("" — the producer's
+// fail-closed ⊥ when no first-party opener was found) must still be DROPPED. The
+// keep is `Attrs[FQNTagKey] != ""`, not `_, ok := Attrs[FQNTagKey]`, so an honest ⊥
+// can never accidentally preserve a compute span the localization cannot anchor on.
+func TestFQNEmptyTagDoesNotKeep(t *testing.T) {
+	cf := taggedWaypointFlow()
+	// Re-tag the "untagged" compute with an EXPLICIT empty FQN (present key, "" value).
+	for i := range cf.Spans {
+		if cf.Spans[i].ID == "untagged" {
+			cf.Spans[i].Attrs[capture.FQNTagKey] = ""
+		}
+	}
+	fixupRoot(&cf)
+	tr := mustCanon(t, cf)
+	var ops []string
+	allOps(tr.Root, &ops)
+	joined := strings.Join(ops, "\n")
+	if strings.Contains(joined, "untaggedCompute") {
+		t.Errorf("a span with an empty flowmap.fqn (the ⊥) was kept; the keep must require a non-empty tag; ops:\n%s", joined)
+	}
+	// Its effect is still preserved (promoted to the root), exactly as for a span
+	// with no tag key at all.
+	if !strings.Contains(joined, "DB postgres INSERT audit") {
+		t.Errorf("dropping the empty-tagged waypoint lost its effect; ops:\n%s", joined)
+	}
+}
+
+// twoTaggedWaypointFlow has TWO tagged tier-3 waypoints whose canonical op is
+// IDENTICAL ("evaluate"), each wrapping a distinct DB effect and carrying a distinct
+// flowmap.fqn. They tie on the primary ordering key, forcing canon's deterministic
+// tie-break — the case a single-waypoint flow never exercises.
+func twoTaggedWaypointFlow() capture.CapturedFlow {
+	spans := []capture.Span{
+		{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
+			Attrs: map[string]string{"http.request.method": "POST", "http.route": "/x", capture.CorrelationKey: "run"}},
+
+		{ID: "wpA", ParentID: "root", Kind: ir.KindInternal, Name: "evaluate", Start: ms(0, 1), End: ms(0, 20),
+			Attrs: map[string]string{capture.FQNTagKey: "example.com/svc/internal/a.(*A).Eval", capture.CorrelationKey: "run"}},
+		{ID: "delA", ParentID: "wpA", Kind: ir.KindClient, Start: ms(0, 2), End: ms(0, 10),
+			Attrs: map[string]string{"db.system": "postgres", "db.statement": "DELETE FROM ledger WHERE id = 1", capture.CorrelationKey: "run"}},
+
+		{ID: "wpB", ParentID: "root", Kind: ir.KindInternal, Name: "evaluate", Start: ms(0, 30), End: ms(0, 50),
+			Attrs: map[string]string{capture.FQNTagKey: "example.com/svc/internal/b.(*B).Eval", capture.CorrelationKey: "run"}},
+		{ID: "insB", ParentID: "wpB", Kind: ir.KindClient, Start: ms(0, 31), End: ms(0, 40),
+			Attrs: map[string]string{"db.system": "postgres", "db.statement": "INSERT INTO audit (id) VALUES (1)", capture.CorrelationKey: "run"}},
+	}
+	return capture.CapturedFlow{Flow: "POST /x", Service: "svc", Spans: spans, Root: &spans[0], Complete: true}
+}
+
+// TestFQNTwoTaggedWaypointsTieDeterministic pins the tie case: two kept waypoints
+// that tie on the canonical ordering key must (a) both survive the keep, and (b)
+// order byte-identically regardless of input arrival order — the tie-break resolves
+// on intrinsic content, never on arrival (CLAUDE.md determinism).
+func TestFQNTwoTaggedWaypointsTieDeterministic(t *testing.T) {
+	tr := mustCanon(t, twoTaggedWaypointFlow())
+	var ops []string
+	allOps(tr.Root, &ops)
+	joined := strings.Join(ops, "\n")
+	// Both effects (hence both waypoints' subtrees) survive.
+	if !strings.Contains(joined, "DB postgres DELETE ledger") || !strings.Contains(joined, "DB postgres INSERT audit") {
+		t.Fatalf("a tied tagged waypoint's effect was lost; ops:\n%s", joined)
+	}
+	want := marshal(t, tr)
+	for i := 0; i < 8; i++ {
+		cf := twoTaggedWaypointFlow()
+		shuffleSpans(cf.Spans)
+		fixupRoot(&cf)
+		if got := marshal(t, mustCanon(t, cf)); string(got) != string(want) {
+			t.Fatalf("tied tagged waypoints ordered non-deterministically under shuffle:\n--- want ---\n%s\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
 // TestFQNTaggedInternalDeterministic confirms the kept waypoint does not perturb
 // determinism: shuffling the input span order yields byte-identical IR (the
 // snapshot-gate guarantee, extended to the newly-kept spans).

@@ -107,9 +107,14 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 		// excluded from snapshot equality, never derived here (deriving from git
 		// HEAD would make the trace a function of more than the captured behavior).
 		Stamp: cf.Stamp,
-		// Carry the capture fidelity grade verbatim. Unlike Stamp it IS part of
-		// snapshot equality (a committed golden carries its grade — a stable property,
-		// not run-varying), so the corpus self-describes its trust grade.
+		// Carry the capture fidelity grade verbatim. It is WRITTEN into the committed
+		// golden (golden.stampless keeps it) so the corpus self-describes its trust
+		// grade for the impeach audit, but it is EXCLUDED from snapshot EQUALITY
+		// (golden.canonicalBytes zeroes it) — the grade is a trust input, not a
+		// behavioral dimension, so two captures of identical behavior at different
+		// grades still assert equal. (Contrast Stamp, which is neither written nor
+		// compared; and contrast impeach.corpusDigest, which DOES fold the grade in
+		// because there the grade is audit identity.)
 		Provenance:    cf.Provenance,
 		SchemaVersion: ir.SchemaVersion,
 		Root:          rootSpan,

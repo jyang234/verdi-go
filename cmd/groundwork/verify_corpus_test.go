@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
 )
 
 // corpusDir is the committed impeachsvc behavioral corpus (the missed-root DB
@@ -72,6 +73,35 @@ func TestVerifyCorpusImpeachmentBlocks(t *testing.T) {
 	var v verdictError
 	if !errors.As(err, &v) {
 		t.Fatalf("run(verify --corpus) = %v (%T), want a verdictError (BLOCK)", err, err)
+	}
+
+	// Causal isolation #1: the SAME policy+graph WITHOUT the corpus PASSES. The
+	// require_proof rule is statically SATISFIED (no discovered route reaches the
+	// DELETE — the missed root), so the static gate is clean; a block therefore
+	// appears only when the behavioral corpus is added.
+	if err := run([]string{"verify", pol, g, g}); err != nil {
+		t.Fatalf("static-only verify must pass (the proof is SATISFIED without behavior), got %v", err)
+	}
+
+	// Causal isolation #2: inspect the --json gate result — the impeachment must be
+	// the SOLE block cause. No static dimension (violations, scope, breaking
+	// contract, blind spots, write targets) may be set, so the BLOCK is attributable
+	// to ImpeachmentBreaches alone, not laundered in alongside a static failure.
+	out := captureStdout(t, func() {
+		_ = run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--json"})
+	})
+	var gr review.GateResult
+	if err := json.Unmarshal([]byte(out), &gr); err != nil {
+		t.Fatalf("parse gate JSON: %v\n%s", err, out)
+	}
+	if gr.Pass {
+		t.Fatal("gate JSON reports Pass=true despite the verdictError")
+	}
+	if len(gr.ImpeachmentBreaches) == 0 {
+		t.Error("gate blocked but disclosed no impeachment breach — the cause is not the impeachment")
+	}
+	if n := len(gr.NewViolations) + len(gr.ScopeEscapes) + len(gr.BreakingContract) + len(gr.NewBlindSpots) + len(gr.NewWriteTargets); n != 0 {
+		t.Errorf("a static block dimension is also set (%d) — impeachment is not the sole cause: %+v", n, gr)
 	}
 }
 
