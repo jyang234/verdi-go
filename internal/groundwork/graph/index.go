@@ -244,6 +244,44 @@ func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
 	return effects, dynamic
 }
 
+// DBEffect is one statically-named database boundary effect: From issues a SQL
+// Op (DELETE, SELECT, …) against Table. The static label carries no DB *system*
+// — SSA cannot see which database a `*sql.DB` points at — so a DBEffect names
+// only what static can prove, and a consumer reconciling it against a behavioral
+// "DB <system> <OP> <table>" op key must drop the system to compare (the
+// behavioral-impeachment join, plan §14-A).
+type DBEffect struct {
+	Op    string // SQL operation verbatim from the label, e.g. DELETE
+	Table string // target table/relation
+	From  string // emitting first-party FQN
+}
+
+// DBEffects decodes the graph's database boundary surface: every statically-named
+// db effect, plus the count of effects whose statement the labeler could not read
+// (a dynamic/built statement that fell back to the driver method name, e.g.
+// "boundary:db Exec" — one field, no table). Like BusEffects' dynamic count, the
+// unreadable ones are TALLIED, not guessed: a consumer must disclose them rather
+// than treat the surface as exhaustively named. Decoding here keeps the
+// "boundary:db" label vocabulary with the schema owner (consumers never re-parse
+// boundary labels themselves).
+func (ix *Index) DBEffects() (effects []DBEffect, unreadable int) {
+	prefix := boundaryPrefix + "db "
+	for _, e := range ix.g.Edges {
+		if !strings.HasPrefix(e.To, prefix) {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(e.To, prefix))
+		if len(fields) < 2 {
+			// "<op>" alone (Exec/call/Scan) — opaque SQL the labeler could not
+			// resolve to an op+table. Count it; never fabricate a table.
+			unreadable++
+			continue
+		}
+		effects = append(effects, DBEffect{Op: fields[0], Table: fields[1], From: e.From})
+	}
+	return effects, unreadable
+}
+
 // KindHighFanOut is the blind-spot kind flowmap records at a dynamic-dispatch
 // site its algorithm resolved to many callees (an interface method, an
 // oapi-codegen strictHandler seam). Decoding the vocabulary here keeps it with
@@ -292,6 +330,17 @@ func (ix *Index) Frontier() *FrontierSection { return ix.g.Frontier }
 // (rta|vta|cha), or "" when unrecorded — the substrate a verdict over this graph
 // is computed on, and what a policy's recorded Substrate is checked against.
 func (ix *Index) Algo() string { return ix.g.Algo }
+
+// Stamp returns the producer's caller-supplied code identity (typically the
+// deployed commit SHA), or "" when unrecorded. A behavioral-impeachment witness
+// records it as the impeached graph's identity (the denominator): an impeachment
+// is only meaningful against the graph for the code the trace ran (R11).
+func (ix *Index) Stamp() string { return ix.g.Stamp }
+
+// Tool returns the flowmap build that produced the graph (its buildinfo
+// version), or "" when unrecorded — the PRODUCER's identity, distinct from the
+// CODE identity Stamp carries.
+func (ix *Index) Tool() string { return ix.g.Tool }
 
 // Entrypoints returns the graph's named roots (routes, topics) with handlers.
 func (ix *Index) Entrypoints() []Entrypoint { return ix.g.Entrypoints }
