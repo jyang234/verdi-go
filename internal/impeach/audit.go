@@ -75,7 +75,13 @@ type Witness struct {
 	Observed  Observation `json:"observed"`            // the runtime counterexample
 	Severance *Severance  `json:"severance,omitempty"` // the localization of WHERE static lost it (§6, Phase 2/3)
 	Rungs     []Rung      `json:"rungs"`               // the FULL ordered downgrade ladder (§4), recorded whole
-	Verdict   string      `json:"verdict"`             // IMPEACHMENT | <downgrade> — the first failing rung's disclosure
+	Verdict   string      `json:"verdict"`             // CANDIDATE | <downgrade> | IMPEACHMENT | VIOLATED (§5/§9)
+
+	// Repair is the Phase-4 proposed substrate change (§5/§8): present on
+	// IMPEACHMENT/VIOLATED, nil otherwise. It is a PROPOSAL — never enacted here;
+	// the loop proposes, a human ratifies (§8). omitempty so a Phase-0..3 report
+	// (which never proposes) serializes and digests identically.
+	Repair *ProposedRepair `json:"repair,omitempty"`
 
 	// chain is the causal span chain the L1 localizer walks (§6/§7). Unexported, so
 	// it never serializes or perturbs the digest — the spans' canonical ops already
@@ -87,6 +93,14 @@ type Witness struct {
 // Claim is the static side of the contradiction.
 type Claim struct {
 	Reachability string `json:"reachability"` // ReachUnreachable | ReachAbsent
+
+	// Rules are the must_not_reach rule names whose `to` binds this effect — the
+	// SATISFIED (proven-absent, §14-C) proofs this impeachment touches. A bare
+	// impeachment downgrades each to CANT-PROVE; a witnessed breach of one whose
+	// `from` also binds the entry is a VIOLATED (§9). Populated only by the Phase-5
+	// verdict integration (Resolve); empty in a Phase-0..3 report (omitempty so the
+	// digest is unchanged), because the ladder has no policy to read.
+	Rules []string `json:"rules,omitempty"`
 }
 
 // Observation is the behavioral side. Entry is the coarse L0 anchor (the

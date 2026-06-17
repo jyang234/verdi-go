@@ -22,6 +22,16 @@ const (
 	// explanation, so the static negative is behaviorally impeached (§3).
 	VerdictImpeachment = "IMPEACHMENT"
 
+	// VerdictViolated is the ONE place the cell ADDS a finding rather than removing
+	// trust (§3 carve-out, §9): an IMPEACHMENT whose witnessed (Entry, Effect) falls
+	// under a must_not_reach rule (Entry binds the rule's `from`, Effect its `to`)
+	// is a behaviorally-CONFIRMED policy breach — the forbidden thing demonstrably
+	// happened. It is a true positive, so it is NEVER laundered down to a passing
+	// CANT-PROVE (the §13 crack #1 fix); on a committed corpus the gate fails. Set
+	// only by the Phase-5 verdict integration (Resolve), never by the ladder, which
+	// has no policy to read.
+	VerdictViolated = "VIOLATED"
+
 	// The four downgrades, one per gating rung, named in §4. The verdict is the
 	// FIRST failing rung's downgrade (the ladder is ordered), so the disclosure is
 	// the precise reason — not a generic rejection.

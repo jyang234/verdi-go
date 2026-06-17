@@ -290,29 +290,51 @@ func pathSpans(chain []*ir.CanonicalSpan) []*ir.CanonicalSpan {
 	return chain[:len(chain)-1]
 }
 
-// staticEmitters returns the sorted, deduped first-party FQNs the graph models as
-// emitting the effect key — the bus PUBLISH or DB op the key names. Empty when the
-// graph models no emitter (a ReachAbsent candidate). Reused decoders (BusEffects /
-// DBEffects) keep the boundary-label vocabulary with the schema owner, and the key
-// reconciliation goes through the one-source DBEffectKey / bus op key, so an
-// emitter is matched like-with-like (the same parity the join itself relies on).
-func staticEmitters(ix *graph.Index, effect string) []string {
-	seen := map[string]bool{}
+// emitterRef is one graph emitter of an effect: the first-party FQN that emits it
+// (From) and the raw boundary label of the emitting edge (Label, e.g.
+// "boundary:db DELETE ledger") — the string a policy must_not_reach `to` pattern
+// matches against (§9). Carrying both keeps the effect→{emitter, label} parity in
+// ONE place (effectEmitters), so the severance walk's emitter FQNs and the verdict
+// layer's match surface can never drift on what "emits this effect" means.
+type emitterRef struct {
+	From  string
+	Label string
+}
+
+// effectEmitters is the ONE source of the effect→emitter parity: the graph
+// emitters whose decoded boundary label reconciles to the effect key, via the
+// one-source DBEffectKey / bus op key. Reused decoders (BusEffects / DBEffects)
+// keep the boundary-label vocabulary with the schema owner; this never re-parses a
+// label. Empty when the graph models no emitter (a ReachAbsent candidate).
+func effectEmitters(ix *graph.Index, effect string) []emitterRef {
+	var out []emitterRef
 	switch {
 	case isDBKey(effect):
 		dbEffs, _ := ix.DBEffects()
 		for _, de := range dbEffs {
 			if DBEffectKey(de.Op, de.Table) == effect {
-				seen[de.From] = true
+				out = append(out, emitterRef{From: de.From, Label: de.Label})
 			}
 		}
 	case isBusKey(effect):
 		busEffs, _ := ix.BusEffects()
 		for _, be := range busEffs {
 			if be.Op == graph.BusPublish && graph.BusPublish+" "+be.Event == effect {
-				seen[be.From] = true
+				out = append(out, emitterRef{From: be.From, Label: be.Label})
 			}
 		}
+	}
+	return out
+}
+
+// staticEmitters returns the sorted, deduped first-party FQNs the graph models as
+// emitting the effect key — the bus PUBLISH or DB op the key names. Derived from
+// effectEmitters (the one parity source) so an emitter is matched like-with-like
+// (the same reconciliation the join itself relies on).
+func staticEmitters(ix *graph.Index, effect string) []string {
+	seen := map[string]bool{}
+	for _, e := range effectEmitters(ix, effect) {
+		seen[e.From] = true
 	}
 	out := make([]string, 0, len(seen))
 	for fqn := range seen {

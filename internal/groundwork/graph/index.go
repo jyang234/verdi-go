@@ -79,6 +79,21 @@ func NewIndex(g *Graph) *Index {
 	return ix
 }
 
+// WithBlindSpots returns a NEW Index over a copy of the graph with bs appended to
+// its blind-spot manifest — the original Index (and its graph) is left untouched.
+// It is the owner-side primitive for a "propose a blind spot and re-evaluate" flow
+// (the behavioral-impeachment self-extinguish gate): the only sound way to ask
+// "what would the verdicts be if this seam were disclosed blind?" without mutating
+// shared state. The copy is shallow except for the BlindSpots slice (a fresh
+// slice), because the rest of the graph is read-only and NewIndex re-derives every
+// view from it. Determinism is preserved — the result is a pure function of
+// (graph, bs).
+func (ix *Index) WithBlindSpots(bs ...BlindSpot) *Index {
+	g := *ix.g
+	g.BlindSpots = append(append([]BlindSpot(nil), ix.g.BlindSpots...), bs...)
+	return NewIndex(&g)
+}
+
 func addAdj(m map[string]map[string]bool, k, v string) {
 	if m[k] == nil {
 		m[k] = map[string]bool{}
@@ -219,6 +234,12 @@ type BusEffect struct {
 	Op    string
 	Event string
 	From  string
+	// Label is the raw boundary edge target verbatim ("boundary:bus PUBLISH
+	// loan.approved") — the SAME string a policy must_not_reach `to` pattern
+	// matches against. Exposed by the schema owner so a consumer reconciling an
+	// effect against a policy selector matches the real label rather than re-parsing
+	// or reconstructing it (the boundary-label vocabulary stays in one place).
+	Label string
 }
 
 // BusEffects decodes the graph's bus boundary surface: every statically-named
@@ -239,7 +260,7 @@ func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
 		if len(fields) < 2 {
 			continue
 		}
-		effects = append(effects, BusEffect{Op: fields[0], Event: fields[1], From: e.From})
+		effects = append(effects, BusEffect{Op: fields[0], Event: fields[1], From: e.From, Label: e.To})
 	}
 	return effects, dynamic
 }
@@ -254,6 +275,11 @@ type DBEffect struct {
 	Op    string // SQL operation verbatim from the label, e.g. DELETE
 	Table string // target table/relation
 	From  string // emitting first-party FQN
+	// Label is the raw boundary edge target verbatim ("boundary:db DELETE ledger")
+	// — the SAME string a policy must_not_reach `to` pattern matches against,
+	// exposed by the schema owner so a consumer matches the real label rather than
+	// reconstructing it (parity with the boundary vocabulary in one place).
+	Label string
 }
 
 // DBEffects decodes the graph's database boundary surface: every statically-named
@@ -277,7 +303,7 @@ func (ix *Index) DBEffects() (effects []DBEffect, unreadable int) {
 			unreadable++
 			continue
 		}
-		effects = append(effects, DBEffect{Op: fields[0], Table: fields[1], From: e.From})
+		effects = append(effects, DBEffect{Op: fields[0], Table: fields[1], From: e.From, Label: e.To})
 	}
 	return effects, unreadable
 }
