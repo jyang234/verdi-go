@@ -1,13 +1,18 @@
-# Static × behavioral impeachment — auditing the analyzer's own negatives
+# Static × behavioral impeachment — finding counterexamples to the analyzer's own negatives
 
 > **`PROPOSAL`** · exploratory, designed-not-built · _drafted 2026-06-17_
 
 **Status:** **none of this is implemented.** It is the design record of a single
 extended exploration: how to combine the static call graph with captured runtime
 behavior so that each covers the other's blind spot, *without* risking the prime
-directive. The load-bearing idea — the **impeachment cell** (§3) — is a continuous
-soundness audit of the static analyzer itself, built so that its worst failure mode
-points at abstention, not at a confident wrong answer. The one shipped prerequisite
+directive. The load-bearing idea — the **impeachment cell** (§3) — is a
+**counterexample finder** for the static analyzer's own negatives: it can only find
+unsoundness on *exercised* paths and never proves static is sound (it is not a
+complete "audit"), built so that its worst failure mode points at abstention, not at
+a confident wrong answer. It has been **pressure-tested (§13)**; the cracks that
+surfaced — most importantly that a witnessed policy breach is a `VIOLATED`, not a
+downgrade, and that a gate may consume only the committed corpus — are folded back
+into §6–§9. The one shipped prerequisite
 it leans on is the producer/code-identity provenance (`--stamp` / `--expect` /
 `tool`, see `internal/groundwork/graph` and `cmd/flowmap`); everything else here is
 a plan. Companion docs:
@@ -64,6 +69,15 @@ behavioral one:
 Non-observation is trusted as absence in exactly **one** cell, and that trust is
 borrowed from static, never asserted by behavior.
 
+**Granularity (a soundness, not a cosmetic, choice).** The cells must key on the
+`(emitting-site, effect-label)` pair, **not the bare label** — because one label
+(`db DELETE ledger`) can be emitted from a statically-reachable site *and* an
+unreachable one, so a label-level trigger would see the label as globally reachable
+and **miss** the unreachable site (a false-negative audit). Site-level triggering
+needs the emitter span to map (§7); where it does not, the trigger falls back to
+label-level **with the false-negative risk disclosed**. So the map's fidelity bounds
+the *trigger's* precision, not only the localization's.
+
 **The combination is more than additive — each side resolves the other's ambiguity:**
 
 - *Behavior's "LOST effect — regression or just unexercised?"* → ask static on the
@@ -95,13 +109,17 @@ the over-approximation. That is precisely the failure the prime directive fears 
 tenet 5 incarnate: the analyzer cannot be the sole grader of its own completeness;
 behavior is the independent grader.
 
-**The property that makes it special:** the impeachment cell **never makes a new
-positive claim of its own — it can only ever *remove* trust.** It cannot manufacture
-a false SATISFIED; the most it can do is turn a SATISFIED into a CANT-PROVE.
-Therefore its *own* worst failure — a **false** impeachment — degrades a proof to
-**abstention**, never to a confident wrong answer. The cell can only push the system
-toward *more* caution. A sloppy implementation makes it *noisy*, not *unsafe*, and
-noise here also fails toward abstain.
+**The property that makes it special — with one carve-out the pressure test (§13)
+forced.** Against a **bare reachability negative** the impeachment cell never makes a
+new positive claim of its own — it can only *remove* trust (turn a SATISFIED into a
+CANT-PROVE), so its *own* worst failure (a **false** impeachment) degrades a proof to
+**abstention**, never to a confident wrong answer. A sloppy implementation makes it
+*noisy*, not *unsafe*. **But** when the impeached negative is a *policy*
+`must_not_reach` whose forbidden target the witness actually *observed reaching*, the
+cell does the opposite — it surfaces a **behaviorally-confirmed `VIOLATED`** (a true
+positive: the forbidden thing demonstrably happened). That is the one case it *adds*
+a finding rather than removing trust, and §9 must not launder it down to a passing
+caution. Outside that case, the abstain-biased property holds.
 
 **The payoff — it discovers the blind spots static didn't know it had.** Static
 discloses the blind spots it *knows* about (reflect, unsafe, high-fanout, detected
@@ -143,6 +161,15 @@ The missed-edge vs missed-root distinction is carried separately (in the witness
 `EntryDiscovered`), not as a gating rung: both are real impeachments, but of
 different kinds.
 
+**`capture-fidelity` is the weakest rung — and the only one that is not mechanically
+verified.** It rests on the self-declared `CaptureProvenance` label; a mocked
+integration capture mislabeled "production" (a test double emitting a boundary span
+the real code gates out) passes the rung and yields a false impeachment. The tool's
+ethos disfavors a human assertion as a gate input, so until provenance can be
+*attested* (or mock-shaped spans detected structurally), an impeachment is only as
+sound as that label is honest — which caps verdict-integration (§9) on capture
+pipelines whose provenance is trusted. Tracked in §12.
+
 ---
 
 ## §5 — The witness schema
@@ -183,8 +210,8 @@ type Witness struct {
 	Claim             Claim           `json:"claim"`              // the static negative under test + dependent rule verdicts
 	Observed          Observation     `json:"observed"`           // the canonical runtime counterexample
 	Rungs             []Rung          `json:"rungs"`              // the FULL ordered ladder evaluation
-	Verdict           string          `json:"verdict"`            // IMPEACHMENT only if every gating rung passed
-	Repair            *ProposedRepair `json:"repair,omitempty"`   // present only on IMPEACHMENT; never enacted here
+	Verdict           string          `json:"verdict"`            // CANDIDATE | <downgrade> | IMPEACHMENT | VIOLATED (witnessed policy breach, §9) — only when every gating rung passed
+	Repair            *ProposedRepair `json:"repair,omitempty"`   // present on IMPEACHMENT/VIOLATED; never enacted here
 }
 
 type Claim struct {
@@ -258,10 +285,18 @@ the frontier" bug); no static marker → an *undisclosed* blind spot (the high-v
 discovery).
 
 **Self-extinguish polices `Site`.** Ratify the `blind_spot` at `Site` → the graph
-marks it blind → the effect's `Claim.Reachability` flips `unreachable`→`blind` → the
-impeachment disappears. A mislocalized `Site` does **not** flip it, so the impeachment
-persists — the mislocalization announces itself. You never have to *trust* the
-localizer; regenerate-and-diff catches a bad `Site` mechanically.
+marks it blind → because a blind spot means "`Site` may reach anything," the effect's
+`Claim.Reachability` flips `unreachable`→`blind` → the impeachment disappears. A
+mislocalized `Site` does **not** flip it, so the impeachment persists — the
+mislocalization announces itself. You never have to *trust* the localizer;
+regenerate-and-diff catches a bad `Site` mechanically.
+
+The acceptance criterion is **monotonic, not unit** (a §13 correction): since
+blinding `Site` makes everything past it `CANT-PROVE`, one ratified repair may
+extinguish *several* impeachments and downgrade *many* `PROVEN-ABSENT → CANT-PROVE`.
+That is all the safe direction, so the test is "*the target impeachment extinguishes
+and **no `PROVEN-ABSENT` is newly created***" (proofs only weaken), never "the count
+drops by exactly one."
 
 ---
 
@@ -300,10 +335,15 @@ re-implementing reopens that drift). The `⊥` policy: closures (`$N` vs `.funcN
 generics (concrete vs `go.shape`), method values/thunks (`-fm`/`$bound`), `init`,
 and unparseable inputs — each recorded with a reason that rides into the witness.
 
-**Three fail-closed properties:** (1) `⊥` is *symmetric*, so `absent-from-graph`
-cannot be fabricated — a weak parser `⊥`s *both* the graph node and the span tag,
-yielding a coarsen-gap, never a phantom missing node. (2) Key collisions →
-`ambiguous` → `⊥`. (3) Total and pure → deterministic.
+**Three fail-closed properties:** (1) `absent-from-graph` is sound **only when `⊥` is
+symmetric** — `canonFQN` must succeed-or-fail *identically* on both spellings of a
+function, or a method whose runtime form keys but whose ssa form `⊥`s reads as
+`absent-from-graph` for a node that **exists** (a phantom missing node). A *fixture*
+parity test only spot-checks this, so (§13 correction) **`absent-from-graph` is
+trusted only at L2** (the tag *is* the ssa string — same parser, same result by
+construction); at L1 it is a weak hint until `canonFQN` symmetry is *fuzz-proven*
+over generated FQNs. (2) Key collisions → `ambiguous` → `⊥`. (3) Total and pure →
+deterministic.
 
 **The parity test (the one-source guard CLAUDE.md requires):** for fixture functions
 of each reconcilable class, pin `canonFQN(ssaName) == canonFQN(runtimeName)`, and pin
@@ -317,9 +357,12 @@ this breaks before the loop can mislocalize.
 - **L2** — build-time tags from the *ssa* FQN; exact, **no reconciliation at all**
   (same string by construction); even closures map.
 
-**Soundness never depends on the level** — L0 yields a coarser-but-sound `Site`; L2 a
-precise one. The harness investment is a resolution dial, never a correctness lever —
-the part a team might under-invest in can only *blur* the picture, never falsify it.
+**Soundness of `Site` never depends on the level** — L0 yields a coarser-but-sound
+`Site`; L2 a precise one. The one caveat the pressure test (§13) added: L1's sharp
+`absent-from-graph` signal *can* introduce a false localization if `canonFQN` is
+asymmetric — caught downstream by self-extinguish, but it means **only L2 is
+reconciliation-free**. So the harness investment is a resolution dial for `Site`; the
+*sharp* missing-node signal is an L2-only privilege until symmetry is proven.
 
 ---
 
@@ -336,23 +379,48 @@ Inside the loop, a fail-toward-abstain gradient: **prefer disclosing a blind spo
 over writing a reclaimer.** Disclosure is always safe (abstain); a reclaimer is the
 *precise* repair that demands a provably-real edge.
 
-**Per-repair acceptance gate: the self-extinguish test** — after ratifying, regenerate
-and the impeachment count drops by exactly one, or the repair is rejected as
-mislocalized. A loop whose repairs don't extinguish their own impeachments is the
-thing to refuse to ship.
+**A ratified repair co-updates the blind-spot ratchet (§13).** Adding a blind spot is
+exactly what `blind_spot_ratchet` gates as "a new blind spot," so a ratification that
+disclosed a seam without allow-listing it would trip that very gate. The ratification
+is one reviewed act: it adds the blind spot *and* records it in the ratchet's
+allow-list with the impeachment witness as its reason — a reviewed, intentional
+disclosure, not drift.
+
+**Per-repair acceptance gate: the self-extinguish test** — after ratifying,
+regenerate and confirm the **target impeachment extinguishes while no `PROVEN-ABSENT`
+is newly created** (monotonic, §6), else reject the repair as mislocalized. A loop
+whose repairs don't extinguish their own impeachments is the thing to refuse to ship.
 
 ---
 
 ## §9 — Verdict integration (last; first time it touches a PR)
 
-An impeachment **invalidates the specific static negative it contradicts** and reuses
-the existing three-valued machinery — it invents no new gate. A `must_not_reach`
-passing as PROVEN-ABSENT because static said "unreachable," once that unreachability
-is impeached, can no longer claim the proof → **downgrades to CANT-PROVE** →
-`require_proof` rules **fail closed**, advisory rules disclose. The machine never
-decides intent; it refuses to let an impeached proof stand. Observe-first even here:
-ship as a *disclosed* downgrade on the substrate line before `require_proof` acts on
-it.
+Verdict integration reuses the existing three-valued machinery — it invents no new
+gate — but the pressure test (§13) showed the mapping is **two-valued, not one**, and
+that it must be fed from a **fixed corpus**. Both corrections are load-bearing.
+
+**A witnessed policy breach is a `VIOLATED`, not a downgrade.** An impeachment carries
+a positive witness — *the effect was observed reaching from that entry*. So:
+
+- If `(Observed.Entry, Effect)` falls under a `must_not_reach` rule in `Claim.Rules`
+  (the entry is in the rule's `from`, the effect in its `to`), the impeachment is a
+  **behaviorally-confirmed `VIOLATED`** — the gate **fails**, full stop. Downgrading
+  it to `CANT-PROVE` (which passes without `require_proof`) would launder a witnessed
+  violation into a caution — the §13 crack this fix closes.
+- Only a **bare** reachability impeachment (no dependent rule, or the entry is outside
+  the rule's `from`) invalidates the proof and **downgrades `PROVEN-ABSENT →
+  CANT-PROVE`** → `require_proof` rules fail closed, advisory rules disclose.
+
+**Gate-affecting impeachments come only from the committed corpus.** A report over
+*live* traffic is not byte-identical run-to-run, so an impeachment sourced from it
+must never move a verdict (that would be a non-deterministic gate — a prime-directive
+violation). Live-corpus impeachments are **audit-only**; only the committed corpus
+(and the same self-extinguish acceptance, §8) may reach a gate. Stated as an
+invariant, not a guideline.
+
+The machine never decides intent; it refuses to let an impeached proof stand and
+surfaces a witnessed breach as the violation it is. Observe-first even here: ship the
+downgrade/violation as a *disclosed* substrate-line note before it fails a gate.
 
 ---
 
@@ -365,16 +433,18 @@ independently shippable and valuable; the plan is a set of off-ramps.
 | Phase | Ships | Stop-value | Go/no-go gate |
 |---|---|---|---|
 | **0 — spine** | witness types + the `observed × unreachable` join (fold in `coverage.Delta` for the other direction); `Verdict: CANDIDATE`, disclosure-only | coverage-calibrated behavioral view | run on real corpora; ~zero candidates ⇒ analyzer already sound, **stop** |
-| **1 — ladder** | the five rungs → candidates classified IMPEACHMENT vs the four downgrades | a trustworthy soundness audit, **zero substrate/gate risk** — the natural resting point | measure the rung distribution; *mostly downgrades, rare impeachments* = healthy; mostly IMPEACHMENT = too credulous, fix before proceeding |
+| **1 — ladder** | the five rungs → candidates classified IMPEACHMENT vs the four downgrades | a trustworthy counterexample finder (over exercised paths), **zero substrate/gate risk** — the natural resting point | measure the rung distribution; *mostly downgrades, rare impeachments* = healthy; mostly IMPEACHMENT = too credulous, fix before proceeding |
 | **2 — severance L0** | coarse `Site` (entry+effect anchors) + the proof obligation | impeachments carry a coarse location + known/unknown sort | proof obligation holds; spot-check Sites |
 | **3 — map + `canonFQN`** | the map, `canonFQN` + parity test, L1 tags; precise Sites | precise localization, sharp `absent-from-graph` | parity test green + self-extinguish **dry run** |
-| **4 — loop** | propose → human-ratify → blind-spot/reclaimer; durable audit | the audit resolves instead of re-firing | per-repair self-extinguish test |
-| **5 — verdict** | impeached negative downgrades dependent PROVEN → CANT-PROVE | gating on analyzer-unsoundness | observe-first: disclosed downgrade before `require_proof` acts |
+| **4 — loop** | propose → human-ratify → blind-spot/reclaimer; durable record | findings resolve instead of re-firing | per-repair self-extinguish test |
+| **5 — verdict** | witnessed policy breach → `VIOLATED`; bare impeachment → dependent PROVEN → CANT-PROVE; **committed corpus only** (§9) | gating on analyzer-unsoundness and on witnessed breaches | observe-first: disclosed before it fails a gate |
 
 **Cross-cutting:** every canonicalization ships with its determinism test (report
-digest P0, severance P2, `canonFQN` parity P3). The corpus convention (decide in P0):
-a *committed* representative corpus for any gate; *live* traffic for the standing
-audit, `CorpusDigest` pinning what was seen.
+digest P0, severance P2, `canonFQN` parity P3 — plus the `canonFQN` ⊥-symmetry fuzz
+that L1 `absent-from-graph` needs). The corpus convention (decide in P0) is an
+**invariant, not a guideline**: a *committed* representative corpus is the **only**
+input that may reach a gate (P5); *live* traffic is audit-only, with `CorpusDigest`
+pinning what was seen.
 
 **Build first:** Phase 0, and within it the `observed × unreachable` join — the one
 direction that doesn't already exist, and the probe that tells you whether any of the
@@ -390,12 +460,16 @@ How each piece stays inside "determinism and trust before everything":
   trace corpus)`; all ordering/keys are intrinsic (effect label, route, canonical
   span sig, `FQNKey`), never wall-clock/span-id/arrival. The behavioral side leans
   entirely on the existing `canon` determinism (causal order, canonical
-  concurrent-sibling order, zero timing).
+  concurrent-sibling order, zero timing). **Only the committed corpus reaches a gate**
+  (§9); a live corpus is audit-only, so no gate is ever a function of run-varying
+  traffic.
 - **Fail closed** — non-observation is absence in exactly one licensed cell;
   unestablished identity/provenance forces a downgrade *by representation*; `⊥`
   coarsens rather than guesses; no-severance ⇒ no impeachment.
 - **Soundness asymmetry** — behavior only ever asserts positives, static only ever
-  asserts negatives; the join never crosses them.
+  asserts negatives; the join never crosses them. The cell *removes* trust on a bare
+  reachability negative (→ CANT-PROVE) and *adds* a true positive on a witnessed
+  policy breach (→ VIOLATED, §9) — never the reverse (it cannot fabricate a SATISFIED).
 - **Self-honest about blind spots** — the coverage frontier scopes every green to its
   evidence; double-blind cells are CANT-PROVE; the map's `⊥` classes are disclosed.
 - **The machine is not the oracle** — the loop proposes, a human ratifies; correctness
@@ -424,3 +498,42 @@ The risk is admitted in exactly the order it can be retired.**
 4. **Reclaimer auto-proposal shapes.** §8 defaults to blind-spot disclosure; which
    severance bins are safe to *propose* (not enact) a reclaimer for is deferred to the
    reclaimer framework (`internal/static/reclaim`).
+5. **`canonFQN` ⊥-symmetry (gates L1 `absent-from-graph`, §7/§13).** The sharp
+   missing-node signal is sound only if `canonFQN` succeeds-or-fails identically on a
+   function's ssa and runtime spellings. A fixture parity test under-covers it; a fuzz
+   over generated FQNs is needed before L1 may trust `absent-from-graph` (until then,
+   L2-only).
+6. **Capture-provenance attestation (§4/§13).** `capture-fidelity` is the one
+   human-asserted rung; whether it can be mechanically attested (or mock-shaped spans
+   detected structurally) decides whether a live-mislabeled capture can ever produce a
+   false impeachment. Until resolved, verdict-integration is restricted to trusted
+   pipelines.
+7. **Trigger granularity (§2/§13).** Site-level triggering needs the emitter span to
+   map; the fallback to label-level carries a disclosed false-negative risk. How often
+   real effect surface forces the fallback is a measurement that decides whether L1+
+   instrumentation of emitters is mandatory rather than optional.
+
+---
+
+## §13 — Pressure test (the cracks, and where each is handled)
+
+The design was adversarially stress-tested before any of it was built. Eight cracks
+surfaced; none were fatal, all are folded back above. Recorded here so the doc is
+honest about its own stress test rather than presenting only the polished face.
+
+| # | Crack | Severity | Resolution |
+|---|---|---|---|
+| 1 | §9 downgraded a **witnessed `must_not_reach` breach** to a passing `CANT-PROVE` — laundering a real, observed violation into a caution | **prime-directive** | §9 rewritten: a witnessed policy breach is a `VIOLATED` (gate fails); only a *bare* reachability impeachment downgrades. §3 carve-out added. |
+| 2 | A **live corpus** feeding a gate makes the gate non-deterministic | **prime-directive** | §9/§10/§11: only the *committed* corpus may reach a gate; live is audit-only. Stated as an invariant. |
+| 3 | `absent-from-graph` can be **fabricated at L1** if `canonFQN` is asymmetric (a phantom missing node) | broken property | §7: `absent-from-graph` trusted **only at L2** until ⊥-symmetry is fuzz-proven; weak hint at L1. §12.5. |
+| 4 | Self-extinguish "drops by **exactly one**" rejects a correct repair (blinding a site downgrades many) | broken property | §6/§8: acceptance is **monotonic** — target extinguishes, no new `PROVEN-ABSENT`. |
+| 5 | Trigger keyed on the **bare label** misses an unreachable site when the label is reachable elsewhere | broken property | §2: trigger on `(emitting-site, label)`; label-level fallback discloses the false-negative risk. §12.7. |
+| 6 | A ratified blind-spot repair **trips `blind_spot_ratchet`** (its sibling gate) | integration gap | §8: ratification co-updates the ratchet allow-list with the witness as its reason. |
+| 7 | `capture-fidelity` is **human-asserted**, mechanically unverified — a mislabeled mock yields a false impeachment | soft spot | §4: flagged as the weakest rung; verdict-integration restricted to trusted pipelines. §12.6. |
+| 8 | "Audit" **overclaims** — it can only find counterexamples on exercised paths, never prove soundness | framing | Reframed throughout to "counterexample finder"; the coverage frontier (§2) already scopes the green. |
+
+The two prime-directive cracks (#1, #2) were both in the **verdict-integration** layer
+(§9) — exactly where the phasing put the most scrutiny and the latest, gated step. The
+core idea survived: static still licenses the negatives, behavior still licenses the
+positives, and the failure modes still bias toward abstention — but only after §9 was
+corrected to surface a witnessed breach as the violation it is.
