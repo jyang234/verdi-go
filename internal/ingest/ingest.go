@@ -109,22 +109,20 @@ func assemble(slug, svc string, spans []capture.Span) FlowCapture {
 // CodeStampAttr resource attribute folded onto each by otlpjson) onto the
 // CapturedFlow. It fails CLOSED to "": a bucket whose spans DISAGREE on the stamp
 // (two deploys of the same service in one export) yields no single identity, so it
-// drops to unestablished rather than picking one. A synthesized root carrying no
-// stamp does not veto a stamp the real spans agree on.
+// drops to unestablished rather than picking one. Its empty-policy (the half it is
+// allowed to differ from impeach.corpusIdentity on, see capture.AgreedStamp): a
+// span MAY lack a stamp without vetoing — a synthesized root carrying none does
+// not veto a stamp the real spans agree on, and an all-stampless bucket is simply
+// stampless.
 func flowStamp(spans []capture.Span) string {
-	id := ""
+	stamps := make([]string, len(spans))
 	for i := range spans {
-		s := spans[i].Attr(capture.CodeStampAttr)
-		switch {
-		case s == "":
-			continue
-		case id == "":
-			id = s
-		case id != s:
-			return ""
-		}
+		stamps[i] = spans[i].Attr(capture.CodeStampAttr)
 	}
-	return id
+	// A disagreement (ok=false) is the fail-closed "" we want; ("",true) is an
+	// all-stampless bucket, also "". Either way the agreed stamp is the result.
+	stamp, _ := capture.AgreedStamp(stamps)
+	return stamp
 }
 
 // WholeFlows is the cross-service analog of Group, for rendering rather than

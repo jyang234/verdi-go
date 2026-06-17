@@ -100,6 +100,29 @@ func TestAuditInjectedIdentityContradictsCorpus(t *testing.T) {
 	}
 }
 
+// TestCorpusDigestExcludesStamp guards the regression finding-1 fixed: the corpus
+// digest must NOT churn on the run-varying deploy stamp. Two captures of one flow
+// on different deploys are the SAME canonical trace (golden equality zeroes Stamp),
+// so they must produce the SAME CorpusDigest — the deploy identity is carried
+// separately as Report.TraceIdentity.
+func TestCorpusDigestExcludesStamp(t *testing.T) {
+	ix := stampedAbsentGraph("c1")
+	c1 := Audit("svc", ix, []*ir.CanonicalTrace{liveTrace("ledger", "svc", "c1")}, Provenance{Capture: CaptureProduction})
+	c2ix := stampedAbsentGraph("c2")
+	c2 := Audit("svc", c2ix, []*ir.CanonicalTrace{liveTrace("ledger", "svc", "c2")}, Provenance{Capture: CaptureProduction})
+	if c1.CorpusDigest != c2.CorpusDigest {
+		t.Errorf("CorpusDigest churned on the deploy stamp: %s != %s", c1.CorpusDigest, c2.CorpusDigest)
+	}
+	// The deploy identity is still distinguished, in TraceIdentity, so the full
+	// report digests legitimately differ.
+	if c1.TraceIdentity == c2.TraceIdentity {
+		t.Error("TraceIdentity should reflect the differing deploy")
+	}
+	if c1.Digest == c2.Digest {
+		t.Error("Report.Digest should differ when TraceIdentity differs")
+	}
+}
+
 func TestCorpusIdentity(t *testing.T) {
 	mk := func(stamp string) *ir.CanonicalTrace { return &ir.CanonicalTrace{Stamp: stamp} }
 	cases := []struct {

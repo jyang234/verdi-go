@@ -94,9 +94,14 @@ type Observation struct {
 }
 
 // Audit joins a stamped graph against a canonical trace corpus and returns the
-// Phase-0 witness report. It is a pure function of (ix, traces): all ordering is
-// intrinsic (effect key, flow, op), no map iteration or arrival order reaches the
-// output, so the report — and its digest — is byte-identical across runs.
+// witness report, each candidate classified through the downgrade ladder (§4):
+// IMPEACHMENT or one specific downgrade. It is a pure function of (ix, traces,
+// prov): all ordering is intrinsic (effect key, flow, op), no map iteration or
+// arrival order reaches the output, so the report — and its digest — is
+// byte-identical across runs. prov supplies the ladder's capture-side inputs
+// (code identity, capture fidelity), so the verdicts and digest depend on it; a
+// zero Provenance fails the capture-side rungs closed (every candidate caps at a
+// downgrade, never IMPEACHMENT).
 //
 // Scope (disclosed in Caveats, not hidden): the join covers bus and DB boundary
 // effects, the two kinds with a parity-proven label reconciliation (DBEffectKey,
@@ -404,6 +409,13 @@ func lessObserved(a, b observedEffect) bool {
 // per-trace digests, hashed. So the corpus identity is independent of trace
 // arrival order and of a trace appearing twice — the report is a function of
 // WHICH canonical traces were seen, not how the slice was assembled (§5).
+//
+// Each trace is digested with its code-identity Stamp zeroed, mirroring
+// golden.canonicalBytes: the Stamp is run-varying provenance EXCLUDED from trace
+// equality, so two captures of one flow on different deploys are the same
+// canonical trace and yield the same corpus digest. The corpus's deploy identity
+// is carried separately as Report.TraceIdentity, never folded into the structural
+// digest (else this digest would churn per deploy).
 func corpusDigest(traces []*ir.CanonicalTrace) string {
 	seen := map[string]bool{}
 	var digs []string
@@ -411,7 +423,9 @@ func corpusDigest(traces []*ir.CanonicalTrace) string {
 		if t == nil {
 			continue
 		}
-		d := canonicalDigest(t)
+		cp := *t
+		cp.Stamp = ""
+		d := canonicalDigest(&cp)
 		if !seen[d] {
 			seen[d] = true
 			digs = append(digs, d)

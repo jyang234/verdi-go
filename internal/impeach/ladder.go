@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/ir"
@@ -252,25 +253,29 @@ func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
 // "" when it does not establish one. It fails CLOSED: every non-nil trace must
 // carry the SAME non-empty Stamp; an unstamped trace, a disagreement (mixed
 // deploys), or an empty corpus yields "" — never a guessed or majority identity.
+//
+// The disagreement check is the shared capture.AgreedStamp reducer (one source
+// with ingest.flowStamp); corpusIdentity's OWN empty-policy — the half it is
+// permitted to differ from flowStamp on — is STRICTER: a trace MAY NOT lack a
+// stamp (a stampless trace cannot ride a stamped sibling's identity), so any empty
+// Stamp short-circuits to "" before the reducer ever sees the corpus.
 func corpusIdentity(traces []*ir.CanonicalTrace) string {
-	id := ""
-	seen := false
+	stamps := make([]string, 0, len(traces))
 	for _, t := range traces {
 		if t == nil {
 			continue
 		}
-		seen = true
-		switch {
-		case t.Stamp == "":
-			return "" // an unstamped trace ⇒ no single identity (fail closed)
-		case id == "":
-			id = t.Stamp
-		case id != t.Stamp:
-			return "" // mixed deploys ⇒ no single identity (fail closed)
+		if t.Stamp == "" {
+			return "" // an unstamped trace ⇒ identity unestablished (fail closed)
 		}
+		stamps = append(stamps, t.Stamp)
 	}
-	if !seen {
-		return ""
+	if len(stamps) == 0 {
+		return "" // empty corpus ⇒ nothing to establish
+	}
+	id, ok := capture.AgreedStamp(stamps)
+	if !ok {
+		return "" // mixed deploys ⇒ no single identity (fail closed)
 	}
 	return id
 }
