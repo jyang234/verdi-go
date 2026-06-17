@@ -86,3 +86,33 @@ func TestConcurrentInlineSiblingSequential(t *testing.T) {
 		t.Error("an async span spawned after an inline sibling completed must be sequential")
 	}
 }
+
+// TestAgreedStamp pins the one-source code-identity reduction shared by
+// ingest.flowStamp and impeach.corpusIdentity: the unique non-empty stamp, with
+// ok=false ONLY on a genuine disagreement. ("", true) is "no stamp seen" (skipped
+// empties), distinct from ("", false). The two callers layer different
+// empty-policies on top of this; the disagreement rule lives only here.
+func TestAgreedStamp(t *testing.T) {
+	cases := []struct {
+		name      string
+		stamps    []string
+		wantStamp string
+		wantOK    bool
+	}{
+		{"empty-input", nil, "", true},
+		{"all-empty", []string{"", ""}, "", true},
+		{"single", []string{"c1"}, "c1", true},
+		{"agree", []string{"c1", "c1"}, "c1", true},
+		{"agree-with-gaps", []string{"", "c1", "", "c1"}, "c1", true},
+		{"disagree", []string{"c1", "c2"}, "", false},
+		{"disagree-after-gap", []string{"", "c1", "c2"}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotStamp, gotOK := AgreedStamp(c.stamps)
+			if gotStamp != c.wantStamp || gotOK != c.wantOK {
+				t.Errorf("AgreedStamp(%v) = (%q,%v), want (%q,%v)", c.stamps, gotStamp, gotOK, c.wantStamp, c.wantOK)
+			}
+		})
+	}
+}

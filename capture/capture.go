@@ -96,12 +96,50 @@ type SpanLink struct {
 	SpanID  string
 }
 
+// CodeStampAttr is the OTel RESOURCE attribute carrying the deployed code
+// identity (typically the commit SHA) of the emitting service — the behavioral
+// mirror of the static graph's --stamp, matched by the behavioral-impeachment
+// ladder's code-identity rung. It is flowmap-specific (no OTel semantic
+// convention pins a deployed-commit resource attribute) and the ONE owner of the
+// name, so ingest (post-hoc) and the in-process harness key it identically.
+const CodeStampAttr = "flowmap.code.stamp"
+
+// AgreedStamp is the ONE-SOURCE code-identity reduction: the single distinct
+// NON-EMPTY stamp among the inputs, with ok=false when two non-empty stamps
+// disagree. Empty inputs are skipped, so a result of ("", true) means "no stamp
+// seen at all" — distinct from ("", false), a genuine disagreement. Both
+// stamp-reducing consumers route their disagreement check through here so the
+// fail-closed-on-conflict rule lives in one place (ingest.flowStamp over a
+// service's spans, impeach.corpusIdentity over a corpus's traces); each layers
+// its OWN empty-policy on top — a span MAY lack a stamp without vetoing, a trace
+// MAY NOT — and that empty-policy is the only thing the two are permitted to
+// differ on. Guarded by capture.TestAgreedStamp.
+func AgreedStamp(stamps []string) (stamp string, ok bool) {
+	for _, s := range stamps {
+		if s == "" {
+			continue
+		}
+		switch {
+		case stamp == "":
+			stamp = s
+		case stamp != s:
+			return "", false
+		}
+	}
+	return stamp, true
+}
+
 // CapturedFlow is the harness's output and the canonicalizer's input
 // (harness §7). Complete=false is a hard stop: the canonicalizer must refuse to
 // snapshot a truncated trace.
 type CapturedFlow struct {
-	Flow     string
-	Service  string // the self lifeline (OTel resource service.name)
+	Flow    string
+	Service string // the self lifeline (OTel resource service.name)
+	// Stamp is the code identity (deployed commit) read from the CodeStampAttr
+	// resource attribute (post-hoc) or set by the harness WithCodeStamp option
+	// (in-process). It rides through to ir.CanonicalTrace.Stamp, where it is
+	// excluded from snapshot equality. Empty when the capture carried no stamp.
+	Stamp    string
 	Trigger  TriggerKind
 	Mode     CaptureMode
 	Spans    []Span

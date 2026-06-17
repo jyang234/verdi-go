@@ -1,8 +1,15 @@
 # Static × behavioral impeachment — finding counterexamples to the analyzer's own negatives
 
-> **`PROPOSAL`** · exploratory, designed-not-built · _drafted 2026-06-17_
+> **`IN PROGRESS`** · Phases 0–1 landed, 2–5 designed-not-built · _drafted
+> 2026-06-17, updated 2026-06-17_
 
-**Status:** **none of this is implemented.** It is the design record of a single
+**Status:** **Phases 0–1 are implemented** (`internal/impeach`): the read-only
+`observed × unreachable` join + witness report (Phase 0) and the five-rung
+downgrade ladder that classifies a candidate into IMPEACHMENT vs the four benign
+downgrades (Phase 1). Both are disclosure-only and carry **zero substrate/gate
+risk** — the natural resting point (§10). **Phases 2–5** (severance localization,
+the span↔node map + `canonFQN`, the discovery loop, verdict integration) remain a
+plan. It is the design record of a single
 extended exploration: how to combine the static call graph with captured runtime
 behavior so that each covers the other's blind spot, *without* risking the prime
 directive. The load-bearing idea — the **impeachment cell** (§3) — is a
@@ -14,8 +21,8 @@ surfaced — most importantly that a witnessed policy breach is a `VIOLATED`, no
 downgrade, and that a gate may consume only the committed corpus — are folded back
 into §6–§9. The one shipped prerequisite
 it leans on is the producer/code-identity provenance (`--stamp` / `--expect` /
-`tool`, see `internal/groundwork/graph` and `cmd/flowmap`); everything else here is
-a plan. Companion docs:
+`tool`, see `internal/groundwork/graph` and `cmd/flowmap`); everything beyond
+Phases 0–1 here is a plan. Companion docs:
 [`frontier-instrumentation-plan.md`](frontier-instrumentation-plan.md) (the static
 frontier this reuses),
 [`post-hoc-behavioral-ingestion.md`](post-hoc-behavioral-ingestion.md) (the trace
@@ -432,8 +439,8 @@ independently shippable and valuable; the plan is a set of off-ramps.
 
 | Phase | Ships | Stop-value | Go/no-go gate |
 |---|---|---|---|
-| **0 — spine** | **(prereq, §14-A) DB boundary effects in the corpus** — extend capture (`otelsql`) + `ingest`/`coverage` so the join's effect vocabulary includes `db <verb>` writes, not only the otelaws bus/dep surface; then witness types + the `observed × unreachable` join (fold in `coverage.Delta` for the other direction); `Verdict: CANDIDATE`, disclosure-only | coverage-calibrated behavioral view **that can see the marquee `db DELETE` case** | run on real corpora; ~zero candidates ⇒ analyzer already sound, **stop** |
-| **1 — ladder** | the five rungs → candidates classified IMPEACHMENT vs the four downgrades | a trustworthy counterexample finder (over exercised paths), **zero substrate/gate risk** — the natural resting point | measure the rung distribution; *mostly downgrades, rare impeachments* = healthy; mostly IMPEACHMENT = too credulous, fix before proceeding |
+| **0 — spine** ✅ **LANDED** | **(prereq, §14-A) DB boundary effects in the corpus** — extend capture (`otelsql`) + `ingest`/`coverage` so the join's effect vocabulary includes `db <verb>` writes, not only the otelaws bus/dep surface; then witness types + the `observed × unreachable` join (fold in `coverage.Delta` for the other direction); `Verdict: CANDIDATE`, disclosure-only | coverage-calibrated behavioral view **that can see the marquee `db DELETE` case** | run on real corpora; ~zero candidates ⇒ analyzer already sound, **stop** — **measured:** 0 candidates on loansvc/obligsvc/blindsvc (sound), and the cell fires on a genuine *undisclosed missed root* (the impeachsvc fixture); the real candidate justified proceeding to Phase 1 |
+| **1 — ladder** ✅ **LANDED** | the five rungs (`internal/impeach/ladder.go`) → candidates classified IMPEACHMENT vs the four downgrades (`NOT-A-CONTRADICTION`/`VERSION-SKEW`/`LABEL-MISMATCH`/`CROSS-SERVICE`/`CAPTURE-UNTRUSTED`); ladder recorded **whole**, verdict = first failing rung | a trustworthy counterexample finder (over exercised paths), **zero substrate/gate risk** — the natural resting point | measure the rung distribution; *mostly downgrades, rare impeachments* = healthy; mostly IMPEACHMENT = too credulous, fix before proceeding — **measured:** downgrade-dominated, **0 IMPEACHMENT without attested provenance** (no commit stamp on the corpus today ⇒ `VERSION-SKEW`, §14-D); the genuine impeachsvc candidate promotes to IMPEACHMENT only under a stamped graph + matching production capture — healthy |
 | **2 — severance L0** | coarse `Site` (entry+effect anchors) + the proof obligation | impeachments carry a coarse location + known/unknown sort | proof obligation holds; spot-check Sites |
 | **3 — map + `canonFQN`** | the map, `canonFQN` + parity test, L1 tags; precise Sites | precise localization, sharp `absent-from-graph` | parity test green + self-extinguish **dry run** |
 | **4 — loop** | propose → human-ratify → blind-spot/reclaimer; durable record | findings resolve instead of re-firing | per-repair self-extinguish test |
@@ -452,6 +459,16 @@ doesn't already exist and the probe that tells you whether any of the rest is wo
 doing; but fed only by the existing otelaws-only effect vocabulary it would abstain
 on exactly the highest-value target (a false-`NEVER` on `db DELETE`), so the corpus
 must carry DB effects before the probe is meaningful.
+
+**Next (Phases 0–1 + the capture-side stamp done):** the read-only detector and
+the ladder are landed and measured healthy, and the **capture-side code-identity
+stamp** that the `code-identity` rung consumes is now wired end to end (§12.1,
+§14-E): a live corpus self-describes its deploy through `flowmap.code.stamp`, so a
+Phase-1 impeachment is meaningful on real captured behavior rather than only under
+a caller assertion. A committed corpus stays stampless and takes the gated
+identity at audit time. **Phase 2 (severance L0) is the next build.** The remaining
+stamp-adjacent gap is the base-vs-branch *gate* identity (§12.2), which only binds
+at Phase 5.
 
 ---
 
@@ -494,8 +511,16 @@ The risk is admitted in exactly the order it can be retired.**
 1. **The capture-side code-identity stamp.** `code-identity` (§4 rung 2) needs the
    trace to carry the deployed commit. Which resource attribute, and how the capture
    harness sets it, is unspecified — it is the hinge of the whole ladder.
-   **STANDING** — a capture-pipeline decision for Phase 1, not Phase 0 (§14-D); the
-   ingest model carries no commit stamp today.
+   **RESOLVED (§14-E)** — a flowmap-specific OTel **resource** attribute
+   `flowmap.code.stamp` (`capture.CodeStampAttr`, one owner), read post-hoc by
+   `otlpjson`/`ingest` and set in-process by the harness `WithCodeStamp` option,
+   rides to `ir.CanonicalTrace.Stamp`. It mirrors the graph's `--stamp`:
+   caller-supplied, never derived, and **excluded from snapshot equality** (a
+   committed golden stays stampless, so it never churns per deploy — identity is
+   injected at audit time, the live corpus self-describes). `impeach.Audit`
+   reconciles the two sources (`resolveIdentity`) and fails closed on a mixed or
+   contradicted identity. The base-vs-branch *gate* framing (§12.2) is still its own
+   STANDING piece for Phase 5.
 2. **Corpus governance for a gate.** A committed corpus is reproducible but can go
    stale against the reachable surface; a live corpus is current but non-portable.
    The behavior-goldens model (`*.effects.json`, `--update`) is the likely answer but
@@ -605,3 +630,23 @@ PROVEN / VIOLATED / CANT-PROVE). The code spells them across two layers:
   carries only `Synthesized bool`. Phase 0 is L0 (entry+effect anchors) and needs none
   of them; this is recorded so Phase 1 (rung 2, §12.1) and Phase 3 (the map, §7) budget
   the capture-pipeline work honestly rather than assuming a field that isn't there.
+  *(Update: the deployed-commit stamp **now exists** — §14-E. `CaptureProvenance`
+  (rung 5) and the `flowmap.fqn` tags (Phase 3) remain absent.)*
+
+**E — The capture-side code-identity stamp, wired (resolves §12.1).** Built before
+Phase 2 to make the `code-identity` rung meaningful on a real corpus. The deployed
+commit travels as a flowmap-specific OTel **resource** attribute,
+`flowmap.code.stamp` (`capture.CodeStampAttr` — one owner, keyed identically by
+both capture paths): `otlpjson` folds it off the resource and `ingest` lifts it
+onto the per-service `CapturedFlow.Stamp` (failing closed on a mixed-deploy
+disagreement), and the in-process harness sets it via `WithCodeStamp`. The
+canonicalizer carries it to `ir.CanonicalTrace.Stamp`. It deliberately mirrors the
+static graph's `--stamp` discipline: **caller-supplied, never derived** (deriving
+from git HEAD would make the trace a function of more than the captured behavior),
+and **excluded from snapshot equality** (`golden.canonicalBytes` zeroes it and the
+`-update` writer is stampless, so a committed golden never carries a run-varying
+stamp and never churns per deploy). `impeach.Audit` reconciles the corpus-carried
+identity with an optionally-injected one (`resolveIdentity`): the live corpus
+self-describes, the committed corpus takes the gated SHA, and any contradiction or
+mixed corpus fails closed to `VERSION-SKEW`. Determinism is preserved throughout —
+the report stays a pure function of `(graph, corpus)`.

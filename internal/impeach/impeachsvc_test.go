@@ -47,10 +47,10 @@ func TestImpeachsvcCatchesUndisclosedMissedRoot(t *testing.T) {
 
 	purge := loadTrace(t, impeachTraceAdminPurge)
 	create := loadTrace(t, impeachTraceLoanCreate)
-	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create})
+	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, Provenance{})
 
 	// Determinism over the real corpus.
-	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}).Digest {
+	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, Provenance{}).Digest {
 		t.Error("report not order-independent over the real corpus")
 	}
 
@@ -64,8 +64,13 @@ func TestImpeachsvcCatchesUndisclosedMissedRoot(t *testing.T) {
 	if w.Claim.Reachability != ReachUnreachable {
 		t.Errorf("Reachability = %q, want %q (named effect, no discovered route reaches it)", w.Claim.Reachability, ReachUnreachable)
 	}
-	if w.Verdict != VerdictCandidate {
-		t.Errorf("Verdict = %q, want %q", w.Verdict, VerdictCandidate)
+	// The genuine contradiction is found, but this real corpus carries no code
+	// identity (the trace model has no commit stamp yet, §14-D), so the ladder
+	// caps it at VERSION-SKEW — fail-closed, not promoted to a bare IMPEACHMENT on
+	// a graph it cannot prove the trace ran. The promotion is exercised separately
+	// (TestImpeachsvcLadderPromotesWithProvenance) once the substrate is supplied.
+	if w.Verdict != DowngradeVersionSkew {
+		t.Errorf("Verdict = %q, want %q (real corpus has no code identity)", w.Verdict, DowngradeVersionSkew)
 	}
 	// The witness carries the runtime counterexample: the entry it was reached
 	// from (the missed admin route) and the enriched observed op (with DB system).
@@ -98,8 +103,63 @@ func TestImpeachsvcDiscoveredRouteAloneIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load graph: %v", err)
 	}
-	r := Audit("impeachsvc", graph.NewIndex(g), []*ir.CanonicalTrace{loadTrace(t, impeachTraceLoanCreate)})
+	r := Audit("impeachsvc", graph.NewIndex(g), []*ir.CanonicalTrace{loadTrace(t, impeachTraceLoanCreate)}, Provenance{})
 	if len(r.Candidates) != 0 {
 		t.Errorf("discovered route alone produced candidates: %+v", r.Candidates)
+	}
+}
+
+// TestImpeachsvcLadderPromotesWithProvenance is the end-to-end IMPEACHMENT proof:
+// the SAME real graph + real captured traces that downgrade to VERSION-SKEW above
+// promote to a true IMPEACHMENT once the capture-side substrate the ladder needs
+// is supplied — a graph stamped with the deployed commit and a matching
+// production capture identity. Every rung clears: static asserts a real negative,
+// the graph is the stamped code the trace ran, the effect is in the one-source DB
+// vocabulary, it is on impeachsvc's own spans, and the capture is production. This
+// is the §10 go/no-go top rung — the ladder can reach IMPEACHMENT, so it is not a
+// detector that only ever downgrades.
+func TestImpeachsvcLadderPromotesWithProvenance(t *testing.T) {
+	g, err := graph.LoadFile(impeachsvcGraph)
+	if err != nil {
+		t.Fatalf("load graph: %v", err)
+	}
+	// Simulate the capture-side substrate Phase 1 budgets but does not yet ship
+	// (§14-D): a deployed-commit stamp on the graph and the matching trace identity.
+	const commit = "deadbeefcafe"
+	g.Stamp = commit
+	ix := graph.NewIndex(g)
+
+	purge := loadTrace(t, impeachTraceAdminPurge)
+	create := loadTrace(t, impeachTraceLoanCreate)
+	prov := Provenance{TraceIdentity: commit, Capture: CaptureProduction}
+	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, prov)
+
+	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, prov).Digest {
+		t.Error("report not order-independent under provenance")
+	}
+	if len(r.Candidates) != 1 {
+		t.Fatalf("want exactly 1 candidate, got %d: %+v", len(r.Candidates), r.Candidates)
+	}
+	w := r.Candidates[0]
+	if w.Verdict != VerdictImpeachment {
+		t.Fatalf("Verdict = %q, want %q; ladder = %+v", w.Verdict, VerdictImpeachment, w.Rungs)
+	}
+	// The ladder is recorded WHOLE and every rung cleared (Passed == benign
+	// explanation ruled out): an IMPEACHMENT is exactly "all five rungs passed".
+	if len(w.Rungs) != 5 {
+		t.Fatalf("want the full 5-rung ladder recorded, got %d: %+v", len(w.Rungs), w.Rungs)
+	}
+	wantOrder := []string{RungStaticAssertsNoPath, RungCodeIdentity, RungLabel, RungServiceScope, RungCaptureFidelity}
+	for i, rung := range w.Rungs {
+		if rung.Name != wantOrder[i] {
+			t.Errorf("rung %d = %q, want %q (ladder must be in §4 order)", i, rung.Name, wantOrder[i])
+		}
+		if !rung.Passed {
+			t.Errorf("rung %q did not pass on the promotion path: %s", rung.Name, rung.Evidence)
+		}
+	}
+	// Provenance is recorded in the report header (the numerator's identity, §5).
+	if r.TraceIdentity != commit || r.CaptureProvenance != CaptureProduction {
+		t.Errorf("report dropped provenance: identity=%q capture=%q", r.TraceIdentity, r.CaptureProvenance)
 	}
 }

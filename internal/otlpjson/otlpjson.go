@@ -128,13 +128,14 @@ func Decode(r io.Reader) ([]capture.Span, error) {
 		}
 		for _, rs := range rss {
 			service := resourceService(rs.Resource.Attributes)
+			stamp := resourceStamp(rs.Resource.Attributes)
 			scopes := rs.ScopeSpans
 			if len(scopes) == 0 {
 				scopes = rs.InstrumentationLibrarySpans // pre-1.0 spelling
 			}
 			for _, ss := range scopes {
 				for _, sp := range ss.Spans {
-					out = append(out, toCapture(sp, service))
+					out = append(out, toCapture(sp, service, stamp))
 				}
 			}
 		}
@@ -150,18 +151,23 @@ func Decode(r io.Reader) ([]capture.Span, error) {
 }
 
 // toCapture maps one OTLP/JSON span into the internal model. Only service.name
-// is folded from the resource (the per-service split key); the rest of the OTel
-// resource (host/pod/sdk/k8s …) is deliberately not folded — the canon allowlist
-// would drop it anyway, and folding it onto every span both wastes a per-span
-// map copy and risks an opkey-relevant resource attribute (e.g. peer.service,
-// db.system) contaminating every span's op key. Span attributes win on conflict.
-func toCapture(sp spanJSON, service string) capture.Span {
-	attrs := make(map[string]string, len(sp.Attributes)+1)
+// and the code-identity stamp are folded from the resource (the per-service split
+// key, and the deployed-commit identity ingest lifts onto the CapturedFlow); the
+// rest of the OTel resource (host/pod/sdk/k8s …) is deliberately not folded — the
+// canon allowlist would drop it anyway, and folding it onto every span both wastes
+// a per-span map copy and risks an opkey-relevant resource attribute (e.g.
+// peer.service, db.system) contaminating every span's op key. Neither folded key
+// is opkey-relevant. Span attributes win on conflict.
+func toCapture(sp spanJSON, service, stamp string) capture.Span {
+	attrs := make(map[string]string, len(sp.Attributes)+2)
 	for _, kv := range sp.Attributes {
 		attrs[kv.Key] = kv.Value.str()
 	}
 	if _, ok := attrs[serviceNameAttr]; !ok && service != "" {
 		attrs[serviceNameAttr] = service
+	}
+	if _, ok := attrs[capture.CodeStampAttr]; !ok && stamp != "" {
+		attrs[capture.CodeStampAttr] = stamp
 	}
 	cs := capture.Span{
 		TraceID:  sp.TraceID,
@@ -228,6 +234,20 @@ func unixNano(raw json.RawMessage) time.Time {
 func resourceService(kvs []keyValue) string {
 	for _, kv := range kvs {
 		if kv.Key == serviceNameAttr {
+			return kv.Value.str()
+		}
+	}
+	return ""
+}
+
+// resourceStamp extracts the flowmap code-identity stamp (the deployed commit)
+// from the resource attributes, or "" if absent. Read here and lifted onto the
+// CapturedFlow by ingest so the behavioral-impeachment ladder can match it against
+// the static graph's stamp; absent keeps the trace stampless (identity
+// unestablished), never a guess.
+func resourceStamp(kvs []keyValue) string {
+	for _, kv := range kvs {
+		if kv.Key == capture.CodeStampAttr {
 			return kv.Value.str()
 		}
 	}

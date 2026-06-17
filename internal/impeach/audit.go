@@ -44,8 +44,17 @@ type Report struct {
 	GraphTool  string `json:"graph_tool,omitempty"`
 	GraphAlgo  string `json:"graph_algo,omitempty"`
 
-	// CorpusDigest pins the exact canonical trace set audited (the NUMERATOR).
-	CorpusDigest string `json:"corpus_digest"`
+	// TraceIdentity is the NUMERATOR's code identity (the deployed-commit stamp
+	// the ladder's code-identity rung matches against GraphStamp). Absent ("")
+	// means unestablished — by representation that forces every candidate to
+	// VERSION-SKEW (§5). CorpusDigest pins the exact canonical trace set audited.
+	TraceIdentity string `json:"trace_identity,omitempty"`
+	CorpusDigest  string `json:"corpus_digest"`
+
+	// CaptureProvenance is the self-declared capture fidelity (production |
+	// integration | synthetic). A synthetic/absent capture caps every candidate at
+	// CAPTURE-UNTRUSTED (§4 rung 5). Recorded verbatim, never inferred (§5).
+	CaptureProvenance string `json:"capture_provenance,omitempty"`
 
 	Caveats []string `json:"caveats,omitempty"`
 
@@ -64,7 +73,8 @@ type Witness struct {
 	Effect   string      `json:"effect"`   // the canonical join key (the §7 key space)
 	Claim    Claim       `json:"claim"`    // the static negative under test
 	Observed Observation `json:"observed"` // the runtime counterexample
-	Verdict  string      `json:"verdict"`  // VerdictCandidate at Phase 0
+	Rungs    []Rung      `json:"rungs"`    // the FULL ordered downgrade ladder (§4), recorded whole
+	Verdict  string      `json:"verdict"`  // IMPEACHMENT | <downgrade> — the first failing rung's disclosure
 }
 
 // Claim is the static side of the contradiction.
@@ -84,9 +94,14 @@ type Observation struct {
 }
 
 // Audit joins a stamped graph against a canonical trace corpus and returns the
-// Phase-0 witness report. It is a pure function of (ix, traces): all ordering is
-// intrinsic (effect key, flow, op), no map iteration or arrival order reaches the
-// output, so the report — and its digest — is byte-identical across runs.
+// witness report, each candidate classified through the downgrade ladder (§4):
+// IMPEACHMENT or one specific downgrade. It is a pure function of (ix, traces,
+// prov): all ordering is intrinsic (effect key, flow, op), no map iteration or
+// arrival order reaches the output, so the report — and its digest — is
+// byte-identical across runs. prov supplies the ladder's capture-side inputs
+// (code identity, capture fidelity), so the verdicts and digest depend on it; a
+// zero Provenance fails the capture-side rungs closed (every candidate caps at a
+// downgrade, never IMPEACHMENT).
 //
 // Scope (disclosed in Caveats, not hidden): the join covers bus and DB boundary
 // effects, the two kinds with a parity-proven label reconciliation (DBEffectKey,
@@ -97,14 +112,20 @@ type Observation struct {
 // RECLAIMED-LIVE cell), so such an effect is excluded from candidates rather than
 // laundered into a false "absent" negative (tenet 4: a negative holds only
 // outside the disclosed blind spots).
-func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace) Report {
+func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace, prov Provenance) Report {
+	// Resolve the corpus's code identity: a LIVE corpus self-describes through the
+	// traces' own Stamp; a committed (stampless) corpus takes the caller's injected
+	// identity. The resolution feeds the ladder's code-identity rung.
+	prov.TraceIdentity = resolveIdentity(traces, prov)
 	r := Report{
-		Service:      service,
-		GraphStamp:   ix.Stamp(),
-		GraphTool:    ix.Tool(),
-		GraphAlgo:    ix.Algo(),
-		CorpusDigest: corpusDigest(traces),
-		Candidates:   []Witness{},
+		Service:           service,
+		GraphStamp:        ix.Stamp(),
+		GraphTool:         ix.Tool(),
+		GraphAlgo:         ix.Algo(),
+		TraceIdentity:     prov.TraceIdentity,
+		CorpusDigest:      corpusDigest(traces),
+		CaptureProvenance: prov.Capture,
+		Candidates:        []Witness{},
 	}
 
 	named, reachable, blind, busDynamic, dbUnreadable := staticEffectSets(ix)
@@ -118,6 +139,7 @@ func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace) Report 
 		caveats = append(caveats, plural(dbUnreadable, "opaque DB effect")+" in the graph: an unnamed observed DB op is treated as covered by these (reclaimed-live), never impeached")
 	}
 	caveats = append(caveats, "Phase 0 joins caused effects only: bus PUBLISH and DB. Inbound CONSUME/HTTP-server spans are entries, not effects; outbound HTTP/RPC is deferred (label parity)")
+	caveats = append(caveats, "Phase 1 downgrade ladder (§4): code-identity and capture-fidelity consume caller-supplied provenance absent from the trace model today (§14-D); without it every candidate caps at a downgrade (VERSION-SKEW/CAPTURE-UNTRUSTED), never IMPEACHMENT")
 
 	blindCovered := 0
 	for _, o := range observed {
@@ -162,6 +184,15 @@ func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace) Report 
 	}
 	sort.Strings(gaps)
 	r.CoverageGaps = gaps
+
+	// Classify each candidate through the downgrade ladder (§4): CANDIDATE becomes
+	// IMPEACHMENT or a specific downgrade, with the full ordered ladder recorded.
+	// Done before the sort/digest so the ladder is part of the byte-identical
+	// artifact, and after the candidate set is final so the corpus-level provenance
+	// (graph stamp, supplied identity/capture) is the same for every witness.
+	for i := range r.Candidates {
+		r.Candidates[i].Rungs, r.Candidates[i].Verdict = classify(r.Candidates[i], ix, service, prov)
+	}
 
 	sort.Strings(caveats)
 	r.Caveats = caveats
@@ -378,6 +409,13 @@ func lessObserved(a, b observedEffect) bool {
 // per-trace digests, hashed. So the corpus identity is independent of trace
 // arrival order and of a trace appearing twice — the report is a function of
 // WHICH canonical traces were seen, not how the slice was assembled (§5).
+//
+// Each trace is digested with its code-identity Stamp zeroed, mirroring
+// golden.canonicalBytes: the Stamp is run-varying provenance EXCLUDED from trace
+// equality, so two captures of one flow on different deploys are the same
+// canonical trace and yield the same corpus digest. The corpus's deploy identity
+// is carried separately as Report.TraceIdentity, never folded into the structural
+// digest (else this digest would churn per deploy).
 func corpusDigest(traces []*ir.CanonicalTrace) string {
 	seen := map[string]bool{}
 	var digs []string
@@ -385,7 +423,9 @@ func corpusDigest(traces []*ir.CanonicalTrace) string {
 		if t == nil {
 			continue
 		}
-		d := canonicalDigest(t)
+		cp := *t
+		cp.Stamp = ""
+		d := canonicalDigest(&cp)
 		if !seen[d] {
 			seen[d] = true
 			digs = append(digs, d)
