@@ -114,6 +114,36 @@ func TestCanonFQNParity(t *testing.T) {
 	}
 }
 
+// TestCanonFQNDottedFinalSegment pins the §12.5 close: over a dotted-final-segment
+// import path (gopkg.in/yaml.v3), ⊥ stays SYMMETRIC across the two spellings, so the
+// sharp absent-from-graph signal cannot mint a phantom. A value method ⊥s on BOTH
+// sides (the runtime spelling is genuinely ambiguous); a pointer method and a
+// package func reconcile (robust markers / identical strings).
+func TestCanonFQNDottedFinalSegment(t *testing.T) {
+	// Value method: both ⊥ (the new SSA-side guard matches the runtime's >2-segment ⊥).
+	if k, ok := canonFQN("(gopkg.in/yaml.v3.Cfg).Marshal"); ok {
+		t.Errorf("ssa value method on dotted package should be ⊥, got %+v", k)
+	}
+	if k, ok := canonFQN("gopkg.in/yaml.v3.Cfg.Marshal"); ok {
+		t.Errorf("runtime value method on dotted package should be ⊥, got %+v", k)
+	}
+	// Pointer method: both key to the SAME key (pkg keeps the dotted final segment).
+	ssaPtr, okSSA := canonFQN("(*gopkg.in/yaml.v3.Cfg).Marshal")
+	rtPtr, okRT := canonFQN("gopkg.in/yaml.v3.(*Cfg).Marshal")
+	if !okSSA || !okRT || ssaPtr != rtPtr {
+		t.Errorf("pointer method on dotted package must reconcile: ssa(%v,%v) runtime(%v,%v)", ssaPtr, okSSA, rtPtr, okRT)
+	}
+	if ssaPtr.Pkg != "gopkg.in/yaml.v3" || ssaPtr.Recv != "Cfg" || !ssaPtr.Ptr {
+		t.Errorf("pointer method key = %+v, want pkg=gopkg.in/yaml.v3 recv=Cfg ptr", ssaPtr)
+	}
+	// Package func: identical spelling ⇒ identical key (consistent, a match not a phantom).
+	fa, oka := canonFQN("gopkg.in/yaml.v3.Marshal")
+	fb, okb := canonFQN("gopkg.in/yaml.v3.Marshal")
+	if !oka || !okb || fa != fb {
+		t.Errorf("package func on dotted package must key identically: %v/%v %v/%v", fa, oka, fb, okb)
+	}
+}
+
 // TestCanonFQNTotalAndPure pins the §7 properties relied on for determinism: the
 // function never panics on adversarial input (total) and returns the same result
 // on repeated calls (pure). A parseable input also carries no ⊥ reason, and a ⊥

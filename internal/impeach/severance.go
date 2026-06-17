@@ -99,9 +99,12 @@ type Severance struct {
 
 	// AbsentFromGraph is the sharp L1 signal (§7): an internal span whose FQN tag
 	// keys to a function the graph has NO node for — a directly localized missing
-	// node, sharper than the walk. It is a WEAK HINT at L1 (it is sound only once
-	// canonFQN ⊥-symmetry is fuzz-proven, §12.5), so it rides as disclosure beside
-	// the walk's Site, never replacing it. "" when no internal tag was absent.
+	// node, sharper than the walk. It is now SOUND at L1: canonFQN ⊥-symmetry is
+	// fuzz-proven over the full domain including dotted-final-segment paths (§12.5
+	// CLOSED), so a tag that keys-but-is-absent is a real missing node, never a
+	// phantom from an asymmetric ⊥. It still rides as disclosure beside the walk's
+	// Site (the walk's severed node is the repair target); a reader may now trust it
+	// as a concrete missing-node localization. "" when no internal tag was absent.
 	AbsentFromGraph string `json:"absent_from_graph,omitempty"`
 }
 

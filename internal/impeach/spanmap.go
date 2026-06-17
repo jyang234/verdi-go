@@ -31,9 +31,9 @@ const FQNTagKey = capture.FQNTagKey
 // Internal-span map outcomes (§7). Only `mapped` is an anchor; the rest are
 // honest non-anchors. `absent-from-graph` is special: a tag that parses to a valid
 // FQNKey the graph has NO node for is a DIRECTLY localized missing node — sharper
-// than the walk — but sound only when canonFQN's ⊥ is symmetric, so it is trusted
-// at L2 (the tag IS the ssa string) and a WEAK HINT at L1 until the symmetry fuzz
-// proves it (§7 fail-closed property 1, §12.5).
+// than the walk — sound only when canonFQN's ⊥ is symmetric, which is now
+// fuzz-proven over the full domain INCLUDING dotted-final-segment paths (§12.5
+// CLOSED), so it is trusted at both L2 (the tag IS the ssa string) and L1.
 const (
 	MapMapped          = "mapped"
 	MapAbsentFromGraph = "absent-from-graph"
