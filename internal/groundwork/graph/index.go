@@ -331,5 +331,16 @@ func (ix *Index) Frontier() *FrontierSection { return ix.g.Frontier }
 // is computed on, and what a policy's recorded Substrate is checked against.
 func (ix *Index) Algo() string { return ix.g.Algo }
 
+// Stamp returns the producer's caller-supplied code identity (typically the
+// deployed commit SHA), or "" when unrecorded. A behavioral-impeachment witness
+// records it as the impeached graph's identity (the denominator): an impeachment
+// is only meaningful against the graph for the code the trace ran (R11).
+func (ix *Index) Stamp() string { return ix.g.Stamp }
+
+// Tool returns the flowmap build that produced the graph (its buildinfo
+// version), or "" when unrecorded — the PRODUCER's identity, distinct from the
+// CODE identity Stamp carries.
+func (ix *Index) Tool() string { return ix.g.Tool }
+
 // Entrypoints returns the graph's named roots (routes, topics) with handlers.
 func (ix *Index) Entrypoints() []Entrypoint { return ix.g.Entrypoints }
