@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -115,6 +116,18 @@ func TestVerifyCorpusContradictoryCaptureDoesNotBlock(t *testing.T) {
 	pol := writePolicy(t, gatingPolicy)
 	if err := run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--capture", "production"}); err != nil {
 		t.Fatalf("a contradicting capture grade must fail closed (no block), got %v", err)
+	}
+}
+
+// TestVerifyCorpusRejectsUnknownGrade is the boundary fail-closed, parity with the
+// MCP server (both validate via capture.AssertableGrade): an unrecognized --capture
+// grade is refused up front, never laundered into a silent CAPTURE-UNTRUSTED downgrade.
+func TestVerifyCorpusRejectsUnknownGrade(t *testing.T) {
+	g := stampedImpeachGraph(t)
+	pol := writePolicy(t, gatingPolicy)
+	err := run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--capture", "staging"})
+	if err == nil || !strings.Contains(err.Error(), "grade must be") {
+		t.Fatalf("an unknown --capture grade must be refused, got %v", err)
 	}
 }
 

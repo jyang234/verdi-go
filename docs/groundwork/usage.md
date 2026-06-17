@@ -782,8 +782,9 @@ including effects possibly committed before the fault), `exceptions`,
 `fleet-events`), `fitness`, `impeach`, and
 `reload`.
 
-The `impeach` tool is **audit-only and never a gate** (it appears only when the
-server is started with `--corpus` and `--policy`). It joins the loaded graph
+The `impeach` tool is **audit-only and never a gate** (it is always listed, but
+returns an error unless the server was started with both `--corpus` and `--policy`).
+It joins the loaded graph
 against a committed `*.golden.json` behavioral corpus and discloses *impeachment
 candidates* — effects observed in the corpus where static analysis placed none —
 each classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade

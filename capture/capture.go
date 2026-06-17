@@ -133,6 +133,20 @@ const (
 	CaptureSynthetic   = "synthetic"
 )
 
+// AssertableGrade reports whether g is a capture-fidelity grade a human may
+// ASSERT (via `--capture`): only production and integration, the two that can
+// clear the impeachment capture-fidelity rung. synthetic is producer-set and never
+// asserted (asserting it could only ever cap a witness at CAPTURE-UNTRUSTED), and
+// the empty string means "not asserted" — both fail this check, so a caller
+// validates only grades a user actually typed. This is the ONE source both the
+// verify CLI and the MCP server validate `--capture` against, so the two boundaries
+// can never drift on what a valid assertion is (tenet 2: refuse a bad grade, never
+// launder it into a silent CAPTURE-UNTRUSTED downgrade). Guarded by
+// capture.TestAssertableGrade.
+func AssertableGrade(g string) bool {
+	return g == CaptureProduction || g == CaptureIntegration
+}
+
 // AgreedStamp is the ONE-SOURCE code-identity reduction: the single distinct
 // NON-EMPTY stamp among the inputs, with ok=false when two non-empty stamps
 // disagree. Empty inputs are skipped, so a result of ("", true) means "no stamp

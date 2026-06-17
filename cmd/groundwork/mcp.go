@@ -21,6 +21,8 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 	"github.com/jyang234/golang-code-graph/internal/impeach"
 	"github.com/jyang234/golang-code-graph/ir"
+
+	"github.com/jyang234/golang-code-graph/capture"
 )
 
 const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--corpus <dir>] [--capture production|integration] [--expect <stamp>] [--log <calls.jsonl>]
@@ -137,21 +139,29 @@ func cmdMCP(args []string) error {
 		}
 		srv.p = p
 	}
-	// --capture asserts a behavioral corpus's fidelity grade; without a --corpus to
-	// audit it is a silent no-op of a trust assertion (mirrors the verify CLI guard).
-	// Parse capture FIRST so it is on the server before the corpus that consumes it.
+	// --capture asserts a behavioral corpus's fidelity grade. Only production and
+	// integration may be asserted (capture.AssertableGrade — the ONE source the verify
+	// CLI validates against too); an unrecognized or empty grade is REFUSED here, not
+	// laundered into a silent CAPTURE-UNTRUSTED downgrade deep in the ladder (tenet 2).
 	for _, pair := range capturePairs {
 		grade := pair
-		srv := fleet.lone()
 		if len(servicePairs) > 0 {
 			name, g, ok := strings.Cut(pair, "=")
-			srv = fleet.services[name]
+			srv := fleet.services[name]
 			if !ok || srv == nil {
 				return fmt.Errorf("--capture wants <name>=<grade> naming a --service, got %q", pair)
 			}
 			grade = g
+			if !capture.AssertableGrade(grade) {
+				return fmt.Errorf("--capture for service %q: grade must be %q or %q, got %q", name, capture.CaptureProduction, capture.CaptureIntegration, grade)
+			}
+			srv.capture = grade
+			continue
 		}
-		srv.capture = grade
+		if !capture.AssertableGrade(grade) {
+			return fmt.Errorf("--capture: grade must be %q or %q, got %q", capture.CaptureProduction, capture.CaptureIntegration, grade)
+		}
+		fleet.lone().capture = grade
 	}
 	for _, pair := range corpusPairs {
 		dir := pair
@@ -174,13 +184,27 @@ func cmdMCP(args []string) error {
 		srv.corpus = traces
 		srv.corpusDir = dir
 	}
-	// A capture grade asserted against a service with no corpus is a dangling trust
-	// claim — fail closed rather than accept it as a silent no-op.
+	// Fail closed on a dangling impeach configuration, symmetrically: a capture grade
+	// with no corpus to grade, OR a corpus with no policy to integrate its witnesses
+	// against (impeach needs both — Resolve folds witnesses into must_not_reach). Name
+	// the service only in the fleet form, where the user supplied the name; the
+	// single-graph form has a synthetic name (the graph path) that would only confuse.
+	// len(), not == nil: loadCommittedCorpus never returns a non-nil empty slice today,
+	// but the guard states the intent ("no corpus") rather than relying on that.
 	for _, name := range fleet.names {
 		s := fleet.services[name]
-		if s.capture != "" && s.corpus == nil {
-			return fmt.Errorf("--capture for service %q requires a --corpus (it asserts the fidelity grade of a behavioral corpus)", name)
+		svcCtx := ""
+		if len(servicePairs) > 0 {
+			svcCtx = fmt.Sprintf(" for service %q", name)
 		}
+		if s.capture != "" && len(s.corpus) == 0 {
+			return fmt.Errorf("--capture%s requires --corpus (it asserts the fidelity grade of a behavioral corpus)", svcCtx)
+		}
+		if len(s.corpus) > 0 && s.p == nil {
+			return fmt.Errorf("--corpus%s requires --policy (the impeach audit integrates witnesses against the policy's must_not_reach rules)", svcCtx)
+		}
+		// Inputs are final: render the impeach audit once (refreshed only on reload).
+		s.computeImpeach()
 	}
 	if hasLog {
 		// The E4 measurement apparatus: a deterministic transcript of tool
@@ -312,6 +336,14 @@ type mcpServer struct {
 	corpus    []*ir.CanonicalTrace
 	corpusDir string
 	capture   string
+
+	// impeachBody is the rendered impeach audit, computed ONCE when corpus+policy are
+	// present (computeImpeach) and refreshed only on reload — the audit is a pure
+	// function of (ix, corpus, capture, rules), all immutable between reloads, so
+	// recomputing the graph-reachability + corpus-hash work on every call would be
+	// wasted (it ran under the read lock, so concurrent callers repeated it). "" when
+	// the lens is unconfigured; the per-call staleNote prefix stays dynamic.
+	impeachBody string
 }
 
 func (s *mcpServer) load() error {
@@ -788,6 +820,7 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 			s.expect, s.hasExpect = old, oldHas
 			return toolError("reload failed (previous graph still served): " + err.Error())
 		}
+		s.computeImpeach() // the graph changed; re-audit against the (unchanged) corpus
 		return toolText("graph reloaded from " + s.path)
 	case "ground":
 		card, err := ground.For(ix, p, a.FQN)
@@ -857,27 +890,39 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 		fmt.Fprintf(&b, "\n%d dead exception(s), %d dead rule pattern(s)\n", fitness.DeadCount(xs), fitness.DeadPatternCount(ls))
 		return withStale(toolText(b.String()))
 	case "impeach":
-		if s.corpus == nil {
+		if len(s.corpus) == 0 {
 			return toolError("the server was started without --corpus; impeach needs a committed behavioral corpus to audit the graph against")
 		}
 		if p == nil {
 			return toolError("the server was started without --policy; impeach integrates witnesses against the policy's must_not_reach rules and needs one")
 		}
-		return withStale(toolText(s.impeachCard(p)))
+		return withStale(toolText(s.impeachBody)) // precomputed at load/reload; staleNote stays dynamic
 	default:
 		return toolError("unknown tool: " + name)
 	}
 }
 
-// impeachCard renders the audit-only impeachment disclosure for this service: the
-// loaded graph joined against its committed corpus, resolved against the policy's
-// must_not_reach rules. It runs at OriginLive ON PURPOSE — the lens NEVER gates, so
-// GateBlockers is structurally empty and the agent can never read this as a merge
-// verdict against a possibly-local graph; the gate is verify --corpus over CI graphs
-// (§13 crack #2). Every candidate is disclosed with its ladder verdict regardless, so
-// "observe-first" holds. Pure function of (graph, corpus, capture, rules): same
-// inputs, byte-identical text.
-func (s *mcpServer) impeachCard(p *policy.Policy) string {
+// computeImpeach renders the audit-only impeachment disclosure for this service and
+// caches it in s.impeachBody: the loaded graph joined against its committed corpus,
+// resolved against the policy's must_not_reach rules. It runs at OriginLive ON
+// PURPOSE — the lens NEVER gates, so GateBlockers is structurally empty and the agent
+// can never read this as a merge verdict against a possibly-local graph; the gate is
+// verify --corpus over CI graphs (§13 crack #2). Every candidate is disclosed with
+// its ladder verdict regardless, so "observe-first" holds.
+//
+// Computed ONCE (here, called when inputs are final and on every reload) rather than
+// per call: the body is a pure function of (graph, corpus, capture, rules) — all
+// immutable between reloads — so the same inputs yield byte-identical text, and
+// re-running the graph-reachability BFS + corpus hash on each read-locked call would
+// be wasted work repeated across concurrent clients. A no-op until both corpus and
+// policy are present (the lens is unconfigured otherwise); the per-call staleNote is
+// added at call time, never cached.
+func (s *mcpServer) computeImpeach() {
+	if len(s.corpus) == 0 || s.p == nil {
+		s.impeachBody = ""
+		return
+	}
+	p := s.p
 	prov := impeach.Provenance{TraceIdentity: s.ix.Stamp(), Capture: s.capture}
 	r := impeach.Audit(p.Service, s.ix, s.corpus, prov)
 	res := impeach.Resolve(r, s.ix, p.MustNotReach, impeach.OriginLive)
@@ -924,7 +969,7 @@ func (s *mcpServer) impeachCard(p *policy.Policy) string {
 		fmt.Fprintf(&b, "\ncorpus: %d golden(s) under %s, loaded at startup — restart to refresh (the digest above pins the exact set audited)\n", len(s.corpus), s.corpusDir)
 	}
 	b.WriteString("\nThis lens DISCLOSES; it does not gate. The deterministic merge gate is `groundwork verify --corpus` over CI-built base/branch graphs.\n")
-	return b.String()
+	s.impeachBody = b.String()
 }
 
 func toolText(text string) map[string]any {

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/buildinfo"
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
@@ -628,6 +629,12 @@ func cmdVerify(args []string) error {
 	// so fail loud rather than discard it.
 	if hasCapture && !hasCorpus {
 		return fmt.Errorf("--capture %q requires --corpus (it asserts the fidelity grade of a behavioral corpus)", captureArg)
+	}
+	// Only production/integration may be asserted (capture.AssertableGrade — the same
+	// ONE source the MCP server validates against); an unrecognized grade is refused
+	// here, never laundered into a silent CAPTURE-UNTRUSTED downgrade in the ladder.
+	if hasCapture && !capture.AssertableGrade(captureArg) {
+		return fmt.Errorf("--capture: grade must be %q or %q, got %q", capture.CaptureProduction, capture.CaptureIntegration, captureArg)
 	}
 	scope := splitComma(scopeArg)
 	p, base, branch, err := loadReviewInputs(rest[0], rest[1], rest[2])

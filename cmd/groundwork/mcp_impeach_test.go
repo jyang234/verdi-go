@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
 
@@ -37,6 +40,7 @@ func impeachServer(t *testing.T) *mcpServer {
 	if err := srv.load(); err != nil { // sets ix + mtime exactly as cmdMCP does
 		t.Fatalf("load server: %v", err)
 	}
+	srv.computeImpeach() // cmdMCP renders the audit once when inputs are final
 	return srv
 }
 
@@ -112,7 +116,7 @@ func TestMCPImpeachFailsClosedWithoutInputs(t *testing.T) {
 func TestMCPCaptureRequiresCorpus(t *testing.T) {
 	g := stampedImpeachGraph(t)
 	err := run([]string{"mcp", g, "--capture", "production"})
-	if err == nil || !strings.Contains(err.Error(), "requires a --corpus") {
+	if err == nil || !strings.Contains(err.Error(), "requires --corpus") {
 		t.Fatalf("--capture without --corpus must fail closed, got %v", err)
 	}
 }
@@ -125,6 +129,7 @@ func TestMCPCaptureRequiresCorpus(t *testing.T) {
 func TestMCPImpeachContradictoryCaptureDowngrades(t *testing.T) {
 	srv := impeachServer(t)
 	srv.capture = "production" // contradicts the corpus's self-declared "integration"
+	srv.computeImpeach()       // re-render with the changed grade
 	text, isErr := resultText(t, srv.call("impeach", toolArgs{}))
 	if isErr {
 		t.Fatalf("impeach returned an error result: %s", text)
@@ -134,5 +139,68 @@ func TestMCPImpeachContradictoryCaptureDowngrades(t *testing.T) {
 	}
 	if !strings.Contains(text, "CAPTURE-UNTRUSTED") {
 		t.Errorf("expected the candidate capped at CAPTURE-UNTRUSTED on a contradicted grade:\n%s", text)
+	}
+}
+
+// TestMCPCaptureRejectsUnknownGrade is the boundary fail-closed for an unrecognized
+// grade: an unknown --capture value is REFUSED at startup, not silently demoted to
+// CAPTURE-UNTRUSTED deep in the ladder. The single-graph error must NOT name a
+// phantom "service" the user never supplied.
+func TestMCPCaptureRejectsUnknownGrade(t *testing.T) {
+	g := stampedImpeachGraph(t)
+	err := run([]string{"mcp", g, "--corpus", corpusDir, "--capture", "staging"})
+	if err == nil || !strings.Contains(err.Error(), "grade must be") {
+		t.Fatalf("an unknown --capture grade must be refused at startup, got %v", err)
+	}
+	if strings.Contains(err.Error(), "service") {
+		t.Errorf("single-graph error must not name a phantom service: %v", err)
+	}
+}
+
+// TestMCPCorpusRequiresPolicy mirrors the capture guard symmetrically: a corpus with
+// no policy to integrate its witnesses against is a dangling impeach configuration,
+// refused at startup rather than deferred to a call-time error.
+func TestMCPCorpusRequiresPolicy(t *testing.T) {
+	g := stampedImpeachGraph(t)
+	err := run([]string{"mcp", g, "--corpus", corpusDir})
+	if err == nil || !strings.Contains(err.Error(), "requires --policy") {
+		t.Fatalf("--corpus without --policy must fail closed at startup, got %v", err)
+	}
+}
+
+// TestMCPImpeachReloadReaudits pins the caching invalidation: the audit body is
+// computed once and refreshed on reload. A reload that swaps in a graph whose stamp
+// no longer matches the (stampless, committed) corpus must re-derive the verdict —
+// the candidate downgrades from IMPEACHMENT to a code-identity downgrade (VERSION-
+// SKEW), proving the cached body is not stale after the graph changes underneath it.
+func TestMCPImpeachReloadReaudits(t *testing.T) {
+	srv := impeachServer(t)
+	before, _ := resultText(t, srv.call("impeach", toolArgs{}))
+	if !strings.Contains(before, "IMPEACHMENT") {
+		t.Fatalf("precondition: stamped graph should impeach, got:\n%s", before)
+	}
+	// Rewrite the graph file at srv.path with an empty stamp, then reload. The
+	// committed corpus can no longer establish code identity → VERSION-SKEW.
+	g, err := graph.LoadFile(srv.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Stamp = ""
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srv.path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, isErr := resultText(t, srv.call("reload", toolArgs{})); isErr {
+		t.Fatal("reload failed")
+	}
+	after, _ := resultText(t, srv.call("impeach", toolArgs{}))
+	if strings.Contains(after, "\n• IMPEACHMENT") {
+		t.Errorf("after reload to a stampless graph the cached body was not re-audited (still IMPEACHMENT):\n%s", after)
+	}
+	if !strings.Contains(after, "VERSION-SKEW") {
+		t.Errorf("expected VERSION-SKEW after the stamp no longer matches the corpus:\n%s", after)
 	}
 }
