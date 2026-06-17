@@ -78,7 +78,7 @@ func Resolve(r Report, ix *graph.Index, rules []policy.ReachRule, origin CorpusO
 			continue // only a sound impeachment integrates; a downgrade never gates
 		}
 		surface := effectMatchSurface(ix, w.Effect)
-		entryFn := mapEntry(ix, w.Observed.Entry)
+		fromSurface := witnessFromSurface(ix, *w)
 		dep := map[string]bool{}
 		violated := false
 		for _, rule := range rules {
@@ -86,11 +86,16 @@ func Resolve(r Report, ix *graph.Index, rules []policy.ReachRule, origin CorpusO
 				continue // this rule's `to` does not bind the impeached effect
 			}
 			dep[rule.Name] = true
-			// VIOLATED only when the witnessed entry handler binds the rule's
-			// `from`: then a from→to path the rule forbids was OBSERVED. A missed
-			// root (entryFn == "") cannot bind a `from`, so it stays a bare
-			// impeachment — fail closed, never a false VIOLATED on an unmappable entry.
-			if entryFn != "" && fitness.MatchesAny(entryFn, rule.From) {
+			// VIOLATED when a node on the WITNESSED causal path binds the rule's
+			// `from`: then a from→to path the rule forbids was OBSERVED reaching the
+			// effect (must_not_reach is "no function matching from may reach to", and
+			// every mapped ancestor on the observed chain demonstrably reached it). A
+			// candidate whose path maps no from-binding node stays a bare impeachment
+			// — fail closed, never a false VIOLATED. The path nodes are L1-mapped, so
+			// this inherits the L1 canonFQN caveat (§12.5: sound for clean-final-
+			// segment first-party code); gating is fenced to a committed corpus and a
+			// trusted pipeline anyway, so a human reviews before it blocks.
+			if matchesAnyOf(fromSurface, rule.From) {
 				violated = true
 			}
 		}
@@ -184,6 +189,31 @@ func effectMatchSurface(ix *graph.Index, effect string) []string {
 		}
 	}
 	return sortedKeys(seen)
+}
+
+// witnessFromSurface is the set of graph nodes a must_not_reach `from` pattern may
+// bind to claim this impeachment witnesses a breach: the mapped nodes on the
+// OBSERVED causal path (the entry handler when discovered, plus every L1-localized
+// path node) — but NOT the effect emitters, which trivially "reach" the effect they
+// emit. Derived from the localizer's Severance.Anchors (the one place the path is
+// projected onto the graph), minus the emitters, so the from-binding can never
+// drift from what the severance walk mapped. Empty at L0 for a missed root (no
+// mapped path node), which fail-closes that case to a bare impeachment.
+func witnessFromSurface(ix *graph.Index, w Witness) []string {
+	if w.Severance == nil {
+		return nil
+	}
+	emitters := map[string]bool{}
+	for _, e := range staticEmitters(ix, w.Effect) {
+		emitters[e] = true
+	}
+	var out []string
+	for _, a := range w.Severance.Anchors {
+		if !emitters[a] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // matchesAnyOf reports whether ANY candidate string binds any pattern, via the

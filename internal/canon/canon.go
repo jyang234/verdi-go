@@ -82,9 +82,19 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 	}
 
 	// 3.7 structural normalization: salience filtering as tree contraction. The
-	// root (the tier-1 entry) is never dropped.
+	// root (the tier-1 entry) is never dropped. A sub-threshold internal span is
+	// ALSO kept when it carries an L1 localization tag (flowmap.fqn): it is a
+	// first-party WAYPOINT the behavioral-impeachment severance walk anchors on
+	// (plan §7), so dropping it would erase the very signal it exists to carry.
+	// Scoped to TAGGED spans — only the in-process harness producer sets the tag, so
+	// post-hoc/production ingestion (untagged) prunes compute exactly as before, and
+	// an untagged internal compute span is still dropped. The keep is deterministic
+	// (the tag is a pure function of the call path; ordering/collapse of the kept
+	// span already ran in build), so the snapshot stays byte-identical across runs.
 	threshold := cfg.SalienceThreshold()
-	promote.Filter(rootSpan, func(s *ir.CanonicalSpan) bool { return s.Tier <= threshold })
+	promote.Filter(rootSpan, func(s *ir.CanonicalSpan) bool {
+		return s.Tier <= threshold || s.Attrs[capture.FQNTagKey] != ""
+	})
 
 	service := cf.Service
 	if service == "" {

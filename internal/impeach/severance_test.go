@@ -7,12 +7,16 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
-// TestSeveranceMissedRoot is the marquee Phase-2 localization: the impeachsvc
-// missed admin route. The DB DELETE is observed from an entry the graph models no
-// root for, so the severance walk localizes to the entry REGISTRATION literal
-// (the seam, §6), classifies it missed-root with EntryDiscovered=false, and sorts
-// it UNDISCLOSED (no frontier marker / blind spot covers it) — the high-value
-// discovery the cell exists to find.
+// TestSeveranceMissedRoot is the marquee localization: the impeachsvc missed admin
+// route. The DB DELETE is observed from an entry the graph models no root for, so
+// the walk classifies it missed-root (EntryDiscovered=false) and sorts it
+// UNDISCLOSED (no frontier marker / blind spot) — the high-value discovery (§3).
+// Because the captured corpus now carries L1 `flowmap.fqn` waypoint tags (the
+// in-process producer + the admin.purge span, plan §7), the Site is the PRECISE
+// severed node — (*Admin).PurgeLedger, the function reachable from no discovered
+// root yet reaching the emitter — rather than the coarse entry literal L0 gives.
+// The Kind stays missed-root (the entry maps to no entrypoint); only the Site's
+// resolution sharpens (§6: precision is a dial, the classification is invariant).
 func TestSeveranceMissedRoot(t *testing.T) {
 	g, err := graph.LoadFile(impeachsvcGraph)
 	if err != nil {
@@ -34,9 +38,14 @@ func TestSeveranceMissedRoot(t *testing.T) {
 	if w.Severance.Kind != SeveranceMissedRoot {
 		t.Errorf("Severance.Kind = %q, want %q", w.Severance.Kind, SeveranceMissedRoot)
 	}
-	// The Site is the entry registration literal — the missed root IS the seam (§6).
-	if w.Severance.Site != "HTTP DELETE /admin/ledger" {
-		t.Errorf("Severance.Site = %q, want the entry registration literal", w.Severance.Site)
+	// L1: the precise severed node the runtime path traversed, reconciled from the
+	// admin.purge waypoint's flowmap.fqn tag.
+	if w.Severance.Level != LevelL1 {
+		t.Errorf("Severance.Level = %q, want %q (the corpus carries fqn waypoint tags)", w.Severance.Level, LevelL1)
+	}
+	const purgeNode = "(*example.com/impeachsvc/internal/admin.Admin).PurgeLedger"
+	if w.Severance.Site != purgeNode {
+		t.Errorf("Severance.Site = %q, want the precise severed node %q", w.Severance.Site, purgeNode)
 	}
 	if w.Observed.EntryDiscovered {
 		t.Error("EntryDiscovered = true, want false (the admin route is not a graph root)")
@@ -46,11 +55,15 @@ func TestSeveranceMissedRoot(t *testing.T) {
 	if w.Severance.FrontierKnown {
 		t.Error("FrontierKnown = true, want false (the missed root is undisclosed)")
 	}
-	// The emitter the graph DID model (Purge) is the coarse anchor the missed-root
-	// walk carries — the unreachable named effect behind the seam.
-	if len(w.Severance.Anchors) != 1 ||
-		w.Severance.Anchors[0] != "(*example.com/impeachsvc/internal/store.Loans).Purge" {
-		t.Errorf("Anchors = %v, want the single unreachable emitter", w.Severance.Anchors)
+	// The anchor chain is the precise path node then the modeled emitter behind it.
+	wantAnchors := []string{purgeNode, "(*example.com/impeachsvc/internal/store.Loans).Purge"}
+	if len(w.Severance.Anchors) != len(wantAnchors) {
+		t.Fatalf("Anchors = %v, want %v", w.Severance.Anchors, wantAnchors)
+	}
+	for i, a := range wantAnchors {
+		if w.Severance.Anchors[i] != a {
+			t.Errorf("Anchors[%d] = %q, want %q", i, w.Severance.Anchors[i], a)
+		}
 	}
 }
 

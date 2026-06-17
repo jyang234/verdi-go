@@ -11,6 +11,8 @@ import (
 	"context"
 	"net/http"
 
+	"go.opentelemetry.io/otel"
+
 	"example.com/impeachsvc/internal/router"
 	"example.com/impeachsvc/internal/store"
 )
@@ -53,11 +55,19 @@ func (a *Admin) Mount(r *router.Router) {
 // route. This is the effect the impeachment cell must catch: statically owned by
 // no discovered entrypoint, behaviorally reached on DELETE /admin/ledger.
 func (a *Admin) PurgeLedger(w http.ResponseWriter, req *http.Request) {
+	// Open an internal span DIRECTLY here (not via a helper) so the in-process
+	// capture producer tags it with this function's runtime FQN — the L1
+	// localization anchor (plan §7). PurgeLedger is reachable from no DISCOVERED
+	// entrypoint (the missed admin route) yet reaches the DB DELETE, so it is the
+	// precise severed node the impeachment localizes to and a blind-spot repair
+	// self-extinguishes.
+	ctx, span := otel.Tracer("impeachsvc").Start(req.Context(), "admin.purge")
+	defer span.End()
 	id := req.URL.Query().Get("loan")
 	if id == "" {
 		id = "ALL"
 	}
-	_ = a.loans.Purge(req.Context(), id)
+	_ = a.loans.Purge(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

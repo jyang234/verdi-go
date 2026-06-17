@@ -6,6 +6,7 @@ sequenceDiagram
     participant payment_gw as payment-gw
     participant postgres as postgres
     Client->>loansvc: HTTP POST /loan-application
+    loansvc->>loansvc: evaluateApplication
     par concurrent
         loansvc->>postgres: DB postgres SELECT applicants
     and
@@ -15,5 +16,6 @@ sequenceDiagram
     loansvc->>Bus: PUBLISH loan.approved
     loansvc->>Bus: PUBLISH disbursement.initiated
     loansvc->>Bus: PUBLISH loan.review
+    loansvc->>loansvc: disburse
     loansvc->>postgres: DB postgres INSERT ledger
     loansvc->>postgres: DB postgres INSERT audit_log
