@@ -23,6 +23,79 @@ func sample() *ir.CanonicalTrace {
 	}
 }
 
+// TestProvenanceWrittenButNotCompared pins the deliberate asymmetry the
+// behavioral-impeachment audit depends on: the capture-fidelity grade is WRITTEN into
+// the committed golden (so the corpus self-describes its trust grade, and a -update
+// that changes it is git-visible / CODEOWNERS-routed) yet EXCLUDED from snapshot
+// EQUALITY (so two captures of identical behavior at different grades still assert
+// equal — behavior-purity). A refactor that folds the grade into equality, or drops
+// it from the written form, breaks exactly one of the two halves and fails here.
+func TestProvenanceWrittenButNotCompared(t *testing.T) {
+	prod, integ := sample(), sample()
+	prod.Provenance, integ.Provenance = "production", "integration"
+
+	// NOT compared: equality is blind to the grade.
+	pb, err := canonicalBytes(prod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ib, err := canonicalBytes(integ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pb) != string(ib) {
+		t.Error("canonicalBytes differ on capture grade alone — behavior-purity broken (grade folded into equality)")
+	}
+
+	// WRITTEN: the committed golden's bytes carry the grade, so a grade change shows
+	// up in the file's git diff (the mechanical guard is committed-golden review).
+	pp, ii := stampless(prod), stampless(integ)
+	pw, err := pp.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	iw, err := ii.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pw) == string(iw) {
+		t.Error("the written golden does not carry the capture grade — a grade change would be invisible in the committed file's git diff")
+	}
+}
+
+// TestStampNeitherWrittenNorCompared completes the three-field treatment: the
+// run-varying deploy Stamp is excluded from BOTH the written golden and equality
+// (identity is injected at audit time, not baked into the committed snapshot).
+func TestStampNeitherWrittenNorCompared(t *testing.T) {
+	a, b := sample(), sample()
+	a.Stamp, b.Stamp = "sha-A", "sha-B"
+
+	ab, err := canonicalBytes(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := canonicalBytes(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ab) != string(bb) {
+		t.Error("Stamp leaked into snapshot equality")
+	}
+
+	as, bs := stampless(a), stampless(b)
+	aw, err := as.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bw, err := bs.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(aw) != string(bw) {
+		t.Error("Stamp leaked into the written golden")
+	}
+}
+
 func TestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	tr := sample()

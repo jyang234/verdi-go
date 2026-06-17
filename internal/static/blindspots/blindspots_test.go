@@ -50,6 +50,35 @@ func TestDetectDeterministic(t *testing.T) {
 	}
 }
 
+// TestDetectEmitsNoDeclaredKind guards the producer boundary the ratchet/frontier
+// skips depend on: Detect must NEVER emit a Ratified (config-declared) kind, or an
+// unratified seam would silently bypass the drift ratchet (fail-open). It checks
+// Detect's output over the standard analysis fixture, so it catches the regression
+// for every detector the fixture EXERCISES — verified non-vacuous by mutating the
+// NonConstantBoundaryArg branch (the notify publish), which this then flags.
+//
+// It is NOT exhaustive: detector branches the fixture does not reach (reflect,
+// HighFanOut, unsafe/cgo/linkname have no trigger in loansvc) are not covered
+// behaviorally. The structural half of the guarantee is the single declaredKinds()
+// source Ratified() derives from — a new declared kind is classified there once, and
+// the consumer-side skips (review/frontier) pick it up without a divergent literal.
+// (The fix guard ensures Detect's output is non-empty so this cannot pass vacuously.)
+func TestDetectEmitsNoDeclaredKind(t *testing.T) {
+	res, err := statictest.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := blindspots.Detect(res, features.NewHintSet(res.Config))
+	if len(got) == 0 {
+		t.Fatal("Detect produced no blind spots over the fixture; the disjointness check would pass vacuously")
+	}
+	for _, b := range got {
+		if b.Kind.Ratified() {
+			t.Errorf("Detect emitted a Ratified (config-declared-only) kind %q at %q; the ratchet/frontier skip would treat auto-detected drift as a reviewed declaration", b.Kind, b.Site)
+		}
+	}
+}
+
 func TestKindBoundaryClassification(t *testing.T) {
 	gated := []blindspots.Kind{blindspots.NonConstantBoundaryArg, blindspots.UnresolvedDispatch}
 	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname}

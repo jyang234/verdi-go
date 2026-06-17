@@ -109,6 +109,48 @@ func TestGroupCodeStampFailsClosedOnDisagreement(t *testing.T) {
 	}
 }
 
+// TestGroupCodeStampLenientOnBlank pins the INGEST empty-policy (flowAttrAgreed),
+// which is deliberately MORE LENIENT than impeach.corpusAgreed's: a span that simply
+// LACKS a stamp must NOT veto a stamp its siblings agree on (a synthesized or
+// uninstrumented span carries none, and must not erase the bucket's identity). Only
+// DISAGREEMENT among the stamps actually present fails closed. This is the half the
+// two reducers are documented to differ on; if a refactor ever merged them onto the
+// strict (any-blank-vetoes) policy, this test fails.
+func TestGroupCodeStampLenientOnBlank(t *testing.T) {
+	const sha = "deadbeefcafe"
+	spans := []capture.Span{
+		span("1", "", "loan", "loansvc", ir.KindServer, map[string]string{capture.CodeStampAttr: sha}),
+		span("2", "1", "loan", "loansvc", ir.KindClient, nil), // no stamp — must NOT veto
+	}
+	flows := Group(spans)
+	if len(flows) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(flows))
+	}
+	if flows[0].Flow.Stamp != sha {
+		t.Errorf("a stampless sibling vetoed the agreed stamp; Stamp = %q, want %q (lenient ingest policy)", flows[0].Flow.Stamp, sha)
+	}
+}
+
+// TestGroupLiftsCaptureProvenance is the capture-grade analog of
+// TestGroupLiftsCodeStamp + the lenient-on-blank case: the producer-set fidelity
+// grade folds onto the CapturedFlow (so the corpus self-describes its trust grade for
+// the impeachment audit, §12.6), and a graded span is not vetoed by an ungraded
+// sibling.
+func TestGroupLiftsCaptureProvenance(t *testing.T) {
+	const grade = "integration"
+	spans := []capture.Span{
+		span("1", "", "loan", "loansvc", ir.KindServer, map[string]string{capture.CaptureProvenanceAttr: grade}),
+		span("2", "1", "loan", "loansvc", ir.KindClient, nil), // no grade — must NOT veto
+	}
+	flows := Group(spans)
+	if len(flows) != 1 {
+		t.Fatalf("got %d fragments, want 1", len(flows))
+	}
+	if flows[0].Flow.Provenance != grade {
+		t.Errorf("CapturedFlow.Provenance = %q, want %q", flows[0].Flow.Provenance, grade)
+	}
+}
+
 // TestGroupSynthesizesRootForPublisherOnly: a service that only publishes (no
 // inbound entry span in the fragment) gets a synthesized internal root so
 // canonicalization sees one tree.

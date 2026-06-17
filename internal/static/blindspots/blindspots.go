@@ -77,17 +77,36 @@ func Recognized(k Kind) bool {
 	return false
 }
 
+// declaredKinds are the categories that originate ONLY from human config
+// declaration (static.declaredBlindSpots), NEVER from Detect. It is the single
+// source for the detected-vs-declared partition: Ratified() derives from it, and
+// TestDetectEmitsNoDeclaredKind asserts Detect's output stays disjoint from it, so
+// the load-bearing assumption "a Ratified kind in a graph came from CODEOWNER-gated
+// config, not auto-detection" is enforced rather than merely asserted in prose. A new
+// declared category is added here once and both derivations pick it up.
+func declaredKinds() []Kind {
+	return []Kind{ImpeachmentSeam}
+}
+
 // Ratified reports whether a blind spot was DECLARED by a human (config-ratified),
-// rather than auto-detected from code. The one such kind is ImpeachmentSeam (the
-// behavioral-impeachment enactment, declared in static.declaredBlindSpots). It is the
-// single predicate every "this is a reviewed declaration, not undisclosed drift"
-// branch consults — the blind-spot ratchet (review.newBlindSpots) and the frontier
-// reclaim markers (frontier.Classify) both exclude a ratified kind, so a ratified
-// seam neither re-blocks the change that ratified it nor churns the reclaim ratios.
-// Centralizing it here (paralleling Boundary) means a future declared kind is covered
-// in ONE edit, instead of two hand-kept literal compares with divergent spellings.
+// rather than auto-detected from code — membership in the declaredKinds set
+// (currently just ImpeachmentSeam, the behavioral-impeachment enactment in
+// static.declaredBlindSpots). It is the single predicate every "this is a reviewed
+// declaration, not undisclosed drift" branch consults — the blind-spot ratchet
+// (review.newBlindSpots) and the frontier reclaim markers (frontier.Classify) both
+// exclude a ratified kind, so a ratified seam neither re-blocks the change that
+// ratified it nor churns the reclaim ratios. Centralizing it here (paralleling
+// Boundary), derived from the one declaredKinds source, means a future declared kind
+// is covered in ONE edit instead of two hand-kept literal compares with divergent
+// spellings; the producer boundary (Detect never emits a declared kind) is guarded by
+// TestDetectEmitsNoDeclaredKind.
 func (k Kind) Ratified() bool {
-	return k == ImpeachmentSeam
+	for _, d := range declaredKinds() {
+		if k == d {
+			return true
+		}
+	}
+	return false
 }
 
 // Boundary reports whether a blind spot belongs to the GATED boundary subset.
