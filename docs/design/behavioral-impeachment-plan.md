@@ -432,7 +432,7 @@ independently shippable and valuable; the plan is a set of off-ramps.
 
 | Phase | Ships | Stop-value | Go/no-go gate |
 |---|---|---|---|
-| **0 — spine** | witness types + the `observed × unreachable` join (fold in `coverage.Delta` for the other direction); `Verdict: CANDIDATE`, disclosure-only | coverage-calibrated behavioral view | run on real corpora; ~zero candidates ⇒ analyzer already sound, **stop** |
+| **0 — spine** | **(prereq, §14-A) DB boundary effects in the corpus** — extend capture (`otelsql`) + `ingest`/`coverage` so the join's effect vocabulary includes `db <verb>` writes, not only the otelaws bus/dep surface; then witness types + the `observed × unreachable` join (fold in `coverage.Delta` for the other direction); `Verdict: CANDIDATE`, disclosure-only | coverage-calibrated behavioral view **that can see the marquee `db DELETE` case** | run on real corpora; ~zero candidates ⇒ analyzer already sound, **stop** |
 | **1 — ladder** | the five rungs → candidates classified IMPEACHMENT vs the four downgrades | a trustworthy counterexample finder (over exercised paths), **zero substrate/gate risk** — the natural resting point | measure the rung distribution; *mostly downgrades, rare impeachments* = healthy; mostly IMPEACHMENT = too credulous, fix before proceeding |
 | **2 — severance L0** | coarse `Site` (entry+effect anchors) + the proof obligation | impeachments carry a coarse location + known/unknown sort | proof obligation holds; spot-check Sites |
 | **3 — map + `canonFQN`** | the map, `canonFQN` + parity test, L1 tags; precise Sites | precise localization, sharp `absent-from-graph` | parity test green + self-extinguish **dry run** |
@@ -446,9 +446,12 @@ that L1 `absent-from-graph` needs). The corpus convention (decide in P0) is an
 input that may reach a gate (P5); *live* traffic is audit-only, with `CorpusDigest`
 pinning what was seen.
 
-**Build first:** Phase 0, and within it the `observed × unreachable` join — the one
-direction that doesn't already exist, and the probe that tells you whether any of the
-rest is worth doing.
+**Build first:** Phase 0 — and within it, *first* the DB-effect prerequisite
+(§14-A), then the `observed × unreachable` join. The join is the one direction that
+doesn't already exist and the probe that tells you whether any of the rest is worth
+doing; but fed only by the existing otelaws-only effect vocabulary it would abstain
+on exactly the highest-value target (a false-`NEVER` on `db DELETE`), so the corpus
+must carry DB effects before the probe is meaningful.
 
 ---
 
@@ -485,13 +488,20 @@ The risk is admitted in exactly the order it can be retired.**
 
 ## §12 — Open questions (not yet decided)
 
+> Resolutions landed 2026-06-17 are recorded in §14; the entries below are annotated
+> **RESOLVED**/**STANDING** so the original question survives next to its answer.
+
 1. **The capture-side code-identity stamp.** `code-identity` (§4 rung 2) needs the
    trace to carry the deployed commit. Which resource attribute, and how the capture
    harness sets it, is unspecified — it is the hinge of the whole ladder.
+   **STANDING** — a capture-pipeline decision for Phase 1, not Phase 0 (§14-D); the
+   ingest model carries no commit stamp today.
 2. **Corpus governance for a gate.** A committed corpus is reproducible but can go
    stale against the reachable surface; a live corpus is current but non-portable.
    The behavior-goldens model (`*.effects.json`, `--update`) is the likely answer but
-   needs the base-vs-branch framing worked out.
+   needs the base-vs-branch framing worked out. **RESOLVED (§14-B)** — reuse the
+   shipped behavior-goldens model as *the* committed corpus; live stays audit-only.
+   Only the base-vs-branch framing remains STANDING.
 3. **`canonFQN` on generics at L1.** Refused as `⊥` here; L2 (ssa-injected tags) makes
    them exact. Whether L1 ever needs a generics story depends on how much real effect
    surface sits behind generic dispatch — a measurement, not a guess.
@@ -537,3 +547,61 @@ The two prime-directive cracks (#1, #2) were both in the **verdict-integration**
 core idea survived: static still licenses the negatives, behavior still licenses the
 positives, and the failure modes still bias toward abstention — but only after §9 was
 corrected to surface a witnessed breach as the violation it is.
+
+---
+
+## §14 — Pre-implementation reconciliation (decided 2026-06-17)
+
+Before any code, the plan was checked against the **actual** state of the primitives
+it leans on. The spine and phasing survived intact; four reconciliations below keep
+the doc honest about what exists vs. what it names aspirationally, plus the two scope
+decisions the owner made. None change the soundness argument — they pin the plan to
+the substrate so Phase 0 builds on facts, not on the doc's vocabulary.
+
+**A — Phase 0 blocks on DB boundary effects first (owner decision).** The marquee
+impeachment — a false-`NEVER` on `db DELETE ledger` — sits *outside* today's
+behavioral surface: `coverage.Delta` (`internal/coverage`) excludes DB ops and
+entrypoints, and the post-hoc effect goldens (`*.effects.json`, `internal/ingest`)
+exclude DB spans because capture is `otelaws`-only. So the `observed × unreachable`
+join, fed by the existing vocabulary, would *abstain on exactly the case the plan
+exists to catch*. Phase 0 therefore gains a prerequisite: extend capture (`otelsql`)
+and `ingest`/`coverage` to carry `db <verb>` writes into the canonical op-key space —
+reusing the **one-source** write vocabulary (`sqlverb.MutatingVerbs`:
+`DELETE/INSERT/MERGE/REPLACE/UPDATE/UPSERT`, mirrored by `fitness.IsWrite` /
+`graphio.mutatingSQLOp`) so the behavioral DB label and the static DB label key
+identically. This pulls forward capture-pipeline work the plan had implicitly
+deferred; it is the admission price of the join being meaningful on day one.
+
+**B — Corpus model: reuse the behavior-goldens (owner decision).** The committed
+`*.effects.json` corpus (+ `--update` + CODEOWNERS routing, already shipped) *is* the
+committed corpus that may reach a gate (§9/§10); live traffic stays audit-only with
+`CorpusDigest` pinning what was seen. No new corpus artifact. The base-vs-branch
+framing (§12.2) is the only piece left to work out, and only binds at Phase 5.
+
+**C — Verdict-name reconciliation (the obligation layer spells the poles
+differently).** This doc uses the *conceptual* three-valued names (CLAUDE.md's
+PROVEN / VIOLATED / CANT-PROVE). The code spells them across two layers:
+- **Obligations** (`internal/groundwork/fitness/obligations.go`): `SATISFIED` /
+  `VIOLATED` / `CANT-PROVE` / `UNMATCHED`. There is **no `PROVEN-ABSENT` constant** —
+  a proven-absent `must_not_reach` is a `SATISFIED` obligation. So everywhere this
+  doc writes **`PROVEN-ABSENT`, read `SATISFIED`**; §6/§8/§9's "downgrade
+  `PROVEN-ABSENT → CANT-PROVE`" is `SATISFIED → CANT-PROVE`, and the self-extinguish
+  acceptance ("no `PROVEN-ABSENT` newly created", §6/§8) is written against
+  `SATISFIED`.
+- **Review gate** (`internal/groundwork/review/artifact.go`): `BLOCK` /
+  `STRUCTURALLY-CLEAR` / `NO-STRUCTURAL-SIGNAL`. §9's "the gate **fails**" is the
+  review layer returning `BLOCK`. §9 correctly spans both layers; the implementation
+  must not conflate them.
+
+**D — Helpers the §6/§7 pseudocode names but that are wiring, not existing API.**
+- `graph.Reaches(a, b)` ⇒ `contains(Index.Reachable(a), b)`
+  (`internal/groundwork/graph/index.go`: `Reachable`/`Reaching`/`EntrypointCover`).
+- `staticFrontier.markerAt(Site)` ⇒ a lookup over the **shipped** frontier disclosure
+  section (`Index.Frontier()`, the frontier-instrumentation companion); the helper
+  itself must be written. `frontier.Classify` takes a minimal `Input`, not a `Graph`.
+- The capture-side substrate rungs 2/5 and Phase 3+ need **does not exist yet**:
+  `CaptureProvenance` (the "production|integration|synthetic" label), the deployed-
+  commit stamp, and runtime FQN tags (`flowmap.fqn`) are all absent — `ingest.FlowCapture`
+  carries only `Synthesized bool`. Phase 0 is L0 (entry+effect anchors) and needs none
+  of them; this is recorded so Phase 1 (rung 2, §12.1) and Phase 3 (the map, §7) budget
+  the capture-pipeline work honestly rather than assuming a field that isn't there.
