@@ -48,7 +48,18 @@ type CanonicalTrace struct {
 	// audit — exactly why the static graph golden carries no --stamp either.
 	// Populated only on a LIVE capture (an OTel resource attribute or the harness
 	// WithCodeStamp option); injected at audit time for a committed corpus.
-	Stamp         string          `json:"stamp,omitempty"`
+	Stamp string `json:"stamp,omitempty"`
+	// Provenance is the capture FIDELITY grade — "production" | "integration" |
+	// "synthetic" — set by the PRODUCER of the capture (the in-process harness marks
+	// "integration"; a real deploy sets it via a resource attribute), the behavioral-
+	// impeachment ladder's capture-fidelity rung (§4 rung 5, §12.6). Unlike Stamp it
+	// IS part of snapshot equality and a committed golden DOES carry it: the grade is
+	// a stable property of how the corpus was captured (not run-varying), so the
+	// corpus self-describes its trust grade rather than the audit caller asserting it
+	// divorced from the capture. Empty means unestablished ⇒ the rung fails closed
+	// (CAPTURE-UNTRUSTED) unless the audit caller supplies a grade for an
+	// older/unmarked corpus. The harness is structurally incapable of "production".
+	Provenance    string          `json:"provenance,omitempty"`
 	SchemaVersion string          `json:"schema_version"`
 	Root          *CanonicalSpan  `json:"root"`
 	Discards      DiscardManifest `json:"discards"`

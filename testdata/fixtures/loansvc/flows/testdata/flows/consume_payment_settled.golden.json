@@ -1,6 +1,7 @@
 {
   "flow": "consume payment.settled",
   "service": "loansvc",
+  "provenance": "integration",
   "schema_version": "flowmap.trace/v1",
   "root": {
     "op": "CONSUME payment.settled",

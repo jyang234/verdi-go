@@ -93,16 +93,31 @@ func assemble(slug, svc string, spans []capture.Span) FlowCapture {
 		Service:     svc,
 		Synthesized: synth,
 		Flow: capture.CapturedFlow{
-			Flow:     slug,
-			Service:  svc,
-			Stamp:    flowStamp(spans),
-			Trigger:  trigger,
-			Mode:     capture.ModePostHoc,
-			Spans:    spans,
-			Root:     root,
-			Complete: true,
+			Flow:       slug,
+			Service:    svc,
+			Stamp:      flowStamp(spans),
+			Provenance: flowProvenance(spans),
+			Trigger:    trigger,
+			Mode:       capture.ModePostHoc,
+			Spans:      spans,
+			Root:       root,
+			Complete:   true,
 		},
 	}
+}
+
+// flowProvenance lifts the per-service capture fidelity grade off the bucket's
+// spans (the CaptureProvenanceAttr resource attribute folded on by otlpjson) onto
+// the CapturedFlow, with the SAME fail-closed agreement discipline as flowStamp: a
+// bucket whose spans disagree on the grade yields "" (unestablished ⇒ the
+// impeachment capture-fidelity rung fails closed). Producer-set, never inferred.
+func flowProvenance(spans []capture.Span) string {
+	vals := make([]string, len(spans))
+	for i := range spans {
+		vals[i] = spans[i].Attr(capture.CaptureProvenanceAttr)
+	}
+	grade, _ := capture.AgreedStamp(vals)
+	return grade
 }
 
 // flowStamp lifts the per-service code-identity stamp off the bucket's spans (the

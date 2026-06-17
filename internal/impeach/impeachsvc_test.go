@@ -123,15 +123,16 @@ func TestImpeachsvcLadderPromotesWithProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load graph: %v", err)
 	}
-	// Simulate the capture-side substrate Phase 1 budgets but does not yet ship
-	// (§14-D): a deployed-commit stamp on the graph and the matching trace identity.
+	// The committed corpus is stampless, so the caller injects the gated commit
+	// identity; the capture grade comes from the corpus itself (the goldens carry
+	// "integration", set by the harness producer, §12.6 — no caller assertion).
 	const commit = "deadbeefcafe"
 	g.Stamp = commit
 	ix := graph.NewIndex(g)
 
 	purge := loadTrace(t, impeachTraceAdminPurge)
 	create := loadTrace(t, impeachTraceLoanCreate)
-	prov := Provenance{TraceIdentity: commit, Capture: CaptureProduction}
+	prov := Provenance{TraceIdentity: commit}
 	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, prov)
 
 	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, prov).Digest {
@@ -158,8 +159,9 @@ func TestImpeachsvcLadderPromotesWithProvenance(t *testing.T) {
 			t.Errorf("rung %q did not pass on the promotion path: %s", rung.Name, rung.Evidence)
 		}
 	}
-	// Provenance is recorded in the report header (the numerator's identity, §5).
-	if r.TraceIdentity != commit || r.CaptureProvenance != CaptureProduction {
+	// Provenance is recorded in the report header (the numerator's identity, §5):
+	// the injected code identity and the corpus-carried capture grade.
+	if r.TraceIdentity != commit || r.CaptureProvenance != CaptureIntegration {
 		t.Errorf("report dropped provenance: identity=%q capture=%q", r.TraceIdentity, r.CaptureProvenance)
 	}
 }

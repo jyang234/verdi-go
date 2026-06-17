@@ -31,7 +31,10 @@ func e2eFixture(t *testing.T) (*graph.Index, Report, Provenance) {
 	const commit = "deadbeefcafe"
 	g.Stamp = commit // the gated commit identity CI would pass via --stamp
 	ix := graph.NewIndex(g)
-	prov := Provenance{TraceIdentity: commit, Capture: CaptureProduction}
+	// The committed corpus is stampless (identity injected) but carries its capture
+	// grade ("integration", set by the harness producer, §12.6) — so the caller
+	// injects only the code identity and the grade comes from the corpus itself.
+	prov := Provenance{TraceIdentity: commit}
 	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{loadTrace(t, impeachTraceAdminPurge), loadTrace(t, impeachTraceLoanCreate)}, prov)
 	if len(r.Candidates) != 1 || r.Candidates[0].Verdict != VerdictImpeachment {
 		t.Fatalf("want one IMPEACHMENT over the real corpus, got %+v", r.Candidates)
@@ -40,6 +43,33 @@ func e2eFixture(t *testing.T) (*graph.Index, Report, Provenance) {
 		t.Fatalf("want L1 localization to the severed node, got %+v", got)
 	}
 	return ix, r, prov
+}
+
+// TestImpeachsvcCallerCaptureContradictsCorpus is the §12.6 close: the corpus
+// self-describes its grade ("integration", set by the harness producer), so an
+// audit caller asserting a CONTRADICTING grade ("production") fails closed —
+// resolveCaptureProvenance returns "" and the capture-fidelity rung caps the
+// candidate at CAPTURE-UNTRUSTED. The audit can no longer assert a grade the
+// capture itself contradicts; a test corpus can never be laundered into production.
+func TestImpeachsvcCallerCaptureContradictsCorpus(t *testing.T) {
+	g, err := graph.LoadFile(impeachsvcGraph)
+	if err != nil {
+		t.Fatalf("load graph: %v", err)
+	}
+	g.Stamp = "deadbeefcafe"
+	ix := graph.NewIndex(g)
+	traces := []*ir.CanonicalTrace{loadTrace(t, impeachTraceAdminPurge), loadTrace(t, impeachTraceLoanCreate)}
+	// Caller claims production; the corpus carries integration ⇒ contradiction.
+	r := Audit("impeachsvc", ix, traces, Provenance{TraceIdentity: "deadbeefcafe", Capture: CaptureProduction})
+	if len(r.Candidates) != 1 {
+		t.Fatalf("want 1 candidate, got %d", len(r.Candidates))
+	}
+	if v := r.Candidates[0].Verdict; v != DowngradeCaptureUntrusted {
+		t.Errorf("Verdict = %q, want %q (caller grade contradicts the corpus ⇒ fail closed)", v, DowngradeCaptureUntrusted)
+	}
+	if r.CaptureProvenance != "" {
+		t.Errorf("resolved capture = %q, want \"\" (unestablished on contradiction)", r.CaptureProvenance)
+	}
 }
 
 // TestImpeachsvcSelfExtinguishesE2E is the Phase-4 acceptance gate run end to end

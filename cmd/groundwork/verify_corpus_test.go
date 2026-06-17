@@ -61,28 +61,30 @@ const gatingPolicy = `{
 }`
 
 // TestVerifyCorpusImpeachmentBlocks is the CLI gate path end to end: groundwork
-// verify --corpus over the real committed corpus, a stamped graph, and an attested
-// production capture, with the impeachment gate armed — the behaviorally-confirmed
-// downgrade of a require_proof proof BLOCKS the merge (a verdictError).
+// verify --corpus over the real committed corpus (which SELF-DESCRIBES its
+// "integration" grade, §12.6 — no --capture asserted) and a stamped graph, with the
+// impeachment gate armed — the behaviorally-confirmed downgrade of a require_proof
+// proof BLOCKS the merge (a verdictError).
 func TestVerifyCorpusImpeachmentBlocks(t *testing.T) {
 	g := stampedImpeachGraph(t)
 	pol := writePolicy(t, gatingPolicy)
-	err := run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--capture", "production"})
+	err := run([]string{"verify", pol, g, g, "--corpus", corpusDir})
 	var v verdictError
 	if !errors.As(err, &v) {
 		t.Fatalf("run(verify --corpus) = %v (%T), want a verdictError (BLOCK)", err, err)
 	}
 }
 
-// TestVerifyCorpusUntrustedCaptureDoesNotBlock is the trusted-pipeline fence
-// (§12.6): without an attested --capture, the corpus caps at CAPTURE-UNTRUSTED, no
-// impeachment promotes, and the gate passes — an unattested capture can never mint
-// a gating impeachment.
-func TestVerifyCorpusUntrustedCaptureDoesNotBlock(t *testing.T) {
+// TestVerifyCorpusContradictoryCaptureDoesNotBlock is the §12.6 fail-closed fence:
+// the committed corpus self-describes "integration", so a caller asserting a
+// CONTRADICTING --capture production yields an unestablished grade
+// (CAPTURE-UNTRUSTED), no impeachment promotes, and the gate passes — the audit
+// cannot launder a test corpus into a production-grade gating impeachment.
+func TestVerifyCorpusContradictoryCaptureDoesNotBlock(t *testing.T) {
 	g := stampedImpeachGraph(t)
 	pol := writePolicy(t, gatingPolicy)
-	if err := run([]string{"verify", pol, g, g, "--corpus", corpusDir}); err != nil {
-		t.Fatalf("unattested capture must not block, got %v", err)
+	if err := run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--capture", "production"}); err != nil {
+		t.Fatalf("a contradicting capture grade must fail closed (no block), got %v", err)
 	}
 }
 
@@ -100,7 +102,7 @@ func TestVerifyCorpusObserveFirstWithoutOptIn(t *testing.T) {
      "require_proof": true}
   ]
 }`)
-	if err := run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--capture", "production"}); err != nil {
+	if err := run([]string{"verify", pol, g, g, "--corpus", corpusDir}); err != nil {
 		t.Fatalf("without the opt-in the gate must pass (observe-first), got %v", err)
 	}
 }

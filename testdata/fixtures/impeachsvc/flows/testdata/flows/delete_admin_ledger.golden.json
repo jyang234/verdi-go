@@ -1,6 +1,7 @@
 {
   "flow": "DELETE /admin/ledger",
   "service": "impeachsvc",
+  "provenance": "integration",
   "schema_version": "flowmap.trace/v1",
   "root": {
     "op": "HTTP DELETE /admin/ledger",

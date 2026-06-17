@@ -147,6 +147,11 @@ func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace, prov Pr
 	// traces' own Stamp; a committed (stampless) corpus takes the caller's injected
 	// identity. The resolution feeds the ladder's code-identity rung.
 	prov.TraceIdentity = resolveIdentity(traces, prov)
+	// Resolve the capture fidelity grade the SAME way (§12.6): a graded corpus
+	// self-describes (the producer set it), an ungraded one takes the caller's
+	// grade, and a caller grade that CONTRADICTS the corpus fails closed — so the
+	// capture-fidelity rung can no longer be asserted divorced from the capture.
+	prov.Capture = resolveCaptureProvenance(traces, prov)
 	r := Report{
 		Service:           service,
 		GraphStamp:        ix.Stamp(),

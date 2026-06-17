@@ -54,11 +54,13 @@ const (
 )
 
 // Capture-fidelity labels (§5). Only the first two clear the capture-fidelity
-// rung; an absent or synthetic label caps a witness at CAPTURE-UNTRUSTED.
+// rung; an absent or synthetic label caps a witness at CAPTURE-UNTRUSTED. These
+// alias the ONE-source vocabulary in the capture package (the producer of the
+// grade), so the consumer's rung can never drift from the producer's labels.
 const (
-	CaptureProduction  = "production"
-	CaptureIntegration = "integration"
-	CaptureSynthetic   = "synthetic"
+	CaptureProduction  = capture.CaptureProduction
+	CaptureIntegration = capture.CaptureIntegration
+	CaptureSynthetic   = capture.CaptureSynthetic
 )
 
 // Provenance is the corpus-level capture-side identity the ladder's rungs 2 and 5
@@ -288,4 +290,52 @@ func corpusIdentity(traces []*ir.CanonicalTrace) string {
 		return "" // mixed deploys ⇒ no single identity (fail closed)
 	}
 	return id
+}
+
+// resolveCaptureProvenance reconciles the corpus's PRODUCER-SET capture grade
+// (carried on each trace, §12.6) with the audit caller's supplied grade, exactly as
+// resolveIdentity does for the code stamp. A graded corpus self-describes; an
+// ungraded (older/hand-authored) corpus takes the caller's grade; when BOTH are
+// present they MUST agree — a caller asserting "production" over a corpus the
+// harness marked "integration" is a contradiction and fails CLOSED to "", so the
+// capture-fidelity rung caps at CAPTURE-UNTRUSTED. This is what makes the rung
+// mechanically honest: the audit caller can no longer assert a grade the capture
+// contradicts.
+func resolveCaptureProvenance(traces []*ir.CanonicalTrace, prov Provenance) string {
+	derived := corpusProvenance(traces)
+	switch {
+	case derived == "":
+		return prov.Capture // ungraded corpus ⇒ caller's grade (older/unmarked path)
+	case prov.Capture == "":
+		return derived // self-describing graded corpus
+	case derived == prov.Capture:
+		return derived
+	default:
+		return "" // caller grade contradicts the corpus ⇒ fail closed (untrusted)
+	}
+}
+
+// corpusProvenance is the single capture grade the corpus self-describes, or "" when
+// it does not establish one. Like corpusIdentity it fails CLOSED: every non-nil
+// trace must carry the SAME non-empty Provenance (a mixed or partly-ungraded corpus
+// is ambiguous ⇒ ""), reusing the shared capture.AgreedStamp reducer (one source).
+func corpusProvenance(traces []*ir.CanonicalTrace) string {
+	grades := make([]string, 0, len(traces))
+	for _, t := range traces {
+		if t == nil {
+			continue
+		}
+		if t.Provenance == "" {
+			return "" // an ungraded trace ⇒ grade unestablished (fail closed)
+		}
+		grades = append(grades, t.Provenance)
+	}
+	if len(grades) == 0 {
+		return "" // empty corpus ⇒ nothing to establish
+	}
+	grade, ok := capture.AgreedStamp(grades)
+	if !ok {
+		return "" // mixed grades ⇒ no single grade (fail closed)
+	}
+	return grade
 }

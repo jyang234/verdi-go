@@ -317,14 +317,19 @@ func (p *Pending) Capture(opt CaptureOptions) (*capture.CapturedFlow, error) {
 
 	scoped, root := capture.Scope(spans, p.runID)
 	cf := &capture.CapturedFlow{
-		Flow:     p.flow,
-		Service:  a.service,
-		Stamp:    a.codeStamp,
-		Trigger:  p.trigger,
-		Mode:     capture.ModeInProcess,
-		Spans:    scoped,
-		Root:     root,
-		Complete: complete && root != nil,
+		Flow:    p.flow,
+		Service: a.service,
+		Stamp:   a.codeStamp,
+		// The in-process harness runs the REAL service code (only the transport is
+		// faked), so its captures are INTEGRATION grade — a trustworthy impeachment
+		// witness. It is structurally incapable of "production": that grade can only
+		// come from a real deployment's resource attribute (§12.6).
+		Provenance: capture.CaptureIntegration,
+		Trigger:    p.trigger,
+		Mode:       capture.ModeInProcess,
+		Spans:      scoped,
+		Root:       root,
+		Complete:   complete && root != nil,
 	}
 	if !cf.Complete {
 		return cf, errTruncated{flow: p.flow}

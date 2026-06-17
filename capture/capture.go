@@ -113,6 +113,26 @@ const CodeStampAttr = "flowmap.code.stamp"
 // (fail closed: an untagged span maps no node and the walk stays at L0).
 const FQNTagKey = "flowmap.fqn"
 
+// CaptureProvenanceAttr is the OTel RESOURCE attribute carrying the capture
+// fidelity grade ("production" | "integration" | "synthetic") — the
+// behavioral-impeachment ladder's capture-fidelity input (§4 rung 5, §12.6). It is
+// flowmap-specific and the ONE owner of the name: a real deployment sets it on its
+// resource (production), and ingest folds it onto CapturedFlow.Provenance, exactly
+// as CodeStampAttr carries the code identity. Producer-set, never inferred — the
+// corpus self-describes its grade rather than the audit caller asserting it.
+const CaptureProvenanceAttr = "flowmap.capture.provenance"
+
+// The capture fidelity grades carried by CaptureProvenanceAttr / CapturedFlow.
+// Provenance — the ONE source of this vocabulary (impeach's ladder references
+// these, so the producer and the consumer cannot drift). Only production and
+// integration clear the impeachment capture-fidelity rung; synthetic and an
+// unestablished grade fail it closed.
+const (
+	CaptureProduction  = "production"
+	CaptureIntegration = "integration"
+	CaptureSynthetic   = "synthetic"
+)
+
 // AgreedStamp is the ONE-SOURCE code-identity reduction: the single distinct
 // NON-EMPTY stamp among the inputs, with ok=false when two non-empty stamps
 // disagree. Empty inputs are skipped, so a result of ("", true) means "no stamp
@@ -148,12 +168,18 @@ type CapturedFlow struct {
 	// resource attribute (post-hoc) or set by the harness WithCodeStamp option
 	// (in-process). It rides through to ir.CanonicalTrace.Stamp, where it is
 	// excluded from snapshot equality. Empty when the capture carried no stamp.
-	Stamp    string
-	Trigger  TriggerKind
-	Mode     CaptureMode
-	Spans    []Span
-	Root     *Span
-	Complete bool
+	Stamp string
+	// Provenance is the capture FIDELITY grade ("production" | "integration" |
+	// "synthetic") read from the CaptureProvenanceAttr resource attribute (post-hoc)
+	// or set by the in-process harness ("integration" — it runs the real code, never
+	// "production"). It rides through to ir.CanonicalTrace.Provenance. Empty when the
+	// capture declared no grade.
+	Provenance string
+	Trigger    TriggerKind
+	Mode       CaptureMode
+	Spans      []Span
+	Root       *Span
+	Complete   bool
 }
 
 // Attr returns the value of key on s, or "" if absent.

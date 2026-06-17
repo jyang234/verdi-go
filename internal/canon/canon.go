@@ -106,7 +106,11 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 		// Carry the code-identity stamp verbatim; it is run-varying provenance
 		// excluded from snapshot equality, never derived here (deriving from git
 		// HEAD would make the trace a function of more than the captured behavior).
-		Stamp:         cf.Stamp,
+		Stamp: cf.Stamp,
+		// Carry the capture fidelity grade verbatim. Unlike Stamp it IS part of
+		// snapshot equality (a committed golden carries its grade — a stable property,
+		// not run-varying), so the corpus self-describes its trust grade.
+		Provenance:    cf.Provenance,
 		SchemaVersion: ir.SchemaVersion,
 		Root:          rootSpan,
 		Discards:      c.discards(),
