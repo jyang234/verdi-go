@@ -618,10 +618,16 @@ func cmdVerify(args []string) error {
 	scopeArg, _, rest := takeValueFlag(args, "--scope", "-scope")
 	expect, hasExpect, rest := takeValueFlag(rest, "--expect", "-expect")
 	corpusDir, hasCorpus, rest := takeValueFlag(rest, "--corpus", "-corpus")
-	captureArg, _, rest := takeValueFlag(rest, "--capture", "-capture")
+	captureArg, hasCapture, rest := takeValueFlag(rest, "--capture", "-capture")
 	asJSON, rest := takeFlag(rest, "--json", "-json")
 	if len(rest) != 3 {
 		return fmt.Errorf("usage: groundwork verify <policy.json> <base-graph.json> <branch-graph.json> [--scope pkg,pkg] [--expect <sha>] [--corpus <dir> [--capture production|integration]] [--json]")
+	}
+	// --capture is a reconciliation input for the corpus's self-described grade
+	// (§12.6); asserting it without a corpus is a silent no-op of a trust assertion,
+	// so fail loud rather than discard it.
+	if hasCapture && !hasCorpus {
+		return fmt.Errorf("--capture %q requires --corpus (it asserts the fidelity grade of a behavioral corpus)", captureArg)
 	}
 	scope := splitComma(scopeArg)
 	p, base, branch, err := loadReviewInputs(rest[0], rest[1], rest[2])
@@ -817,11 +823,16 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 // behavioral corpus and returns the gate-blocking impeachments (§9). The corpus is
 // stampless (committed), so its code identity is the GATED commit — the branch
 // graph's own stamp (§14-E: "the committed corpus takes the gated SHA"). The
-// capture fidelity is the trusted-pipeline assertion (§12.6, the one
-// human-asserted rung): only production/integration can promote a candidate to a
-// gating impeachment, so the honest default (an empty/synthetic capture) caps every
-// candidate at CAPTURE-UNTRUSTED and an unasserted corpus never blocks. GateBlockers
-// additionally fences to a committed corpus, so a live trace can never reach here.
+// capture fidelity (§12.6, the one human-asserted rung) is reconciled from two
+// sources: the grade each golden SELF-DESCRIBES (the committed corpus carries its
+// own "production"/"integration" capture grade, written into the golden) and the
+// optional caller-asserted `capture` flag. resolveCaptureProvenance fails CLOSED on
+// a contradiction — a caller asserting a grade the corpus does not carry yields no
+// established grade, capping the capture-fidelity rung at CAPTURE-UNTRUSTED so no
+// candidate promotes. Only an established production/integration grade can promote a
+// candidate to a gating impeachment; a corpus that self-describes neither (and no
+// caller assertion) never blocks. GateBlockers additionally fences to a committed
+// corpus, so a live trace can never reach here.
 func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, capture string) ([]impeach.GateFinding, error) {
 	traces, err := loadCommittedCorpus(dir)
 	if err != nil {
@@ -835,16 +846,26 @@ func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, ca
 }
 
 // loadCommittedCorpus reads every committed canonical-trace golden (*.golden.json)
-// under dir. It fails CLOSED: a malformed golden is an error, never a silently
-// skipped trace (a dropped trace could hide an impeachment). filepath.Glob returns
-// sorted paths; the corpus digest is order-independent regardless (§5).
+// at or below dir. It fails CLOSED: it walks the tree RECURSIVELY (a flat glob
+// would silently skip goldens nested under dir — a dropped trace could hide an
+// impeachment, a fail-OPEN gate), and a malformed golden is an error, never a
+// silently skipped trace. Paths are collected in WalkDir's lexical order; the
+// corpus digest is order-independent regardless (§5).
 func loadCommittedCorpus(dir string) ([]*ir.CanonicalTrace, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "*.golden.json"))
-	if err != nil {
+	var paths []string
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".golden.json") {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("no *.golden.json traces found in %s", dir)
+		return nil, fmt.Errorf("no *.golden.json traces found under %s", dir)
 	}
 	traces := make([]*ir.CanonicalTrace, 0, len(paths))
 	for _, path := range paths {
