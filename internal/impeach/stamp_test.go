@@ -123,6 +123,29 @@ func TestCorpusDigestExcludesStamp(t *testing.T) {
 	}
 }
 
+// TestCorpusDigestIncludesProvenance pins the deliberate DIVERGENCE from golden
+// equality (golden.canonicalBytes zeroes the capture grade for behavior-purity): the
+// audit's corpus identity MUST fold the grade IN, because a production-graded corpus
+// and an integration-graded corpus of the same flow license different verdicts (only
+// the trusted grades promote a gating impeachment), so they must digest DIFFERENTLY.
+// This is the exact opposite treatment from the snapshot gate, and the pair
+// (this + TestCorpusDigestExcludesStamp) pins both halves: the run-varying Stamp is
+// excluded from corpus identity, the trust-bearing grade is included.
+func TestCorpusDigestIncludesProvenance(t *testing.T) {
+	mk := func(grade string) []*ir.CanonicalTrace {
+		return []*ir.CanonicalTrace{{Flow: "POST /x", Service: "svc", Provenance: grade}}
+	}
+	prod := corpusDigest(mk(CaptureProduction))
+	integ := corpusDigest(mk(CaptureIntegration))
+	if prod == integ {
+		t.Error("corpusDigest did not fold the capture grade into corpus identity; a production and an integration corpus of one flow collapsed to the same digest")
+	}
+	// Still a pure function of the grade (reproducible run-to-run).
+	if prod != corpusDigest(mk(CaptureProduction)) {
+		t.Error("corpusDigest not reproducible for a fixed grade")
+	}
+}
+
 func TestCorpusIdentity(t *testing.T) {
 	mk := func(stamp string) *ir.CanonicalTrace { return &ir.CanonicalTrace{Stamp: stamp} }
 	cases := []struct {
