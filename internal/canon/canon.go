@@ -458,6 +458,14 @@ func (c *canonicalizer) projectAttrs(s *capture.Span) map[string]string {
 	if stmt := opkey.Statement(s.Attrs); stmt != "" {
 		out["db.statement"] = sqlnorm.Normalize(stmt).Statement
 	}
+	// The flowmap.fqn L1 localization tag is a structural code identifier (not
+	// volatile data), kept verbatim — like db.statement, it is an explicit
+	// projection rather than a user-configurable allowlist entry, so the
+	// behavioral-impeachment severance walk can rely on it being carried whenever
+	// the producer set it (plan §7).
+	if fqn := s.Attrs[capture.FQNTagKey]; fqn != "" {
+		out[capture.FQNTagKey] = fqn
+	}
 	for k := range c.allow {
 		if v, ok := s.Attrs[k]; ok {
 			out[k] = c.redact(k, v)

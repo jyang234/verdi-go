@@ -104,6 +104,15 @@ type SpanLink struct {
 // name, so ingest (post-hoc) and the in-process harness key it identically.
 const CodeStampAttr = "flowmap.code.stamp"
 
+// FQNTagKey is the OTel SPAN attribute carrying the runtime fully-qualified name
+// of the first-party function that opened a span — the L1 capture tag the
+// behavioral-impeachment severance walk reconciles to an ssa graph node (plan §7).
+// It is flowmap-specific and the ONE owner of the name, so the in-process harness
+// producer sets it and the impeach consumer (internal/impeach) reads it under the
+// same key. Absent when the producer cannot confidently name a first-party frame
+// (fail closed: an untagged span maps no node and the walk stays at L0).
+const FQNTagKey = "flowmap.fqn"
+
 // AgreedStamp is the ONE-SOURCE code-identity reduction: the single distinct
 // NON-EMPTY stamp among the inputs, with ok=false when two non-empty stamps
 // disagree. Empty inputs are skipped, so a result of ("", true) means "no stamp

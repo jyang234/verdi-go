@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/jyang234/golang-code-graph/capture"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/ir"
 )
@@ -20,11 +21,12 @@ import (
 // `flowmap.fqn` runtime tag reconciled through canonFQN — handled here.
 
 // FQNTagKey is the L1 capture tag (§7): the runtime FQN of the function that
-// emitted a span, set by the capture harness build-time/in-process. It is absent
-// from today's pipeline (§14-D: the trace model carries no FQN tags yet), so an
-// untagged corpus simply maps no internal spans and the walk stays at L0 (entry +
-// effect anchors only) — the tag is a precision dial, never a correctness premise.
-const FQNTagKey = "flowmap.fqn"
+// opened a span, set by the in-process capture harness producer (harness.OnStart)
+// and now read here under the SAME owner-defined key (capture.FQNTagKey — one
+// source, no drift between producer and consumer). An untagged span maps no
+// internal node and the walk stays at L0, so the tag is a precision dial, never a
+// correctness premise.
+const FQNTagKey = capture.FQNTagKey
 
 // Internal-span map outcomes (§7). Only `mapped` is an anchor; the rest are
 // honest non-anchors. `absent-from-graph` is special: a tag that parses to a valid

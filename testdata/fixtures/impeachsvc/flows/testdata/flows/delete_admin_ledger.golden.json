@@ -16,7 +16,8 @@
             "peer": "postgres",
             "tier": 1,
             "attrs": {
-              "db.statement": "DELETE FROM ledger WHERE loan_id = ?"
+              "db.statement": "DELETE FROM ledger WHERE loan_id = ?",
+              "flowmap.fqn": "example.com/impeachsvc/internal/store.dbSpan"
             }
           }
         ]

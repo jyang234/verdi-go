@@ -17,7 +17,9 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,6 +143,92 @@ func (startProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) 
 		s.SetAttributes(attribute.String(capture.CorrelationKey, m.Value()))
 	}
 	s.SetAttributes(attribute.Int64(goroutineAttr, int64(goid())))
+	if fqn := firstPartyFQN(); fqn != "" {
+		s.SetAttributes(attribute.String(capture.FQNTagKey, fqn))
+	}
+}
+
+// firstPartyFQN is the in-process flowmap.fqn producer (plan §7 L1): it walks the
+// stack at span start and returns the runtime FQN of the application function
+// that opened the span — the first frame that is neither transparent
+// infrastructure (the runtime, the OTel SDK, the stdlib transport/db that sit
+// BETWEEN the SDK and the app) nor a driver boundary. The runtime spelling
+// (e.g. "example.com/svc/internal/admin.(*Admin).Purge") is exactly what
+// impeach.canonFQN reconciles to an ssa node.
+//
+// Two skip classes, because the driver lives BELOW the SUT on the stack only for
+// SUT-opened spans:
+//   - transparent infra (runtime/otel/net-http/database-sql): walked PAST, since
+//     a SUT frame sits just above them for any span the SUT opened;
+//   - driver boundary (the flowmap harness/flow/capture machinery and testing):
+//     a STOP — reaching one before any SUT frame means the span was opened by the
+//     driver itself (e.g. the harness server span before the handler runs), so
+//     there is no first-party opener and the tag is omitted.
+//
+// It fails CLOSED: no SUT frame ⇒ "" ⇒ the span carries no tag, an honest ⊥ that
+// keeps the severance walk at L0, never a guessed or driver frame. Determinism
+// holds: the FQN is a property of the call path, not of timing.
+func firstPartyFQN() string {
+	var pcs [32]uintptr
+	// Skip runtime.Callers, firstPartyFQN, and OnStart, so the walk starts at the
+	// SDK frame that invoked the processor and climbs toward the opening frame.
+	n := runtime.Callers(3, pcs[:])
+	if n == 0 {
+		return ""
+	}
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		fr, more := frames.Next()
+		switch {
+		case fr.Function == "" || isTransparentInfra(fr.Function):
+			// keep climbing toward the application frame
+		case isDriverBoundary(fr.Function):
+			return "" // opened by the harness/driver/test, not the SUT — fail closed
+		default:
+			return fr.Function // the first-party application opener
+		}
+		if !more {
+			break
+		}
+	}
+	return ""
+}
+
+// transparentInfra are the frame prefixes that sit BETWEEN the OTel SDK and the
+// application frame for a span the application opened — walked past so the SUT
+// frame just above them is found. Listed by exact infra package, never a whole
+// org, so a service under one of these paths is not mis-skipped.
+var transparentInfra = []string{
+	"runtime.",
+	"reflect.",
+	"sync.",
+	"go.opentelemetry.io/",
+	"database/sql.",
+	"net/http.",
+}
+
+// driverBoundary are the frames that OPEN spans on the SUT's behalf (the harness
+// server span) or drive it (the test). Hitting one before any SUT frame means the
+// span has no first-party opener, so the producer emits no tag rather than
+// mislabelling it with a harness or test function.
+var driverBoundary = []string{
+	"testing.",
+	"github.com/jyang234/golang-code-graph/harness",
+	"github.com/jyang234/golang-code-graph/flow",
+	"github.com/jyang234/golang-code-graph/capture",
+	"github.com/jyang234/golang-code-graph/internal/",
+}
+
+func isTransparentInfra(fn string) bool { return hasAnyPrefix(fn, transparentInfra) }
+func isDriverBoundary(fn string) bool   { return hasAnyPrefix(fn, driverBoundary) }
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 func (startProcessor) OnEnd(sdktrace.ReadOnlySpan)      {}
 func (startProcessor) Shutdown(context.Context) error   { return nil }
