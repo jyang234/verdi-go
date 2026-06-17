@@ -44,6 +44,13 @@ const (
 	// Linkname is a package using //go:linkname, which links symbols outside the
 	// visible call graph.
 	Linkname Kind = "go:linkname"
+	// ImpeachmentSeam is a human-RATIFIED seam: a site where behavior proved the
+	// static over-approximation's disclosure incomplete (the behavioral-impeachment
+	// loop's blind-spot repair, plan §8). Unlike the others it is not auto-detected
+	// from code — it is DECLARED in config (static.declaredBlindSpots), CODEOWNER-
+	// gated, each carrying the impeachment witness as its reason. flowmap merges it
+	// so the next run abstains at the seam (NEVER → CANT-PROVE) — the safe direction.
+	ImpeachmentSeam Kind = "ImpeachmentSeam"
 )
 
 // Kinds returns every blind-spot category. It exists so exhaustiveness guards —
@@ -52,8 +59,54 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, Reflect, HighFanOut, Unsafe, Cgo, Linkname,
+		NonConstantBoundaryArg, UnresolvedDispatch, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
 	}
+}
+
+// Recognized reports whether k names a known blind-spot category. It backs
+// validation of config-declared seams (graphio.mergeDeclaredBlindSpots): a seam
+// declared with a Kind outside this set is a config error, not a silent passthrough
+// of an unknown category. Derived from Kinds() so a new const is covered without a
+// second edit.
+func Recognized(k Kind) bool {
+	for _, known := range Kinds() {
+		if k == known {
+			return true
+		}
+	}
+	return false
+}
+
+// declaredKinds are the categories that originate ONLY from human config
+// declaration (static.declaredBlindSpots), NEVER from Detect. It is the single
+// source for the detected-vs-declared partition: Ratified() derives from it, and
+// TestDetectEmitsNoDeclaredKind asserts Detect's output stays disjoint from it, so
+// the load-bearing assumption "a Ratified kind in a graph came from CODEOWNER-gated
+// config, not auto-detection" is enforced rather than merely asserted in prose. A new
+// declared category is added here once and both derivations pick it up.
+func declaredKinds() []Kind {
+	return []Kind{ImpeachmentSeam}
+}
+
+// Ratified reports whether a blind spot was DECLARED by a human (config-ratified),
+// rather than auto-detected from code — membership in the declaredKinds set
+// (currently just ImpeachmentSeam, the behavioral-impeachment enactment in
+// static.declaredBlindSpots). It is the single predicate every "this is a reviewed
+// declaration, not undisclosed drift" branch consults — the blind-spot ratchet
+// (review.newBlindSpots) and the frontier reclaim markers (frontier.Classify) both
+// exclude a ratified kind, so a ratified seam neither re-blocks the change that
+// ratified it nor churns the reclaim ratios. Centralizing it here (paralleling
+// Boundary), derived from the one declaredKinds source, means a future declared kind
+// is covered in ONE edit instead of two hand-kept literal compares with divergent
+// spellings; the producer boundary (Detect never emits a declared kind) is guarded by
+// TestDetectEmitsNoDeclaredKind.
+func (k Kind) Ratified() bool {
+	for _, d := range declaredKinds() {
+		if k == d {
+			return true
+		}
+	}
+	return false
 }
 
 // Boundary reports whether a blind spot belongs to the GATED boundary subset.
@@ -258,8 +311,19 @@ func dedupSort(in []BlindSpot) []BlindSpot {
 		seen[b] = true
 		out = append(out, b)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
+	SortBlindSpots(out)
+	return out
+}
+
+// SortBlindSpots sorts a manifest in place by the canonical, run-independent order
+// (Kind, then Site, then Detail) — the ONE comparator every blind-spot ordering
+// uses, so a manifest's byte form does not depend on detection or declaration
+// order. Both Detect (via dedupSort) and the graphio declared-seam merge sort
+// through here; keeping the tie-break in one place is what stops the two copies
+// from drifting (CLAUDE.md "one source of truth").
+func SortBlindSpots(bs []BlindSpot) {
+	sort.Slice(bs, func(i, j int) bool {
+		a, b := bs[i], bs[j]
 		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
 		}
@@ -268,5 +332,4 @@ func dedupSort(in []BlindSpot) []BlindSpot {
 		}
 		return a.Detail < b.Detail
 	})
-	return out
 }

@@ -75,7 +75,13 @@ type Witness struct {
 	Observed  Observation `json:"observed"`            // the runtime counterexample
 	Severance *Severance  `json:"severance,omitempty"` // the localization of WHERE static lost it (§6, Phase 2/3)
 	Rungs     []Rung      `json:"rungs"`               // the FULL ordered downgrade ladder (§4), recorded whole
-	Verdict   string      `json:"verdict"`             // IMPEACHMENT | <downgrade> — the first failing rung's disclosure
+	Verdict   string      `json:"verdict"`             // CANDIDATE | <downgrade> | IMPEACHMENT | VIOLATED (§5/§9)
+
+	// Repair is the Phase-4 proposed substrate change (§5/§8): present on
+	// IMPEACHMENT/VIOLATED, nil otherwise. It is a PROPOSAL — never enacted here;
+	// the loop proposes, a human ratifies (§8). omitempty so a Phase-0..3 report
+	// (which never proposes) serializes and digests identically.
+	Repair *ProposedRepair `json:"repair,omitempty"`
 
 	// chain is the causal span chain the L1 localizer walks (§6/§7). Unexported, so
 	// it never serializes or perturbs the digest — the spans' canonical ops already
@@ -87,6 +93,14 @@ type Witness struct {
 // Claim is the static side of the contradiction.
 type Claim struct {
 	Reachability string `json:"reachability"` // ReachUnreachable | ReachAbsent
+
+	// Rules are the must_not_reach rule names whose `to` binds this effect — the
+	// SATISFIED (proven-absent, §14-C) proofs this impeachment touches. A bare
+	// impeachment downgrades each to CANT-PROVE; a witnessed breach of one whose
+	// `from` also binds the entry is a VIOLATED (§9). Populated only by the Phase-5
+	// verdict integration (Resolve); empty in a Phase-0..3 report (omitempty so the
+	// digest is unchanged), because the ladder has no policy to read.
+	Rules []string `json:"rules,omitempty"`
 }
 
 // Observation is the behavioral side. Entry is the coarse L0 anchor (the
@@ -133,6 +147,11 @@ func Audit(service string, ix *graph.Index, traces []*ir.CanonicalTrace, prov Pr
 	// traces' own Stamp; a committed (stampless) corpus takes the caller's injected
 	// identity. The resolution feeds the ladder's code-identity rung.
 	prov.TraceIdentity = resolveIdentity(traces, prov)
+	// Resolve the capture fidelity grade the SAME way (§12.6): a graded corpus
+	// self-describes (the producer set it), an ungraded one takes the caller's
+	// grade, and a caller grade that CONTRADICTS the corpus fails closed — so the
+	// capture-fidelity rung can no longer be asserted divorced from the capture.
+	prov.Capture = resolveCaptureProvenance(traces, prov)
 	r := Report{
 		Service:           service,
 		GraphStamp:        ix.Stamp(),
@@ -523,12 +542,22 @@ func lessObserved(a, b observedEffect) bool {
 // arrival order and of a trace appearing twice — the report is a function of
 // WHICH canonical traces were seen, not how the slice was assembled (§5).
 //
-// Each trace is digested with its code-identity Stamp zeroed, mirroring
+// Each trace is digested with its code-identity Stamp zeroed, as in
 // golden.canonicalBytes: the Stamp is run-varying provenance EXCLUDED from trace
 // equality, so two captures of one flow on different deploys are the same
 // canonical trace and yield the same corpus digest. The corpus's deploy identity
 // is carried separately as Report.TraceIdentity, never folded into the structural
 // digest (else this digest would churn per deploy).
+//
+// The capture-Provenance grade is DELIBERATELY RETAINED here — the one field where
+// this digest diverges from golden.canonicalBytes, which zeroes it. For the golden
+// the grade is not behavioral, so equality must ignore it (a "production" re-drive
+// and an "integration" re-drive of identical behavior are the same snapshot). For
+// the AUDIT the grade IS identity: a production-grade corpus and an
+// integration-grade corpus of the same flow license different verdicts (only the
+// trusted grades promote an impeachment), so they must digest DIFFERENTLY — folding
+// the grade in is what keeps the audit's identity honest about what it was allowed
+// to conclude.
 func corpusDigest(traces []*ir.CanonicalTrace) string {
 	seen := map[string]bool{}
 	var digs []string
@@ -537,7 +566,7 @@ func corpusDigest(traces []*ir.CanonicalTrace) string {
 			continue
 		}
 		cp := *t
-		cp.Stamp = ""
+		cp.Stamp = "" // Provenance intentionally kept (see doc): grade is audit identity
 		d := canonicalDigest(&cp)
 		if !seen[d] {
 			seen[d] = true

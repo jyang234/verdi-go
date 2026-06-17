@@ -103,6 +103,20 @@ func TestLoadRejectsBadTier(t *testing.T) {
 	}
 }
 
+// A ratified seam (§8) must carry both a site to blind and a reason (the
+// impeachment witness). Either missing is undisclosed drift, refused at load.
+func TestLoadRejectsDeclaredBlindSpotMissingFields(t *testing.T) {
+	if _, err := Load([]byte("static:\n  declaredBlindSpots:\n    - reason: stated\n")); err == nil {
+		t.Fatal("expected error on a declared blind spot with no site")
+	}
+	if _, err := Load([]byte("static:\n  declaredBlindSpots:\n    - site: ex.com/svc.Seam\n")); err == nil {
+		t.Fatal("expected error on a declared blind spot with no reason")
+	}
+	if _, err := Load([]byte("static:\n  declaredBlindSpots:\n    - site: ex.com/svc.Seam\n      reason: ratified witness\n")); err != nil {
+		t.Fatalf("a site+reason seam must load: %v", err)
+	}
+}
+
 func TestCanonDefaults(t *testing.T) {
 	c, err := Load(nil)
 	if err != nil {

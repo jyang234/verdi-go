@@ -123,6 +123,29 @@ func TestCorpusDigestExcludesStamp(t *testing.T) {
 	}
 }
 
+// TestCorpusDigestIncludesProvenance pins the deliberate DIVERGENCE from golden
+// equality (golden.canonicalBytes zeroes the capture grade for behavior-purity): the
+// audit's corpus identity MUST fold the grade IN, because a production-graded corpus
+// and an integration-graded corpus of the same flow license different verdicts (only
+// the trusted grades promote a gating impeachment), so they must digest DIFFERENTLY.
+// This is the exact opposite treatment from the snapshot gate, and the pair
+// (this + TestCorpusDigestExcludesStamp) pins both halves: the run-varying Stamp is
+// excluded from corpus identity, the trust-bearing grade is included.
+func TestCorpusDigestIncludesProvenance(t *testing.T) {
+	mk := func(grade string) []*ir.CanonicalTrace {
+		return []*ir.CanonicalTrace{{Flow: "POST /x", Service: "svc", Provenance: grade}}
+	}
+	prod := corpusDigest(mk(CaptureProduction))
+	integ := corpusDigest(mk(CaptureIntegration))
+	if prod == integ {
+		t.Error("corpusDigest did not fold the capture grade into corpus identity; a production and an integration corpus of one flow collapsed to the same digest")
+	}
+	// Still a pure function of the grade (reproducible run-to-run).
+	if prod != corpusDigest(mk(CaptureProduction)) {
+		t.Error("corpusDigest not reproducible for a fixed grade")
+	}
+}
+
 func TestCorpusIdentity(t *testing.T) {
 	mk := func(stamp string) *ir.CanonicalTrace { return &ir.CanonicalTrace{Stamp: stamp} }
 	cases := []struct {
@@ -169,6 +192,34 @@ func TestResolveIdentity(t *testing.T) {
 	}
 }
 
+// TestResolveCaptureProvenance pins the §12.6 reconciliation — the same shape as
+// resolveIdentity, applied to the producer-set capture grade. A contradiction
+// (caller asserts a grade the corpus does not carry) fails CLOSED to "", which caps
+// the capture-fidelity rung at CAPTURE-UNTRUSTED: the audit can never assert a grade
+// the capture itself contradicts.
+func TestResolveCaptureProvenance(t *testing.T) {
+	mk := func(grade string) []*ir.CanonicalTrace { return []*ir.CanonicalTrace{{Provenance: grade}} }
+	cases := []struct {
+		name   string
+		traces []*ir.CanonicalTrace
+		caller string
+		want   string
+	}{
+		{"corpus-self-describes", mk(CaptureIntegration), "", CaptureIntegration},
+		{"caller-asserts-ungraded-corpus", mk(""), CaptureProduction, CaptureProduction},
+		{"both-agree", mk(CaptureIntegration), CaptureIntegration, CaptureIntegration},
+		{"contradiction-fails-closed", mk(CaptureIntegration), CaptureProduction, ""},
+		{"neither", mk(""), "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveCaptureProvenance(c.traces, Provenance{Capture: c.caller}); got != c.want {
+				t.Errorf("resolveCaptureProvenance = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // TestImpeachsvcLivePathPromotes is the live-path companion to the injected-
 // provenance promotion test: the real impeachsvc graph stamped with a commit, and
 // the real captured traces carrying that SAME commit as their Stamp, yield an
@@ -188,7 +239,10 @@ func TestImpeachsvcLivePathPromotes(t *testing.T) {
 	purge.Stamp = commit
 	create.Stamp = commit
 
-	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, Provenance{Capture: CaptureProduction})
+	// No caller provenance at all: the live corpus self-describes BOTH its code
+	// identity (the Stamp set above) AND its capture grade (the goldens carry
+	// "integration", §12.6) — the audit asserts nothing.
+	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, Provenance{})
 	if len(r.Candidates) != 1 {
 		t.Fatalf("want 1 candidate, got %d: %+v", len(r.Candidates), r.Candidates)
 	}

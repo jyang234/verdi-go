@@ -19,10 +19,15 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/impeach"
+	"github.com/jyang234/golang-code-graph/ir"
+
+	"github.com/jyang234/golang-code-graph/capture"
 )
 
-const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]
-   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]
+const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--corpus <dir>] [--capture production|integration] [--expect <stamp>] [--log <calls.jsonl>]
+   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--corpus <name>=<dir> ...] [--capture <name>=<grade> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]
+--corpus enables the audit-only impeach lens (a committed *.golden.json behavioral corpus); --capture asserts its fidelity grade and requires --corpus.
 add --http <addr> [--token <secret>] to either form for the team-shared streamable-HTTP transport (token also read from $GROUNDWORK_MCP_TOKEN; required off loopback)`
 
 // cmdMCP serves the agent-facing MCP surface over stdio (IT-4): the triage,
@@ -48,6 +53,8 @@ add --http <addr> [--token <secret>] to either form for the team-shared streamab
 func cmdMCP(args []string) error {
 	servicePairs, args := takeValueFlags(args, "--service", "-service")
 	policyPairs, args := takeValueFlags(args, "--policy", "-policy")
+	corpusPairs, args := takeValueFlags(args, "--corpus", "-corpus")
+	capturePairs, args := takeValueFlags(args, "--capture", "-capture")
 	expectPairs, args := takeValueFlags(args, "--expect", "-expect")
 	logPath, hasLog, args := takeValueFlag(args, "--log", "-log")
 	httpAddr, hasHTTP, args := takeValueFlag(args, "--http", "-http")
@@ -96,10 +103,16 @@ func cmdMCP(args []string) error {
 		if len(expectPairs) > 0 {
 			srv.expect, srv.hasExpect = expectPairs[len(expectPairs)-1], true
 		}
+		// takeValueFlag's last-wins for a repeated flag, preserved exactly: earlier
+		// values are dropped unread, never loaded-and-discarded.
 		if len(policyPairs) > 1 {
-			// takeValueFlag's last-wins for a repeated flag, preserved exactly:
-			// earlier values are dropped unread, never loaded-and-discarded.
 			policyPairs = policyPairs[len(policyPairs)-1:]
+		}
+		if len(corpusPairs) > 1 {
+			corpusPairs = corpusPairs[len(corpusPairs)-1:]
+		}
+		if len(capturePairs) > 1 {
+			capturePairs = capturePairs[len(capturePairs)-1:]
 		}
 		services[args[0]] = srv
 	}
@@ -125,6 +138,73 @@ func cmdMCP(args []string) error {
 			return err
 		}
 		srv.p = p
+	}
+	// --capture asserts a behavioral corpus's fidelity grade. Only production and
+	// integration may be asserted (capture.AssertableGrade — the ONE source the verify
+	// CLI validates against too); an unrecognized or empty grade is REFUSED here, not
+	// laundered into a silent CAPTURE-UNTRUSTED downgrade deep in the ladder (tenet 2).
+	for _, pair := range capturePairs {
+		grade := pair
+		if len(servicePairs) > 0 {
+			name, g, ok := strings.Cut(pair, "=")
+			srv := fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--capture wants <name>=<grade> naming a --service, got %q", pair)
+			}
+			grade = g
+			if !capture.AssertableGrade(grade) {
+				return fmt.Errorf("--capture for service %q: grade must be %q or %q, got %q", name, capture.CaptureProduction, capture.CaptureIntegration, grade)
+			}
+			srv.capture = grade
+			continue
+		}
+		if !capture.AssertableGrade(grade) {
+			return fmt.Errorf("--capture: grade must be %q or %q, got %q", capture.CaptureProduction, capture.CaptureIntegration, grade)
+		}
+		fleet.lone().capture = grade
+	}
+	for _, pair := range corpusPairs {
+		dir := pair
+		srv := fleet.lone()
+		if len(servicePairs) > 0 {
+			name, d, ok := strings.Cut(pair, "=")
+			srv = fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--corpus wants <name>=<dir> naming a --service, got %q", pair)
+			}
+			dir = d
+		}
+		// One source of truth: the same recursive, fail-closed loader the verify gate
+		// uses (loadCommittedCorpus), so the MCP audit can never see a different trace
+		// set than the gate would from the same directory.
+		traces, err := loadCommittedCorpus(dir)
+		if err != nil {
+			return err
+		}
+		srv.corpus = traces
+		srv.corpusDir = dir
+	}
+	// Fail closed on a dangling impeach configuration, symmetrically: a capture grade
+	// with no corpus to grade, OR a corpus with no policy to integrate its witnesses
+	// against (impeach needs both — Resolve folds witnesses into must_not_reach). Name
+	// the service only in the fleet form, where the user supplied the name; the
+	// single-graph form has a synthetic name (the graph path) that would only confuse.
+	// len(), not == nil: loadCommittedCorpus never returns a non-nil empty slice today,
+	// but the guard states the intent ("no corpus") rather than relying on that.
+	for _, name := range fleet.names {
+		s := fleet.services[name]
+		svcCtx := ""
+		if len(servicePairs) > 0 {
+			svcCtx = fmt.Sprintf(" for service %q", name)
+		}
+		if s.capture != "" && len(s.corpus) == 0 {
+			return fmt.Errorf("--capture%s requires --corpus (it asserts the fidelity grade of a behavioral corpus)", svcCtx)
+		}
+		if len(s.corpus) > 0 && s.p == nil {
+			return fmt.Errorf("--corpus%s requires --policy (the impeach audit integrates witnesses against the policy's must_not_reach rules)", svcCtx)
+		}
+		// Inputs are final: render the impeach audit once (refreshed only on reload).
+		s.computeImpeach()
 	}
 	if hasLog {
 		// The E4 measurement apparatus: a deterministic transcript of tool
@@ -243,6 +323,27 @@ type mcpServer struct {
 	p         *policy.Policy
 	expect    string
 	hasExpect bool
+
+	// corpus is the committed behavioral corpus the impeach lens audits the graph
+	// against — loaded ONCE at startup, exactly like p (policy): a load-once input,
+	// not staleness-tracked (only the graph is, via reload — it alone changes under a
+	// running server by design, on redeploy; a committed corpus changes only on a git
+	// action in the checkout, where a restart is the natural refresh). The impeach
+	// card discloses this load-once contract (corpusDir + count) so the freshness
+	// boundary is legible rather than silent. capture is the optional human-asserted
+	// capture-fidelity grade reconciled against the corpus's own self-declared grade
+	// (§12.6); empty means "take the corpus's grade verbatim".
+	corpus    []*ir.CanonicalTrace
+	corpusDir string
+	capture   string
+
+	// impeachBody is the rendered impeach audit, computed ONCE when corpus+policy are
+	// present (computeImpeach) and refreshed only on reload — the audit is a pure
+	// function of (ix, corpus, capture, rules), all immutable between reloads, so
+	// recomputing the graph-reachability + corpus-hash work on every call would be
+	// wasted (it ran under the read lock, so concurrent callers repeated it). "" when
+	// the lens is unconfigured; the per-call staleNote prefix stays dynamic.
+	impeachBody string
 }
 
 func (s *mcpServer) load() error {
@@ -471,6 +572,11 @@ func toolDefs() []map[string]any {
 		{
 			"name":        "exceptions",
 			"description": "Audit every policy allow-list entry and rule pattern against a loaded graph; DEAD entries suppress or bind nothing and should be fixed or deleted. Requires the service to be started with --policy.",
+			"inputSchema": obj(map[string]any{}),
+		},
+		{
+			"name":        "impeach",
+			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
@@ -714,6 +820,7 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 			s.expect, s.hasExpect = old, oldHas
 			return toolError("reload failed (previous graph still served): " + err.Error())
 		}
+		s.computeImpeach() // the graph changed; re-audit against the (unchanged) corpus
 		return toolText("graph reloaded from " + s.path)
 	case "ground":
 		card, err := ground.For(ix, p, a.FQN)
@@ -782,9 +889,87 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 		}
 		fmt.Fprintf(&b, "\n%d dead exception(s), %d dead rule pattern(s)\n", fitness.DeadCount(xs), fitness.DeadPatternCount(ls))
 		return withStale(toolText(b.String()))
+	case "impeach":
+		if len(s.corpus) == 0 {
+			return toolError("the server was started without --corpus; impeach needs a committed behavioral corpus to audit the graph against")
+		}
+		if p == nil {
+			return toolError("the server was started without --policy; impeach integrates witnesses against the policy's must_not_reach rules and needs one")
+		}
+		return withStale(toolText(s.impeachBody)) // precomputed at load/reload; staleNote stays dynamic
 	default:
 		return toolError("unknown tool: " + name)
 	}
+}
+
+// computeImpeach renders the audit-only impeachment disclosure for this service and
+// caches it in s.impeachBody: the loaded graph joined against its committed corpus,
+// resolved against the policy's must_not_reach rules. It runs at OriginLive ON
+// PURPOSE — the lens NEVER gates, so GateBlockers is structurally empty and the agent
+// can never read this as a merge verdict against a possibly-local graph; the gate is
+// verify --corpus over CI graphs (§13 crack #2). Every candidate is disclosed with
+// its ladder verdict regardless, so "observe-first" holds.
+//
+// Computed ONCE (here, called when inputs are final and on every reload) rather than
+// per call: the body is a pure function of (graph, corpus, capture, rules) — all
+// immutable between reloads — so the same inputs yield byte-identical text, and
+// re-running the graph-reachability BFS + corpus hash on each read-locked call would
+// be wasted work repeated across concurrent clients. A no-op until both corpus and
+// policy are present (the lens is unconfigured otherwise); the per-call staleNote is
+// added at call time, never cached.
+func (s *mcpServer) computeImpeach() {
+	if len(s.corpus) == 0 || s.p == nil {
+		s.impeachBody = ""
+		return
+	}
+	p := s.p
+	prov := impeach.Provenance{TraceIdentity: s.ix.Stamp(), Capture: s.capture}
+	r := impeach.Audit(p.Service, s.ix, s.corpus, prov)
+	res := impeach.Resolve(r, s.ix, p.MustNotReach, impeach.OriginLive)
+	var b strings.Builder
+	fmt.Fprintf(&b, "behavioral audit (AUDIT-ONLY, never a gate) — corpus %s", res.CorpusDigest)
+	if res.CaptureProvenance != "" {
+		fmt.Fprintf(&b, ", capture %s", res.CaptureProvenance)
+	} else {
+		b.WriteString(", capture UNGRADED (caps every candidate below IMPEACHMENT)")
+	}
+	b.WriteString("\n")
+	if len(res.Candidates) == 0 {
+		b.WriteString("no impeachment candidates: every observed effect is statically accounted for, within the disclosed scope and blind spots\n")
+	}
+	for _, w := range res.Candidates {
+		fmt.Fprintf(&b, "\n• %s  %s\n", w.Verdict, w.Effect)
+		fmt.Fprintf(&b, "    observed in flow %q", w.Observed.Flow)
+		if w.Observed.Entry != "" {
+			fmt.Fprintf(&b, " from %s", w.Observed.Entry)
+		}
+		b.WriteString("\n")
+		if w.Severance != nil && w.Severance.Site != "" {
+			disclosed := "UNDISCLOSED blind spot"
+			if w.Severance.FrontierKnown {
+				disclosed = "disclosed seam"
+			}
+			fmt.Fprintf(&b, "    static lost it at: %s (%s, %s)\n", w.Severance.Site, w.Severance.Kind, disclosed)
+		}
+		if len(w.Claim.Rules) > 0 {
+			fmt.Fprintf(&b, "    touches must_not_reach rule(s): %s\n", strings.Join(w.Claim.Rules, ", "))
+		}
+	}
+	for _, c := range res.Caveats {
+		fmt.Fprintf(&b, "\n⚠️ %s", c)
+	}
+	if len(res.Caveats) > 0 {
+		b.WriteString("\n")
+	}
+	// Disclose the load-once contract so corpus freshness is legible, not silent
+	// (the graph alone is staleness-tracked; a committed corpus is a startup input).
+	// CorpusDigest above IS the agent's integrity check: recompute over the dir to
+	// detect drift since this server loaded it.
+	if s.corpusDir != "" {
+		fmt.Fprintf(&b, "\ncorpus: %d golden(s) under %s, loaded at startup — restart to refresh (the digest above pins the exact set audited)\n", len(s.corpus), s.corpusDir)
+	}
+	b.WriteString("\nThis lens DISCLOSES; it does not gate. The deterministic merge gate is `groundwork verify --corpus` over CI-built base/branch graphs.\n")
+	s.impeachBody = b.String()
 }
 
 func toolText(text string) map[string]any {

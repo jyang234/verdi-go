@@ -19,16 +19,23 @@ import "strings"
 // claimed to reconcile them could mis-anchor (§7's ⊥ policy). The severance map
 // (spanmap.go) absorbs every ⊥ as an un-anchored gap.
 //
-// SOUNDNESS CAVEAT (§7 fail-closed property 1, §12.5): the pkg/symbol split for an
-// UNPARENTHESIZED runtime spelling (the value-method vs package-func ambiguity)
-// uses the first '.' after the last '/', which is only correct when the package
-// path's final segment is a clean identifier. For an exotic dotted-final-segment
-// import path (gopkg.in/yaml.v3) the two spellings can split differently —
-// ⊥-asymmetry — which is exactly why the sharp `absent-from-graph` signal it feeds
-// is trusted only at L2 until the symmetry fuzz proves it over a realistic FQN
-// domain. The parenthesized (ssa) and `.(*` (runtime ptr-method) forms split the
-// receiver at its LAST '.', which is robust to dotted paths, so methods reconcile
-// symmetrically regardless.
+// SOUNDNESS (§7 fail-closed property 1, §12.5 — now CLOSED): the pkg/symbol split
+// for an UNPARENTHESIZED runtime spelling (the value-method vs package-func
+// ambiguity) uses the first '.' after the last '/', which is only correct when the
+// package path's final segment is a clean identifier. When the final segment itself
+// contains a '.' — the well-known third-party case (gopkg.in/yaml.v3), but ALSO any
+// first-party package whose final path element carries a dot — the runtime
+// VALUE-method form (`pkg.Recv.Name`) splits to three trailing segments and ⊥s, while the
+// parenthesized ssa form (`(pkg.Recv).Name`) would otherwise key — an asymmetry that
+// could mint a phantom missing node. canonFQN therefore ⊥s a value method on a
+// dotted-final-segment package on the SSA side too (matching the runtime ⊥), so ⊥ is
+// symmetric over the WHOLE domain — clean segments key on both sides, dotted-segment
+// value methods ⊥ on both — proven by FuzzCanonFQNSymmetry over both. The
+// parenthesized (ssa) and `.(*` (runtime ptr-method) forms split the receiver at its
+// LAST '.', robust to dotted paths, so methods reconcile symmetrically; a package
+// func is spelled identically on both sides, so it keys identically (consistently,
+// even if mis-split on a dotted path — a match, never a phantom). With symmetry
+// universal, the sharp `absent-from-graph` signal is sound at L1.
 
 // FQNKey identifies a function up to spelling: two spellings of the same function
 // canonicalize to the same key, and equality is value equality. Recv is "" for a
@@ -106,6 +113,15 @@ func parseFQN(raw string) (FQNKey, string, bool) {
 		}
 		if name == "init" {
 			return FQNKey{}, "package init", false
+		}
+		// A VALUE method on a dotted-final-segment package (gopkg.in/yaml.v3, or any
+		// first-party package whose final path element carries a dot) cannot be
+		// reconciled with its runtime spelling (`pkg.Recv.Name`, which ⊥s as an
+		// ambiguous >2-segment symbol), so ⊥ it here too — keeping ⊥ symmetric so the
+		// sharp absent-from-graph signal stays sound (§12.5). Pointer methods use the
+		// unambiguous `.(*` runtime marker, so they reconcile regardless.
+		if !ptr && dottedFinalSegment(pkg) {
+			return FQNKey{}, "value method on dotted-final-segment package (runtime spelling is ambiguous, §12.5)", false
 		}
 		return FQNKey{Pkg: pkg, Recv: recv, Ptr: ptr, Name: name}, "", true
 	}
@@ -193,6 +209,21 @@ func hasRuntimeClosure(raw string) bool {
 		}
 		from = from + i + len(marker)
 	}
+}
+
+// dottedFinalSegment reports whether pkg's final path element (after the last '/')
+// contains a '.'. This covers the third-party case (gopkg.in/yaml.v3) AND any
+// first-party package whose final path element carries a dot — wherever the runtime
+// value-method spelling cannot be split back to the same (pkg, recv) the
+// parenthesized ssa spelling yields, the §12.5 ambiguity. canonFQN ⊥s a value
+// method on such a package to keep ⊥ symmetric across the two spellings; it is not
+// limited to "exotic" import paths.
+func dottedFinalSegment(pkg string) bool {
+	seg := pkg
+	if i := strings.LastIndexByte(pkg, '/'); i >= 0 {
+		seg = pkg[i+1:]
+	}
+	return strings.Contains(seg, ".")
 }
 
 // splitLastDot splits s at its LAST '.', returning (before, after). Used for a

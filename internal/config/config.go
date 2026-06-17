@@ -108,6 +108,28 @@ type StaticConfig struct {
 	// handler is a single positional func argument (echo and most custom routers;
 	// not gin's variadic handlers or gorilla's chained .Methods()).
 	Routers []RouterHint `yaml:"routers"`
+
+	// DeclaredBlindSpots are human-RATIFIED seams (the behavioral-impeachment loop's
+	// blind-spot repairs, plan §8): sites where static must ABSTAIN because behavior
+	// proved the over-approximation's disclosure incomplete. flowmap merges each into
+	// the graph's blind spots so the next run is honest at the seam (NEVER →
+	// CANT-PROVE — the safe direction; a declared seam can only WEAKEN proofs, never
+	// hide a violation, since reachability is edge-based). This is the ENACTMENT half
+	// of the loop: the loop proposes + self-extinguish-verifies a repair, and a
+	// CODEOWNER commits the seam here (paired with a blind_spot_ratchet allow-list
+	// entry in the policy, §8 crack #6). Each carries a reason — the witness — for audit.
+	DeclaredBlindSpots []DeclaredBlindSpot `yaml:"declaredBlindSpots,omitempty"`
+}
+
+// DeclaredBlindSpot is one ratified seam (plan §8). Site is the FQN to blind (the
+// severance Site the impeachment localized). Kind defaults to "ImpeachmentSeam" (the
+// behaviorally-discovered category) and must, when set, name a recognized
+// blindspots.Kind. Reason records the impeachment witness; it is required for audit
+// (a seam blinded without a stated reason is drift, not a ratified disclosure).
+type DeclaredBlindSpot struct {
+	Site   string `yaml:"site"`
+	Kind   string `yaml:"kind,omitempty"`
+	Reason string `yaml:"reason,omitempty"`
 }
 
 // RouterHint declares a per-method HTTP router for root discovery. Each named
@@ -339,6 +361,20 @@ func (c *Config) validate() error {
 		}
 		if r.HandlerArg != nil && *r.HandlerArg < 0 {
 			return fmt.Errorf("flowmap config: static.routers[%d].handlerArg %d must be >= 0", i, *r.HandlerArg)
+		}
+	}
+	// A ratified seam must name a site to blind and a reason (the impeachment
+	// witness). A seam with no site blinds nothing; a seam with no reason is
+	// undisclosed drift, not a ratified disclosure — fail closed at load rather
+	// than silently merging a reasonless blind spot. The Kind is validated against
+	// the recognized set in graphio (config cannot import blindspots — that package
+	// imports config), where the merge happens.
+	for i, b := range c.Static.DeclaredBlindSpots {
+		if b.Site == "" {
+			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d]: site is required", i)
+		}
+		if b.Reason == "" {
+			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): reason is required (the impeachment witness)", i, b.Site)
 		}
 	}
 	return nil

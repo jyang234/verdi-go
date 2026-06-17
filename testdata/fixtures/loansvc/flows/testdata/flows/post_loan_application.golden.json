@@ -1,6 +1,7 @@
 {
   "flow": "POST /loan-application",
   "service": "loansvc",
+  "provenance": "integration",
   "schema_version": "flowmap.trace/v1",
   "root": {
     "op": "HTTP POST /loan-application",
@@ -9,22 +10,41 @@
     "tier": 1,
     "children": [
       {
-        "concurrent": true,
         "members": [
           {
-            "op": "DB postgres SELECT applicants",
-            "kind": "client",
-            "peer": "postgres",
-            "tier": 2,
+            "op": "evaluateApplication",
+            "kind": "internal",
+            "peer": "",
+            "tier": 3,
             "attrs": {
-              "db.statement": "SELECT name , income FROM applicants WHERE id = ?"
-            }
-          },
-          {
-            "op": "HTTP GET credit-bureau /score/{id}",
-            "kind": "client",
-            "peer": "credit-bureau",
-            "tier": 1
+              "flowmap.fqn": "example.com/loansvc/internal/origination.(*Evaluator).Evaluate"
+            },
+            "children": [
+              {
+                "concurrent": true,
+                "members": [
+                  {
+                    "op": "DB postgres SELECT applicants",
+                    "kind": "client",
+                    "peer": "postgres",
+                    "tier": 2,
+                    "attrs": {
+                      "db.statement": "SELECT name , income FROM applicants WHERE id = ?",
+                      "flowmap.fqn": "example.com/loansvc/internal/store.dbSpan"
+                    }
+                  },
+                  {
+                    "op": "HTTP GET credit-bureau /score/{id}",
+                    "kind": "client",
+                    "peer": "credit-bureau",
+                    "tier": 1,
+                    "attrs": {
+                      "flowmap.fqn": "example.com/loansvc/internal/client.(*Client).Call"
+                    }
+                  }
+                ]
+              }
+            ]
           }
         ]
       },
@@ -34,7 +54,10 @@
             "op": "HTTP POST payment-gw /charge/{id}",
             "kind": "client",
             "peer": "payment-gw",
-            "tier": 1
+            "tier": 1,
+            "attrs": {
+              "flowmap.fqn": "example.com/loansvc/internal/client.(*Client).Call"
+            }
           }
         ]
       },
@@ -44,7 +67,10 @@
             "op": "PUBLISH loan.approved",
             "kind": "producer",
             "peer": "Bus",
-            "tier": 1
+            "tier": 1,
+            "attrs": {
+              "flowmap.fqn": "example.com/loansvc/internal/eventbus.(*Bus).Publish"
+            }
           }
         ]
       },
@@ -54,7 +80,10 @@
             "op": "PUBLISH disbursement.initiated",
             "kind": "producer",
             "peer": "Bus",
-            "tier": 1
+            "tier": 1,
+            "attrs": {
+              "flowmap.fqn": "example.com/loansvc/internal/eventbus.(*Bus).Publish"
+            }
           }
         ]
       },
@@ -64,19 +93,9 @@
             "op": "PUBLISH loan.review",
             "kind": "producer",
             "peer": "Bus",
-            "tier": 1
-          }
-        ]
-      },
-      {
-        "members": [
-          {
-            "op": "DB postgres INSERT ledger",
-            "kind": "client",
-            "peer": "postgres",
             "tier": 1,
             "attrs": {
-              "db.statement": "INSERT INTO ledger ( loan_id , amount ) VALUES (?)"
+              "flowmap.fqn": "example.com/loansvc/internal/eventbus.(*Bus).Publish"
             }
           }
         ]
@@ -84,13 +103,43 @@
       {
         "members": [
           {
-            "op": "DB postgres INSERT audit_log",
-            "kind": "client",
-            "peer": "postgres",
-            "tier": 1,
+            "op": "disburse",
+            "kind": "internal",
+            "peer": "",
+            "tier": 3,
             "attrs": {
-              "db.statement": "INSERT INTO audit_log ( loan_id ) VALUES (?)"
-            }
+              "flowmap.fqn": "example.com/loansvc/internal/origination.(*Evaluator).disburse"
+            },
+            "children": [
+              {
+                "members": [
+                  {
+                    "op": "DB postgres INSERT ledger",
+                    "kind": "client",
+                    "peer": "postgres",
+                    "tier": 1,
+                    "attrs": {
+                      "db.statement": "INSERT INTO ledger ( loan_id , amount ) VALUES (?)",
+                      "flowmap.fqn": "example.com/loansvc/internal/store.dbSpan"
+                    }
+                  }
+                ]
+              },
+              {
+                "members": [
+                  {
+                    "op": "DB postgres INSERT audit_log",
+                    "kind": "client",
+                    "peer": "postgres",
+                    "tier": 1,
+                    "attrs": {
+                      "db.statement": "INSERT INTO audit_log ( loan_id ) VALUES (?)",
+                      "flowmap.fqn": "example.com/loansvc/internal/store.dbSpan"
+                    }
+                  }
+                ]
+              }
+            ]
           }
         ]
       }

@@ -116,3 +116,27 @@ func TestAgreedStamp(t *testing.T) {
 		})
 	}
 }
+
+// TestAssertableGrade pins the human-assertable capture-fidelity vocabulary: only
+// production and integration may be asserted via --capture; synthetic (producer-set,
+// never promotes) and the empty string ("not asserted") are not assertions. This is
+// the ONE source both the verify CLI and the MCP server validate against, so the
+// rejection of a bad grade can never drift between the two boundaries.
+func TestAssertableGrade(t *testing.T) {
+	cases := []struct {
+		grade string
+		want  bool
+	}{
+		{CaptureProduction, true},
+		{CaptureIntegration, true},
+		{CaptureSynthetic, false},
+		{"", false},
+		{"staging", false},
+		{"Production", false}, // case-sensitive: the vocabulary is exact
+	}
+	for _, c := range cases {
+		if got := AssertableGrade(c.grade); got != c.want {
+			t.Errorf("AssertableGrade(%q) = %v, want %v", c.grade, got, c.want)
+		}
+	}
+}

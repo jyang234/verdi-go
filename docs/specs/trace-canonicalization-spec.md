@@ -43,6 +43,13 @@ type CanonicalTrace struct {
     Service  string           // the self lifeline (emitted in §3.5; the renderer uses it)
     Root     *CanonicalSpan   // normalized span tree
     Discards DiscardManifest  // what was dropped, for transparency in review
+
+    // Identity/provenance fields — carried alongside the structural snapshot, with
+    // deliberately different equality treatment (see below and the golden-diff spec):
+    Stamp      string // code-identity (deployed commit) of the captured code; behavioral
+                      // mirror of the static graph's --stamp. Run-varying provenance.
+    Provenance string // capture-fidelity grade (production|integration|synthetic),
+                      // producer-set; the behavioral-impeachment audit's trust input.
 }
 
 type CanonicalSpan struct {
@@ -70,6 +77,14 @@ type ChildGroup struct {
 Serialization is canonical JSON/YAML: keys sorted, no timestamps, stable tree (ordering already fixed by the transform). **The golden is the IR, not the Mermaid.** Mermaid is a deterministic *view* derived from the IR and committed alongside it for human review; keeping the assertion on the IR avoids Mermaid-renderer drift polluting the gate.
 
 This is the **authoritative IR** shared across components. The renderer consumes `{Service, Op, Kind, Peer, Tier, Status, ErrorType, Children}`; the diff engine consumes `{Op, Kind, Peer, Tier, Status, ErrorType, Attrs, Children}`; `Discards` is review-transparency only. `Service` and `Peer` are derived during the canonical-key step (§3.5), so emitting them is free.
+
+The identity/provenance fields get **three distinct equality treatments**, so snapshot equality rests on flow *behavior* alone (the golden-diff spec is the authority; summarized here because it shapes the IR contract):
+
+- **`Stamp`** — neither written to the committed golden nor compared. It is run-varying provenance (the deployed commit); writing it would churn the golden every deploy. Identity is injected at audit time instead.
+- **`Provenance`** — **written** into the committed golden (so the corpus self-describes its capture grade for the impeachment audit) but **excluded from equality**. Two captures of identical behavior at different grades (a harness "integration" re-drive vs a "production" deploy) must still assert equal — the grade is a trust input, not a behavioral dimension.
+- **`Discards`** — excluded from equality; a review-only record of what was dropped.
+
+(The behavioral-impeachment `corpusDigest` deliberately diverges from golden equality on `Provenance`: there the grade *is* folded in, because for the audit the grade is identity.)
 
 ---
 
@@ -119,6 +134,7 @@ Derive the span's normalized features from semantic conventions (span kind → b
 ### 3.7 Structural normalization
 - **Loop collapse.** Data-dependent repetition (N identical subtrees) collapses to one representative with a `Multiplicity` class (`1..*`), so processing 3 vs. 300 items yields the same snapshot. Configurable to exact-count where N is fixed and meaningful.
 - **Salience filtering.** Using the `Tier` assigned in §3.6, drop spans above the configured threshold (default `tier ≤ warn`, omitting tier 3/4) and promote survivors. The same classifier drives the static artifact too — one intent encoding, two consumers.
+  - **Keep-tagged-waypoint exception (L1 localization).** A sub-threshold internal span is *also* kept when it carries a non-empty `flowmap.fqn` localization tag (`capture.FQNTagKey`): it is a first-party **waypoint** the behavioral-impeachment severance walk anchors on (impeachment plan §7), so dropping it would erase the very signal it exists to carry. The keep predicate is `tier ≤ threshold || Attrs[FQNTagKey] != ""`. It is scoped to **non-empty** tags — an empty tag (the producer's fail-closed ⊥ when no first-party opener was found) does *not* keep the span — and only the in-process harness producer sets the tag, so post-hoc/production (untagged) ingestion contracts compute exactly as before. The kept tag survives attribute projection verbatim (the severance walk reconciles that runtime spelling to an ssa node). The keep is deterministic: the tag is a pure function of the call path, and the kept span's ordering/collapse already ran upstream, so the snapshot stays byte-identical across runs.
 - **Retries.** Preserve by default (a retry is behaviorally real) but flag error-then-success patterns; allow normalization of *known-transient* retries via config. Lean toward preserving and letting review judge.
 - **Errors.** Retain `Status`; normalize `ErrorType` to the exception class, dropping message/stacktrace. An errored flow is a *different* flow identity than a successful one — the success-path test and the failure-path test are separate flows with separate goldens, which is correct.
 

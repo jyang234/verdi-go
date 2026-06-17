@@ -1,6 +1,7 @@
 {
   "flow": "DELETE /admin/ledger",
   "service": "impeachsvc",
+  "provenance": "integration",
   "schema_version": "flowmap.trace/v1",
   "root": {
     "op": "HTTP DELETE /admin/ledger",
@@ -11,13 +12,29 @@
       {
         "members": [
           {
-            "op": "DB postgres DELETE ledger",
-            "kind": "client",
-            "peer": "postgres",
-            "tier": 1,
+            "op": "admin.purge",
+            "kind": "internal",
+            "peer": "",
+            "tier": 3,
             "attrs": {
-              "db.statement": "DELETE FROM ledger WHERE loan_id = ?"
-            }
+              "flowmap.fqn": "example.com/impeachsvc/internal/admin.(*Admin).PurgeLedger"
+            },
+            "children": [
+              {
+                "members": [
+                  {
+                    "op": "DB postgres DELETE ledger",
+                    "kind": "client",
+                    "peer": "postgres",
+                    "tier": 1,
+                    "attrs": {
+                      "db.statement": "DELETE FROM ledger WHERE loan_id = ?",
+                      "flowmap.fqn": "example.com/impeachsvc/internal/store.dbSpan"
+                    }
+                  }
+                ]
+              }
+            ]
           }
         ]
       }

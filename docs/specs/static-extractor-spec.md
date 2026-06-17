@@ -104,10 +104,23 @@ Emitted alongside the graph so a reviewer never operates on false completeness:
 - **Over-approximation** — interfaces with many implementers where the algorithm added many candidate edges (flag high fan-out).
 - **`reflect`** usage — invisible to the call graph.
 - **`unsafe` / `go:linkname` / cgo** boundaries — can hide edges.
+- **`ImpeachmentSeam`** — a human-RATIFIED seam (see §7.1), distinct from the others in that it is *declared in config*, not auto-detected from code.
 
-This parallels canonicalization's `Complete` flag and the harness's truncation handling: every component discloses where it's uncertain.
+This parallels canonicalization's `Complete` flag and the harness's truncation handling: every component discloses where it's uncertain. The kind set is enumerated by `blindspots.Kinds()` and validated by `blindspots.Recognized`; one comparator, `blindspots.SortBlindSpots` (by Kind, Site, Detail), is the single source for every blind-spot ordering, so the manifest's bytes never depend on detection or declaration order.
 
 **The boundary subset of this manifest is part of the gated artifact.** A dynamically-constructed event name or an unresolved dispatch *at the boundary* is a tracked, reviewable fact: if a PR introduces one, the gated artifact changes and routes to a human ("this PR added an outbound effect we can't statically verify"). That turns the one genuine hole — a dynamically-named boundary effect on a path no test exercises, invisible to both pipelines — into a flagged fact instead of a silent miss.
+
+### 7.1 Declared blind spots — human-ratified seams (impeachment enactment)
+
+Beyond the auto-detected categories, the config may **declare** blind spots: `static.declaredBlindSpots`, each a `{site, kind?, reason}`. These are the enactment half of the behavioral-impeachment loop (impeachment plan §8): a site where *behavior* proved the static over-approximation's disclosure incomplete, ratified by a CODEOWNER. `graphio.mergeDeclaredBlindSpots` folds each into the graph's blind spots so the next run abstains at the seam (a `NEVER` weakens to `CANT-PROVE` — the safe direction; a declared seam can only weaken proofs, never hide a violation, since reachability is edge-based). A consumer (groundwork) cannot tell a declared seam from an auto-detected one.
+
+Fail-closed validation, so a seam can never be a silent or malformed disclosure:
+
+- **`site`** is required (nothing to blind without it).
+- **`reason`** is required — the impeachment witness; a seam blinded without a stated reason is drift, not a ratified disclosure. (Both enforced at config load.)
+- **`kind`** defaults to `ImpeachmentSeam` and, when set, must name a recognized `blindspots.Kind`; an unrecognized kind is a config error, never a silent passthrough onto the gated artifact.
+
+The merge dedups by `(kind, site)` keeping the lexically-smallest `Detail` — an **intrinsic** tie-break (never arrival order), so the merged manifest is byte-identical regardless of declaration order. An `ImpeachmentSeam` is **not** part of the gated boundary subset (`Boundary()` excludes it) and is **excluded from the blind-spot ratchet** (`review.newBlindSpots`) and from the frontier reclaim markers (`frontier.Classify`): a ratified seam is a reviewed disclosure, not undisclosed-dynamism drift, so ratcheting on it would make the enactment self-defeating (the seam would re-block the very change that ratified it).
 
 ---
 

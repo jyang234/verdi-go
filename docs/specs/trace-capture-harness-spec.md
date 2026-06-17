@@ -45,6 +45,17 @@ Two keys, used together:
 
 **In-process gets scoping for free** — the in-memory exporter only ever holds this run's spans, so correlation is a post-hoc concern. Post-hoc fetches by trace ID and filters by `test.run.id`.
 
+### 3.1 First-party opener tag (`flowmap.fqn`) — L1 localization
+
+The in-process harness runs a second span processor at start (`OnStart`) that records **which first-party application function opened the span** — the `flowmap.fqn` tag (`capture.FQNTagKey`). It walks the stack and returns the runtime FQN of the first frame that is neither *transparent infrastructure* nor a *driver boundary*:
+
+- **Transparent infra** (`runtime.`, `reflect.`, `sync.`, the OTel SDK, `net/http.`, `database/sql.`) sits *between* the SDK and the application frame, so it is **walked past** — the SUT frame just above it is the opener. Listed by exact package, never a whole org, since a real service could nest under a shared infra org path.
+- **Driver boundary** (the test runner, the flowmap `harness`/`flow`/`capture` machinery, and flowmap's own module-internal toolchain) **stops** the walk: reaching one before any SUT frame means the span was opened by the driver itself (e.g. the harness server span before the handler runs), so there is no first-party opener.
+
+It **fails closed**: no SUT frame ⇒ `""` ⇒ the span carries no tag, an honest ⊥ that keeps the behavioral-impeachment severance walk at L0 rather than mislabelling the span with a driver frame. The tag is deterministic (a property of the call path, not timing). Canonicalization preserves a sub-threshold span that carries a non-empty tag (the keep-tagged-waypoint rule, canon spec §3.7), so the impeachment localizer can anchor at intermediate waypoints (L1). Only the in-process harness sets this tag; post-hoc/production ingestion is untagged and unaffected.
+
+The same in-process path also stamps two *identity/provenance* resource attributes that ride onto the `CapturedFlow` (§7): a **code-identity `Stamp`** (the deployed commit, via `WithCodeStamp`) and a **capture-fidelity `Provenance`** grade (`production`|`integration`|`synthetic`) — both fail-closed to `""` when a bucket's spans disagree. They feed the behavioral-impeachment audit, not the golden's structural equality (the golden writes `Provenance` but excludes it from equality, and never writes `Stamp`; see the golden-diff spec).
+
 ---
 
 ## 4. Quiescence & completeness — the make-or-break
@@ -109,6 +120,11 @@ type CapturedFlow struct {
     Spans    []Span      // scoped to exactly this flow
     Root     *Span       // reconstructed entry (server or consumer span)
     Complete bool        // false => truncated/timed out; canonicalization must refuse
+
+    // Identity/provenance lifted from the spans' resource attributes (§3.1),
+    // carried onto the canonical trace; "" when unset or when spans disagree:
+    Stamp      string // code identity (deployed commit) via WithCodeStamp
+    Provenance string // capture-fidelity grade (production|integration|synthetic)
 }
 ```
 

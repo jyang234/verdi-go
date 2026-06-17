@@ -82,9 +82,19 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 	}
 
 	// 3.7 structural normalization: salience filtering as tree contraction. The
-	// root (the tier-1 entry) is never dropped.
+	// root (the tier-1 entry) is never dropped. A sub-threshold internal span is
+	// ALSO kept when it carries an L1 localization tag (flowmap.fqn): it is a
+	// first-party WAYPOINT the behavioral-impeachment severance walk anchors on
+	// (plan §7), so dropping it would erase the very signal it exists to carry.
+	// Scoped to TAGGED spans — only the in-process harness producer sets the tag, so
+	// post-hoc/production ingestion (untagged) prunes compute exactly as before, and
+	// an untagged internal compute span is still dropped. The keep is deterministic
+	// (the tag is a pure function of the call path; ordering/collapse of the kept
+	// span already ran in build), so the snapshot stays byte-identical across runs.
 	threshold := cfg.SalienceThreshold()
-	promote.Filter(rootSpan, func(s *ir.CanonicalSpan) bool { return s.Tier <= threshold })
+	promote.Filter(rootSpan, func(s *ir.CanonicalSpan) bool {
+		return s.Tier <= threshold || s.Attrs[capture.FQNTagKey] != ""
+	})
 
 	service := cf.Service
 	if service == "" {
@@ -96,7 +106,16 @@ func Canonicalize(cf capture.CapturedFlow, cfg *config.Config) (*ir.CanonicalTra
 		// Carry the code-identity stamp verbatim; it is run-varying provenance
 		// excluded from snapshot equality, never derived here (deriving from git
 		// HEAD would make the trace a function of more than the captured behavior).
-		Stamp:         cf.Stamp,
+		Stamp: cf.Stamp,
+		// Carry the capture fidelity grade verbatim. It is WRITTEN into the committed
+		// golden (golden.stampless keeps it) so the corpus self-describes its trust
+		// grade for the impeach audit, but it is EXCLUDED from snapshot EQUALITY
+		// (golden.canonicalBytes zeroes it) — the grade is a trust input, not a
+		// behavioral dimension, so two captures of identical behavior at different
+		// grades still assert equal. (Contrast Stamp, which is neither written nor
+		// compared; and contrast impeach.corpusDigest, which DOES fold the grade in
+		// because there the grade is audit identity.)
+		Provenance:    cf.Provenance,
 		SchemaVersion: ir.SchemaVersion,
 		Root:          rootSpan,
 		Discards:      c.discards(),
@@ -457,6 +476,14 @@ func (c *canonicalizer) projectAttrs(s *capture.Span) map[string]string {
 	out := map[string]string{}
 	if stmt := opkey.Statement(s.Attrs); stmt != "" {
 		out["db.statement"] = sqlnorm.Normalize(stmt).Statement
+	}
+	// The flowmap.fqn L1 localization tag is a structural code identifier (not
+	// volatile data), kept verbatim — like db.statement, it is an explicit
+	// projection rather than a user-configurable allowlist entry, so the
+	// behavioral-impeachment severance walk can rely on it being carried whenever
+	// the producer set it (plan §7).
+	if fqn := s.Attrs[capture.FQNTagKey]; fqn != "" {
+		out[capture.FQNTagKey] = fqn
 	}
 	for k := range c.allow {
 		if v, ok := s.Attrs[k]; ok {

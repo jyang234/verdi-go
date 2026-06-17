@@ -7,6 +7,7 @@
 package graphio
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
+	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/sqlverb"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
@@ -148,6 +150,62 @@ type Edge struct {
 	Via string `json:"via,omitempty"`
 }
 
+// mergeDeclaredBlindSpots appends the config's human-ratified seams (§8 enactment)
+// to the auto-detected graph blind spots, deterministically — sorted through the one
+// canonical comparator (blindspots.SortBlindSpots), so the result is byte-identical
+// regardless of declaration order. A declared seam makes static abstain at its site
+// (the safe direction: it can only weaken proofs, never hide a violation). The
+// default kind is ImpeachmentSeam (the behaviorally-discovered category); an explicit
+// kind is kept verbatim but MUST name a recognized blindspots.Kind — an unknown kind
+// is a config error (returned), never a silent passthrough that would let a typo'd
+// kind ride the gated artifact. An entry with no site is skipped (nothing to blind;
+// config.validate already rejects this on load, so the skip is belt-and-suspenders
+// for callers that build a Config directly).
+//
+// The DETECTED spots pass through VERBATIM — they are already full-struct-deduped by
+// blindspots.Detect, and two detected spots that share (kind, site) but differ in
+// Detail are DISTINCT disclosures (e.g. two over-threshold dispatch sites in one
+// function, each with its own callee count), so collapsing them would silently drop a
+// disclosed blind spot — the fail-OPEN direction. Only the DECLARED seams are
+// collapsed: among themselves by (kind, site) keeping the lexically-smallest Detail (an
+// intrinsic tie-break, never arrival order, per CLAUDE.md determinism), and a declared
+// seam whose (kind, site) is already detected is dropped as redundant (the detected
+// disclosure already forces abstention there, and it is the authoritative text).
+func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config) ([]blindspots.BlindSpot, error) {
+	if cfg == nil || len(cfg.Static.DeclaredBlindSpots) == 0 {
+		return detected, nil
+	}
+	detectedKeys := map[[2]string]bool{}
+	for _, b := range detected {
+		detectedKeys[[2]string{string(b.Kind), b.Site}] = true
+	}
+	// Collapse DECLARED seams among themselves, keeping the lexically-smallest Detail.
+	declaredByKey := map[[2]string]blindspots.BlindSpot{}
+	for i, d := range cfg.Static.DeclaredBlindSpots {
+		kind := d.Kind
+		if kind == "" {
+			kind = string(blindspots.ImpeachmentSeam)
+		}
+		if !blindspots.Recognized(blindspots.Kind(kind)) {
+			return nil, fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): kind %q is not a recognized blind-spot category", i, d.Site, kind)
+		}
+		key := [2]string{kind, d.Site}
+		if d.Site == "" || detectedKeys[key] {
+			continue // nothing to blind, or already a detected disclosure (detected wins)
+		}
+		cand := blindspots.BlindSpot{Kind: blindspots.Kind(kind), Site: d.Site, Detail: d.Reason}
+		if cur, ok := declaredByKey[key]; !ok || cand.Detail < cur.Detail {
+			declaredByKey[key] = cand
+		}
+	}
+	out := append([]blindspots.BlindSpot(nil), detected...)
+	for _, b := range declaredByKey {
+		out = append(out, b)
+	}
+	blindspots.SortBlindSpots(out)
+	return out, nil
+}
+
 // Build renders the full first-party graph of res. If entry is non-empty, the
 // graph is scoped to the functions reachable from the matching entry-point root.
 func Build(res *analyze.Result, entry string) (*Graph, error) {
@@ -172,6 +230,16 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 	if gs := blindspots.Graph(blindspots.Detect(res, hints)); len(gs) > 0 {
 		g.BlindSpots = gs
 	}
+	// Merge human-ratified seams declared in config (the behavioral-impeachment
+	// loop's enactment, §8): sites where static must abstain because behavior proved
+	// the disclosure incomplete. Done here so a declared seam rides the graph exactly
+	// like an auto-detected blind spot — the consumer (groundwork) cannot tell them
+	// apart, and the next run is honest at the seam.
+	merged, err := mergeDeclaredBlindSpots(g.BlindSpots, res.Config)
+	if err != nil {
+		return nil, err
+	}
+	g.BlindSpots = merged
 	rootFns := rootFuncSet(res)
 	if entry == "" {
 		for _, r := range res.Roots.Roots {

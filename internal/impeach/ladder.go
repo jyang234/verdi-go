@@ -22,6 +22,16 @@ const (
 	// explanation, so the static negative is behaviorally impeached (§3).
 	VerdictImpeachment = "IMPEACHMENT"
 
+	// VerdictViolated is the ONE place the cell ADDS a finding rather than removing
+	// trust (§3 carve-out, §9): an IMPEACHMENT whose witnessed (Entry, Effect) falls
+	// under a must_not_reach rule (Entry binds the rule's `from`, Effect its `to`)
+	// is a behaviorally-CONFIRMED policy breach — the forbidden thing demonstrably
+	// happened. It is a true positive, so it is NEVER laundered down to a passing
+	// CANT-PROVE (the §13 crack #1 fix); on a committed corpus the gate fails. Set
+	// only by the Phase-5 verdict integration (Resolve), never by the ladder, which
+	// has no policy to read.
+	VerdictViolated = "VIOLATED"
+
 	// The four downgrades, one per gating rung, named in §4. The verdict is the
 	// FIRST failing rung's downgrade (the ladder is ordered), so the disclosure is
 	// the precise reason — not a generic rejection.
@@ -44,11 +54,13 @@ const (
 )
 
 // Capture-fidelity labels (§5). Only the first two clear the capture-fidelity
-// rung; an absent or synthetic label caps a witness at CAPTURE-UNTRUSTED.
+// rung; an absent or synthetic label caps a witness at CAPTURE-UNTRUSTED. These
+// alias the ONE-source vocabulary in the capture package (the producer of the
+// grade), so the consumer's rung can never drift from the producer's labels.
 const (
-	CaptureProduction  = "production"
-	CaptureIntegration = "integration"
-	CaptureSynthetic   = "synthetic"
+	CaptureProduction  = capture.CaptureProduction
+	CaptureIntegration = capture.CaptureIntegration
+	CaptureSynthetic   = capture.CaptureSynthetic
 )
 
 // Provenance is the corpus-level capture-side identity the ladder's rungs 2 and 5
@@ -236,17 +248,7 @@ func q(s string) string { return strconv.Quote(s) }
 // agree — a supplied identity that contradicts the corpus is a caller error, and
 // fails CLOSED to "" (unestablished) rather than letting either win silently.
 func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
-	derived := corpusIdentity(traces)
-	switch {
-	case derived == "":
-		return prov.TraceIdentity // stampless corpus ⇒ caller injection (committed path)
-	case prov.TraceIdentity == "":
-		return derived // self-describing live corpus
-	case derived == prov.TraceIdentity:
-		return derived
-	default:
-		return "" // injected identity contradicts the corpus ⇒ fail closed
-	}
+	return reconcileSelfDescribed(corpusIdentity(traces), prov.TraceIdentity)
 }
 
 // corpusIdentity is the single code identity the trace corpus self-describes, or
@@ -260,22 +262,74 @@ func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
 // stamp (a stampless trace cannot ride a stamped sibling's identity), so any empty
 // Stamp short-circuits to "" before the reducer ever sees the corpus.
 func corpusIdentity(traces []*ir.CanonicalTrace) string {
-	stamps := make([]string, 0, len(traces))
+	return corpusAgreed(traces, func(t *ir.CanonicalTrace) string { return t.Stamp })
+}
+
+// resolveCaptureProvenance reconciles the corpus's PRODUCER-SET capture grade
+// (carried on each trace, §12.6) with the audit caller's supplied grade, exactly as
+// resolveIdentity does for the code stamp. A graded corpus self-describes; an
+// ungraded (older/hand-authored) corpus takes the caller's grade; when BOTH are
+// present they MUST agree — a caller asserting "production" over a corpus the
+// harness marked "integration" is a contradiction and fails CLOSED to "", so the
+// capture-fidelity rung caps at CAPTURE-UNTRUSTED. This is what makes the rung
+// mechanically honest: the audit caller can no longer assert a grade the capture
+// contradicts.
+func resolveCaptureProvenance(traces []*ir.CanonicalTrace, prov Provenance) string {
+	return reconcileSelfDescribed(corpusProvenance(traces), prov.Capture)
+}
+
+// corpusProvenance is the single capture grade the corpus self-describes, or "" when
+// it does not establish one. Like corpusIdentity it fails CLOSED: every non-nil
+// trace must carry the SAME non-empty Provenance (a mixed or partly-ungraded corpus
+// is ambiguous ⇒ ""), reusing the shared capture.AgreedStamp reducer (one source).
+func corpusProvenance(traces []*ir.CanonicalTrace) string {
+	return corpusAgreed(traces, func(t *ir.CanonicalTrace) string { return t.Provenance })
+}
+
+// reconcileSelfDescribed is the ONE reconciliation rule both the code-identity and
+// the capture-grade rungs use: a value the corpus DERIVED for itself vs a value the
+// caller INJECTED. The two are merged fail-closed — either alone wins when the other
+// is "", they pass through when they agree, and a contradiction yields "" rather than
+// letting one silently override the evidence. Parameterizing it keeps resolveIdentity
+// and resolveCaptureProvenance from drifting (CLAUDE.md one-source-of-truth): the
+// fail-closed-on-contradiction property is asserted once and reused.
+func reconcileSelfDescribed(derived, injected string) string {
+	switch {
+	case derived == "":
+		return injected // corpus does not self-describe ⇒ caller's value
+	case injected == "":
+		return derived // self-describing corpus, no caller assertion
+	case derived == injected:
+		return derived
+	default:
+		return "" // caller value contradicts the corpus ⇒ fail closed
+	}
+}
+
+// corpusAgreed is the ONE "single value the corpus self-describes, or """ reducer,
+// parameterized over which per-trace field to read (Stamp for identity, Provenance
+// for the capture grade). It fails CLOSED uniformly: a nil trace is skipped, but any
+// non-nil trace carrying an EMPTY field short-circuits to "" (a blank cannot ride a
+// sibling's value), an empty corpus is "", and a disagreement under the shared
+// capture.AgreedStamp reducer is "". One source for both rungs' derive logic.
+func corpusAgreed(traces []*ir.CanonicalTrace, field func(*ir.CanonicalTrace) string) string {
+	vals := make([]string, 0, len(traces))
 	for _, t := range traces {
 		if t == nil {
 			continue
 		}
-		if t.Stamp == "" {
-			return "" // an unstamped trace ⇒ identity unestablished (fail closed)
+		v := field(t)
+		if v == "" {
+			return "" // an unset field ⇒ unestablished (fail closed)
 		}
-		stamps = append(stamps, t.Stamp)
+		vals = append(vals, v)
 	}
-	if len(stamps) == 0 {
+	if len(vals) == 0 {
 		return "" // empty corpus ⇒ nothing to establish
 	}
-	id, ok := capture.AgreedStamp(stamps)
+	agreed, ok := capture.AgreedStamp(vals)
 	if !ok {
-		return "" // mixed deploys ⇒ no single identity (fail closed)
+		return "" // disagreement ⇒ no single value (fail closed)
 	}
-	return id
+	return agreed
 }

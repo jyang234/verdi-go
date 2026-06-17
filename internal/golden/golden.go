@@ -98,22 +98,39 @@ func changeSet(want, got *ir.CanonicalTrace, wantBytes, gotBytes string) string 
 	return b.String()
 }
 
-// canonicalBytes serializes a trace with the Discards manifest AND the
-// code-identity Stamp zeroed, so equality rests on flow structure alone — never on
-// the review-only record of what was dropped, nor on the run-varying deploy stamp
-// (a stamped live capture must assert equal to its stampless committed golden). A
-// marshal failure must propagate: swallowed, both sides of the assertion would
-// serialize to "" and the gate would vacuously pass.
+// canonicalBytes serializes a trace for SNAPSHOT EQUALITY with the Discards
+// manifest, the code-identity Stamp, AND the capture-Provenance grade zeroed, so
+// equality rests on flow STRUCTURE alone — never on the review-only record of what
+// was dropped, the run-varying deploy stamp, nor the capture grade. Provenance is
+// deliberately excluded here even though it IS written into the committed golden
+// (stampless keeps it): the grade is the impeach corpus's trust input, not a
+// behavioral dimension, so two captures of identical behavior at different grades
+// (a harness "integration" re-drive vs a "production" deploy) must still assert
+// equal — the snapshot gate is about behavior, the impeach corpusDigest is where
+// the grade is part of identity. A marshal failure must propagate: swallowed, both
+// sides would serialize to "" and the gate would vacuously pass.
+//
+// Do NOT "fix" this by folding the grade back into equality: that would fail a
+// legitimate same-behavior re-drive at a different grade, defeating behavior-purity.
+// The grade is still a load-bearing impeach-gating input, but it cannot drift
+// silently — because stampless WRITES it, a -update that changes the grade changes
+// the committed golden's bytes, so it shows up in the file's git diff and is
+// CODEOWNERS-routed for review exactly like any other golden rebase. The mechanical
+// guard on the grade is that committed-golden review, not snapshot equality.
 func canonicalBytes(t *ir.CanonicalTrace) ([]byte, error) {
 	cp := stampless(t)
 	cp.Discards = ir.DiscardManifest{}
+	cp.Provenance = "" // excluded from equality (behavior-purity); still written to the golden
 	return cp.Marshal()
 }
 
-// stampless returns a shallow copy of t with the code-identity Stamp zeroed. The
-// stamp is run-varying provenance excluded from snapshot equality (mirroring how
-// Discards is excluded); both the written golden and the comparison go through it
-// so a committed golden is byte-identical whether or not the capture was stamped.
+// stampless returns a shallow copy of t with the code-identity Stamp zeroed — the
+// reducer the GOLDEN WRITER uses. The stamp is run-varying provenance excluded from
+// the written golden (mirroring how it is excluded from equality); the capture
+// Provenance grade is deliberately NOT zeroed here, so the committed golden CARRIES
+// its grade (the impeach corpus reads it) even though canonicalBytes excludes it
+// from equality. So a committed golden is byte-identical whether or not the capture
+// was stamped, while still self-describing its capture grade.
 func stampless(t *ir.CanonicalTrace) ir.CanonicalTrace {
 	cp := *t
 	cp.Stamp = ""
