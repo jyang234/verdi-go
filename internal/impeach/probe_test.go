@@ -54,9 +54,9 @@ func TestProbeRealCorpora(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := Audit("loansvc", ix, []*ir.CanonicalTrace{c.trace})
+			r := Audit("loansvc", ix, []*ir.CanonicalTrace{c.trace}, Provenance{})
 			// Determinism across runs.
-			if r.Digest != Audit("loansvc", ix, []*ir.CanonicalTrace{c.trace}).Digest {
+			if r.Digest != Audit("loansvc", ix, []*ir.CanonicalTrace{c.trace}, Provenance{}).Digest {
 				t.Error("non-deterministic report")
 			}
 			if len(r.Candidates) != 0 {
@@ -91,7 +91,7 @@ func TestProbeNoOverSuppression(t *testing.T) {
 	} {
 		t.Run(g.name, func(t *testing.T) {
 			ix := loadIndex(t, g.path)
-			r := Audit(g.name, ix, []*ir.CanonicalTrace{unmodeled()})
+			r := Audit(g.name, ix, []*ir.CanonicalTrace{unmodeled()}, Provenance{})
 			if len(r.Candidates) != 1 || r.Candidates[0].Effect != "db DELETE shadow_ledger" || r.Candidates[0].Claim.Reachability != ReachAbsent {
 				t.Fatalf("%s: cell over-suppressed; want 1 ABSENT db DELETE shadow_ledger, got %+v", g.name, r.Candidates)
 			}

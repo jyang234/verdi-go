@@ -42,8 +42,8 @@ func TestAuditDeterministic(t *testing.T) {
 	ix := loadIndex(t, loansvcGraph)
 	tr := loadTrace(t, loansvcTrace)
 
-	a := Audit("loansvc", ix, []*ir.CanonicalTrace{tr})
-	b := Audit("loansvc", ix, []*ir.CanonicalTrace{tr})
+	a := Audit("loansvc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
+	b := Audit("loansvc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 	if a.Digest == "" {
 		t.Fatal("empty digest")
 	}
@@ -53,7 +53,7 @@ func TestAuditDeterministic(t *testing.T) {
 
 	// A duplicated/reordered corpus must not perturb the join: the same effect
 	// observed twice collapses, and slice order does not reach the output.
-	dup := Audit("loansvc", ix, []*ir.CanonicalTrace{tr, tr})
+	dup := Audit("loansvc", ix, []*ir.CanonicalTrace{tr, tr}, Provenance{})
 	if dup.Digest != a.Digest {
 		t.Errorf("duplicate trace perturbed the report: %s != %s", dup.Digest, a.Digest)
 	}
@@ -71,7 +71,7 @@ func TestAuditDeterministic(t *testing.T) {
 func TestAuditProbeLoansvc(t *testing.T) {
 	ix := loadIndex(t, loansvcGraph)
 	tr := loadTrace(t, loansvcTrace)
-	r := Audit("loansvc", ix, []*ir.CanonicalTrace{tr})
+	r := Audit("loansvc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 
 	for _, w := range r.Candidates {
 		if w.Effect == "db SELECT applicants" {
@@ -105,7 +105,7 @@ func TestAuditFiresOnRealGraphForUnmodeledEffect(t *testing.T) {
 			{Op: "DB postgres DELETE shadow_ledger", Kind: ir.KindClient},
 		}}},
 	}}
-	r := Audit("loansvc", ix, []*ir.CanonicalTrace{tr})
+	r := Audit("loansvc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 	if len(r.Candidates) != 1 || r.Candidates[0].Effect != "db DELETE shadow_ledger" {
 		t.Fatalf("want 1 ABSENT candidate db DELETE shadow_ledger, got %+v", r.Candidates)
 	}
@@ -128,16 +128,22 @@ func TestAuditFlagsAbsentEmitter(t *testing.T) {
 			{Op: "DB postgres DELETE ledger", Kind: ir.KindClient},
 		}}},
 	}}
-	r := Audit("svc", ix, []*ir.CanonicalTrace{tr})
+	r := Audit("svc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 	if len(r.Candidates) != 1 {
 		t.Fatalf("want 1 candidate, got %d: %+v", len(r.Candidates), r.Candidates)
 	}
 	w := r.Candidates[0]
-	if w.Effect != "db DELETE ledger" || w.Claim.Reachability != ReachAbsent || w.Verdict != VerdictCandidate {
+	if w.Effect != "db DELETE ledger" || w.Claim.Reachability != ReachAbsent {
 		t.Errorf("unexpected witness: %+v", w)
 	}
 	if w.Observed.Op != "DB postgres DELETE ledger" || w.Observed.Entry != "HTTP POST /x" {
 		t.Errorf("observation lost enrichment/entry: %+v", w.Observed)
+	}
+	// With no caller-supplied provenance the candidate is a real contradiction but
+	// its code identity is unestablished, so the ladder caps it at VERSION-SKEW —
+	// the fail-closed Phase-1 outcome on a corpus that carries no commit stamp.
+	if w.Verdict != DowngradeVersionSkew {
+		t.Errorf("Verdict = %q, want %q (no provenance ⇒ code-identity unestablished)", w.Verdict, DowngradeVersionSkew)
 	}
 }
 
@@ -158,7 +164,7 @@ func TestAuditFlagsNamedButUnreachable(t *testing.T) {
 			{Op: "DB postgres DELETE ledger", Kind: ir.KindClient},
 		}}},
 	}}
-	r := Audit("svc", ix, []*ir.CanonicalTrace{tr})
+	r := Audit("svc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 	if len(r.Candidates) != 1 {
 		t.Fatalf("want 1 candidate, got %d: %+v", len(r.Candidates), r.Candidates)
 	}
@@ -184,7 +190,7 @@ func TestAuditNoCandidateWhenReachable(t *testing.T) {
 			{Op: "DB postgres DELETE ledger", Kind: ir.KindClient},
 		}}},
 	}}
-	r := Audit("svc", ix, []*ir.CanonicalTrace{tr})
+	r := Audit("svc", ix, []*ir.CanonicalTrace{tr}, Provenance{})
 	if len(r.Candidates) != 0 {
 		t.Errorf("reachable effect impeached: %+v", r.Candidates)
 	}
