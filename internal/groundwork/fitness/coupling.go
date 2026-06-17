@@ -15,8 +15,13 @@ import "github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 // policy-only it holds identically on base and branch, so review/verify surface it
 // as a STANDING caution (R1) — disclosed at the gate where the "gate effect first"
 // decision is actually made, not only in the fitness lens.
+//
+// The Rule is "ratchet_coupling", NOT "effect_ratchet": this is a config-coupling
+// disclosure, distinct from the effect ratchet's write-target drift findings (which
+// live in review, keyed under the effect-ratchet surface). A separate rule name
+// keeps the two from reading as the same kind of finding.
 func checkRatchetCoupling(p *policy.Policy, r *Result) {
 	if c := p.EffectRatchetCouplingCaution(); c != "" {
-		r.add(Finding{Rule: "effect_ratchet", Severity: Caution, Summary: c})
+		r.add(Finding{Rule: "ratchet_coupling", Severity: Caution, Summary: c})
 	}
 }

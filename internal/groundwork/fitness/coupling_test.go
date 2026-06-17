@@ -30,7 +30,7 @@ func TestCheckSurfacesRatchetCouplingAsNonGatingCaution(t *testing.T) {
 	}
 	var found *Finding
 	for i, f := range res.Findings {
-		if f.Rule == "effect_ratchet" && strings.Contains(f.Summary, "blind_spot_ratchet") {
+		if f.Rule == "ratchet_coupling" && strings.Contains(f.Summary, "blind_spot_ratchet") {
 			found = &res.Findings[i]
 		}
 	}
@@ -48,7 +48,7 @@ func TestCheckSurfacesRatchetCouplingAsNonGatingCaution(t *testing.T) {
 		BlindSpotRatchet: &policy.BlindSpotRatchet{Gate: true},
 	}
 	for _, f := range Check(both, ix).Findings {
-		if f.Rule == "effect_ratchet" && strings.Contains(f.Summary, "blind_spot_ratchet") {
+		if f.Rule == "ratchet_coupling" && strings.Contains(f.Summary, "blind_spot_ratchet") {
 			t.Errorf("both ratchets gating must not surface the coupling caution; got %+v", f)
 		}
 	}
