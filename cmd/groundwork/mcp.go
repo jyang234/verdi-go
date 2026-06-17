@@ -19,10 +19,13 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/impeach"
+	"github.com/jyang234/golang-code-graph/ir"
 )
 
-const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--expect <stamp>] [--log <calls.jsonl>]
-   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]
+const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--corpus <dir>] [--capture production|integration] [--expect <stamp>] [--log <calls.jsonl>]
+   or: groundwork mcp --service <name>=<graph.json> [--service <name>=<graph.json> ...] [--policy <name>=<policy.json> ...] [--corpus <name>=<dir> ...] [--capture <name>=<grade> ...] [--expect <name>=<stamp> ...] [--log <calls.jsonl>]
+--corpus enables the audit-only impeach lens (a committed *.golden.json behavioral corpus); --capture asserts its fidelity grade and requires --corpus.
 add --http <addr> [--token <secret>] to either form for the team-shared streamable-HTTP transport (token also read from $GROUNDWORK_MCP_TOKEN; required off loopback)`
 
 // cmdMCP serves the agent-facing MCP surface over stdio (IT-4): the triage,
@@ -48,6 +51,8 @@ add --http <addr> [--token <secret>] to either form for the team-shared streamab
 func cmdMCP(args []string) error {
 	servicePairs, args := takeValueFlags(args, "--service", "-service")
 	policyPairs, args := takeValueFlags(args, "--policy", "-policy")
+	corpusPairs, args := takeValueFlags(args, "--corpus", "-corpus")
+	capturePairs, args := takeValueFlags(args, "--capture", "-capture")
 	expectPairs, args := takeValueFlags(args, "--expect", "-expect")
 	logPath, hasLog, args := takeValueFlag(args, "--log", "-log")
 	httpAddr, hasHTTP, args := takeValueFlag(args, "--http", "-http")
@@ -96,10 +101,16 @@ func cmdMCP(args []string) error {
 		if len(expectPairs) > 0 {
 			srv.expect, srv.hasExpect = expectPairs[len(expectPairs)-1], true
 		}
+		// takeValueFlag's last-wins for a repeated flag, preserved exactly: earlier
+		// values are dropped unread, never loaded-and-discarded.
 		if len(policyPairs) > 1 {
-			// takeValueFlag's last-wins for a repeated flag, preserved exactly:
-			// earlier values are dropped unread, never loaded-and-discarded.
 			policyPairs = policyPairs[len(policyPairs)-1:]
+		}
+		if len(corpusPairs) > 1 {
+			corpusPairs = corpusPairs[len(corpusPairs)-1:]
+		}
+		if len(capturePairs) > 1 {
+			capturePairs = capturePairs[len(capturePairs)-1:]
 		}
 		services[args[0]] = srv
 	}
@@ -125,6 +136,50 @@ func cmdMCP(args []string) error {
 			return err
 		}
 		srv.p = p
+	}
+	// --capture asserts a behavioral corpus's fidelity grade; without a --corpus to
+	// audit it is a silent no-op of a trust assertion (mirrors the verify CLI guard).
+	// Parse capture FIRST so it is on the server before the corpus that consumes it.
+	for _, pair := range capturePairs {
+		grade := pair
+		srv := fleet.lone()
+		if len(servicePairs) > 0 {
+			name, g, ok := strings.Cut(pair, "=")
+			srv = fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--capture wants <name>=<grade> naming a --service, got %q", pair)
+			}
+			grade = g
+		}
+		srv.capture = grade
+	}
+	for _, pair := range corpusPairs {
+		dir := pair
+		srv := fleet.lone()
+		if len(servicePairs) > 0 {
+			name, d, ok := strings.Cut(pair, "=")
+			srv = fleet.services[name]
+			if !ok || srv == nil {
+				return fmt.Errorf("--corpus wants <name>=<dir> naming a --service, got %q", pair)
+			}
+			dir = d
+		}
+		// One source of truth: the same recursive, fail-closed loader the verify gate
+		// uses (loadCommittedCorpus), so the MCP audit can never see a different trace
+		// set than the gate would from the same directory.
+		traces, err := loadCommittedCorpus(dir)
+		if err != nil {
+			return err
+		}
+		srv.corpus = traces
+	}
+	// A capture grade asserted against a service with no corpus is a dangling trust
+	// claim — fail closed rather than accept it as a silent no-op.
+	for _, name := range fleet.names {
+		s := fleet.services[name]
+		if s.capture != "" && s.corpus == nil {
+			return fmt.Errorf("--capture for service %q requires a --corpus (it asserts the fidelity grade of a behavioral corpus)", name)
+		}
 	}
 	if hasLog {
 		// The E4 measurement apparatus: a deterministic transcript of tool
@@ -243,6 +298,14 @@ type mcpServer struct {
 	p         *policy.Policy
 	expect    string
 	hasExpect bool
+
+	// corpus is the committed behavioral corpus the impeach lens audits the graph
+	// against — loaded ONCE at startup, exactly like p (policy): a load-once input,
+	// not staleness-tracked (only the graph is, via reload). capture is the optional
+	// human-asserted capture-fidelity grade reconciled against the corpus's own
+	// self-declared grade (§12.6); empty means "take the corpus's grade verbatim".
+	corpus  []*ir.CanonicalTrace
+	capture string
 }
 
 func (s *mcpServer) load() error {
@@ -471,6 +534,11 @@ func toolDefs() []map[string]any {
 		{
 			"name":        "exceptions",
 			"description": "Audit every policy allow-list entry and rule pattern against a loaded graph; DEAD entries suppress or bind nothing and should be fixed or deleted. Requires the service to be started with --policy.",
+			"inputSchema": obj(map[string]any{}),
+		},
+		{
+			"name":        "impeach",
+			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
@@ -782,9 +850,68 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 		}
 		fmt.Fprintf(&b, "\n%d dead exception(s), %d dead rule pattern(s)\n", fitness.DeadCount(xs), fitness.DeadPatternCount(ls))
 		return withStale(toolText(b.String()))
+	case "impeach":
+		if s.corpus == nil {
+			return toolError("the server was started without --corpus; impeach needs a committed behavioral corpus to audit the graph against")
+		}
+		if p == nil {
+			return toolError("the server was started without --policy; impeach integrates witnesses against the policy's must_not_reach rules and needs one")
+		}
+		return withStale(toolText(s.impeachCard(p)))
 	default:
 		return toolError("unknown tool: " + name)
 	}
+}
+
+// impeachCard renders the audit-only impeachment disclosure for this service: the
+// loaded graph joined against its committed corpus, resolved against the policy's
+// must_not_reach rules. It runs at OriginLive ON PURPOSE — the lens NEVER gates, so
+// GateBlockers is structurally empty and the agent can never read this as a merge
+// verdict against a possibly-local graph; the gate is verify --corpus over CI graphs
+// (§13 crack #2). Every candidate is disclosed with its ladder verdict regardless, so
+// "observe-first" holds. Pure function of (graph, corpus, capture, rules): same
+// inputs, byte-identical text.
+func (s *mcpServer) impeachCard(p *policy.Policy) string {
+	prov := impeach.Provenance{TraceIdentity: s.ix.Stamp(), Capture: s.capture}
+	r := impeach.Audit(p.Service, s.ix, s.corpus, prov)
+	res := impeach.Resolve(r, s.ix, p.MustNotReach, impeach.OriginLive)
+	var b strings.Builder
+	fmt.Fprintf(&b, "behavioral audit (AUDIT-ONLY, never a gate) — corpus %s", res.CorpusDigest)
+	if res.CaptureProvenance != "" {
+		fmt.Fprintf(&b, ", capture %s", res.CaptureProvenance)
+	} else {
+		b.WriteString(", capture UNGRADED (caps every candidate below IMPEACHMENT)")
+	}
+	b.WriteString("\n")
+	if len(res.Candidates) == 0 {
+		b.WriteString("no impeachment candidates: every observed effect is statically accounted for, within the disclosed scope and blind spots\n")
+	}
+	for _, w := range res.Candidates {
+		fmt.Fprintf(&b, "\n• %s  %s\n", w.Verdict, w.Effect)
+		fmt.Fprintf(&b, "    observed in flow %q", w.Observed.Flow)
+		if w.Observed.Entry != "" {
+			fmt.Fprintf(&b, " from %s", w.Observed.Entry)
+		}
+		b.WriteString("\n")
+		if w.Severance != nil && w.Severance.Site != "" {
+			disclosed := "UNDISCLOSED blind spot"
+			if w.Severance.FrontierKnown {
+				disclosed = "disclosed seam"
+			}
+			fmt.Fprintf(&b, "    static lost it at: %s (%s, %s)\n", w.Severance.Site, w.Severance.Kind, disclosed)
+		}
+		if len(w.Claim.Rules) > 0 {
+			fmt.Fprintf(&b, "    touches must_not_reach rule(s): %s\n", strings.Join(w.Claim.Rules, ", "))
+		}
+	}
+	for _, c := range res.Caveats {
+		fmt.Fprintf(&b, "\n⚠️ %s", c)
+	}
+	if len(res.Caveats) > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("\nThis lens DISCLOSES; it does not gate. The deterministic merge gate is `groundwork verify --corpus` over CI-built base/branch graphs.\n")
+	return b.String()
 }
 
 func toolText(text string) map[string]any {

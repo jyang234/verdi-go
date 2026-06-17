@@ -100,6 +100,7 @@ $ flowmap boundary svc/                    # gated inter-service contract
 $ groundwork reach graph.json '(*svc/internal/store.Store).Tx'   # blast radius of one function
 $ groundwork fitness policy.json graph.json                      # do the invariants hold?
 $ groundwork verify policy.json base.json branch.json            # fail-closed pre-merge gate
+$ groundwork verify policy.json base.json branch.json --corpus flows/  # + the behavioral impeachment gate (observed effects vs. proven-absent)
 $ groundwork review policy.json base.json branch.json            # the reviewer's computed artifact
 
 # During an incident:
@@ -110,6 +111,7 @@ $ groundwork triage --fail --peer credit-bureau graph.json       # what-if: peer
 # Before an edit (human or agent):
 $ groundwork ground graph.json '<fqn>' --policy policy.json      # what binds this function
 $ groundwork mcp graph.json --policy policy.json                 # the same lenses, as MCP tools
+$ groundwork mcp graph.json --policy policy.json --corpus flows/ # + the audit-only `impeach` lens (discloses, never gates)
 $ groundwork mcp --service pay=pay.json --service ledger=ledger.json  # one session, the neighborhood's maps
 $ groundwork mcp pay.json --http 127.0.0.1:8137 --token "$T"      # team-shared server over streamable HTTP
 

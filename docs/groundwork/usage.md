@@ -387,14 +387,14 @@ groundwork triage (--frame|--route|--table|--event|--peer) <v> [--fail] [--expec
 groundwork ground <graph> <fqn> [--policy …] [--json]   pre-edit grounding card: what binds this function
 groundwork exceptions <policy> <graph> [--json]         audit allow-lists; flag dead entries
 groundwork init <graph> [--name …] [--out …] [--guide …]   propose a baseline policy from measured facts
-groundwork mcp <graph> [--policy …] [--expect …] [--log …]  serve the lenses as MCP tools over stdio
+groundwork mcp <graph> [--policy …] [--corpus <dir>] [--capture <grade>] [--expect …] [--log …]  serve the lenses (incl. audit-only impeach) as MCP tools over stdio
 groundwork mcp --service <name>=<graph> …               one server, several services' maps (+ fleet-events, chains)
 groundwork mcp … --http <addr> [--token <secret>]       team-shared streamable-HTTP transport
 groundwork chains <graph>… [--service <name>=<graph>]… [--policy <p>]…   cross-service effect chains (CX-5, observational)
 groundwork transcript <calls.jsonl> [--json]            summarize an mcp --log transcript (the E4 reader)
 groundwork fitness <policy> <graph> [--expect <sha>] [--sarif]   evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--expect <sha>] [--json]     computed MR review artifact
-groundwork verify <policy> <base> <branch> [--scope …] [--expect <sha>] [--json]  fail-closed pre-flight gate
+groundwork verify <policy> <base> <branch> [--scope …] [--expect <sha>] [--corpus <dir> [--capture production|integration]] [--json]  fail-closed pre-flight gate (--corpus arms the impeachment gate)
 groundwork diff <base-contract> <branch-contract>       inter-service contract diff
 groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]   prove an artifact authentic
 groundwork policy-check <policy>                         validate a policy
@@ -772,15 +772,32 @@ policy at all — and every blind spot touching those claims. Binding rules are
 derived with the exact matchers the checks use, so the card never promises a
 guardrail that does not bind.
 
-`groundwork mcp <graph.json> [--policy …] [--expect …] [--log calls.jsonl]`
-serves nine tools over
+`groundwork mcp <graph.json> [--policy …] [--corpus <dir>] [--capture <grade>] [--expect …] [--log calls.jsonl]`
+serves ten tools over
 MCP stdio (newline-delimited JSON-RPC, protocol 2024-11-05, no third-party
 dependencies): `ground`, `reach`, `triage` (with the `fail` what-if framing,
 including effects possibly committed before the fault), `exceptions`,
 `entrypoints` (what the route/event symptoms can address), `fleet-events`,
 `chains` (the cross-service effect-chain cards — fleet-wide, like
-`fleet-events`), `fitness`, and
-`reload`. A graph file that changes on disk is flagged on every response —
+`fleet-events`), `fitness`, `impeach`, and
+`reload`.
+
+The `impeach` tool is **audit-only and never a gate** (it appears only when the
+server is started with `--corpus` and `--policy`). It joins the loaded graph
+against a committed `*.golden.json` behavioral corpus and discloses *impeachment
+candidates* — effects observed in the corpus where static analysis placed none —
+each classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade
+like VERSION-SKEW / CAPTURE-UNTRUSTED) with the localized site where static lost
+the effect. It runs at `OriginLive` by construction, so it can **never** be read
+as a merge verdict: the loaded graph may be a local build, and the deterministic
+merge gate is `groundwork verify --corpus` over CI-built base/branch graphs (see
+the [structural gate](#the-impeachment--corpus-gate) below), not this lens. The
+optional `--capture production|integration` asserts the corpus's fidelity grade
+and is reconciled against the grade the corpus self-describes — it requires
+`--corpus`, and a contradiction fails closed (the candidate caps below
+IMPEACHMENT) rather than laundering a test corpus into a trusted one.
+
+A graph file that changes on disk is flagged on every response —
 the server never reloads silently; `reload` re-verifies the stamp. `--log`
 writes a deterministic transcript (the E4 measurement apparatus): one JSON
 line per tool call carrying the raw params, the resolution (the answering
@@ -1312,7 +1329,24 @@ encodes a deliberate honesty or determinism decision, not just a name.
 - **post-hoc ingestion** — `flowmap behavior ingest` maps a captured OTLP trace
   (e.g. an incident's) to boundary effects, to locate where a run diverged from
   known-good *inside* the suspect set the graph bounded.
-- **the three gates** — **currency** (boundary contract is regenerated and
+- <a id="the-impeachment--corpus-gate"></a>**the impeachment / corpus gate** —
+  `groundwork verify --corpus <dir>` audits the **branch** graph against a
+  committed `*.golden.json` behavioral corpus and folds the result into the
+  structural verdict (§9). When an effect is **observed** in the corpus but the
+  graph proved it absent/unreachable, the static negative is *impeached*: a proof
+  the graph relied on (a `must_not_reach` `require_proof`, or a behaviorally-
+  witnessed breach) is downgraded SATISFIED→CANT-PROVE or upgraded to VIOLATED,
+  and the merge **BLOCKs**. Three fences keep it sound and deterministic:
+  **committed-only** (a live corpus is audit-only — it never gates, because it is
+  not byte-reproducible); **opt-in** (`impeachment_gate.gate` arms blocking;
+  observe-first otherwise — the breach is disclosed but does not block until a
+  human ratifies it); and **capture-fidelity** (`--capture production|integration`
+  is reconciled against the grade the corpus self-describes, and a contradiction
+  fails closed — only a trusted, agreed grade can promote a gating impeachment).
+  The same audit is available read-only and gate-free to an agent via the MCP
+  `impeach` lens.
+- **the four gates** — **currency** (boundary contract is regenerated and
   diffed), **snapshot** (goldens ride `go test`), **structural** (CI regenerates
-  base/branch graphs and runs `verify`). Unified only by CODEOWNERS routing and
-  the human-as-oracle — no AI in any of them.
+  base/branch graphs and runs `verify`, optionally `--corpus` for the impeachment
+  gate above), and the **impeachment** dimension folded into that structural run.
+  Unified only by CODEOWNERS routing and the human-as-oracle — no AI in any of them.
