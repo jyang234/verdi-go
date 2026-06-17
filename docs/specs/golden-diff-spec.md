@@ -42,6 +42,14 @@ The IR is a tree, so a text diff of the JSON is noise: a moved subtree shows as 
 
 Taxonomy: Added, Removed, Changed(attr), Reordered, ConcurrencyChanged, CardinalityChanged. Tractable — keyed match plus LIS, not general tree-edit-distance, because `Op` supplies stable identity.
 
+**Trace-level fields excluded from equality.** The diff is over the span tree; the `CanonicalTrace`'s identity/provenance fields get three distinct treatments so equality rests on behavior alone:
+
+- **`Stamp`** (code identity / deployed commit) — neither written to the golden nor compared; it is run-varying provenance, injected at audit time instead (writing it would churn the golden every deploy).
+- **`Provenance`** (capture-fidelity grade) — **written** into the golden so the committed corpus self-describes its trust grade for the behavioral-impeachment audit, but **excluded from equality**: two captures of identical behavior at different grades (an "integration" harness re-drive vs a "production" deploy) must still assert equal. The grade is a trust input, not a behavioral dimension.
+- **`Discards`** — excluded; it records only what was dropped, for review transparency.
+
+Concretely, the writer (`-update`) zeroes only `Stamp`; the equality reducer zeroes `Stamp`, `Provenance`, and `Discards`. (The impeachment `corpusDigest` is the deliberate counter-case: it folds `Provenance` *in*, because for the audit the grade is identity, not noise.)
+
 ---
 
 ## 4. Prioritization — the third consumer of the tier-map
