@@ -20,7 +20,8 @@ func FuzzCanonFQNSymmetry(f *testing.F) {
 	f.Add("example.com/a/b", "Bureau", "Score", uint8(0))
 	f.Add("svc/internal/origination", "", "NewEvaluator", uint8(3))
 	f.Add("p", "T", "M", uint8(1))
-	f.Add("a/b", "Cfg", "Marshal", uint8(0)|dottedBit) // dotted-final-segment seed
+	f.Add("a/b", "Cfg", "Marshal", uint8(0)|dottedBit) // dotted-segment POINTER method (reconciles)
+	f.Add("a/b", "Cfg", "Marshal", uint8(1)|dottedBit) // dotted-segment VALUE method — the §12.5 ⊥ case, must ⊥ on BOTH spellings
 	f.Fuzz(func(t *testing.T, pkgSeed, recvSeed, nameSeed string, sel uint8) {
 		pkg := cleanPkgPath(pkgSeed)
 		recv := cleanIdent(recvSeed)

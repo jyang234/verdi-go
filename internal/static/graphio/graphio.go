@@ -7,6 +7,7 @@
 package graphio
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -151,42 +152,55 @@ type Edge struct {
 
 // mergeDeclaredBlindSpots appends the config's human-ratified seams (§8 enactment)
 // to the auto-detected graph blind spots, deterministically — deduped by (kind,
-// site), sorted, so the result is byte-identical regardless of declaration order.
-// A declared seam makes static abstain at its site (the safe direction: it can only
-// weaken proofs, never hide a violation). The default kind is ImpeachmentSeam (the
-// behaviorally-discovered category); an explicit kind is kept verbatim. An entry
-// with no site is skipped (nothing to blind).
-func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config) []blindspots.BlindSpot {
+// site) and sorted through the one canonical comparator (blindspots.SortBlindSpots),
+// so the result is byte-identical regardless of declaration order. A declared seam
+// makes static abstain at its site (the safe direction: it can only weaken proofs,
+// never hide a violation). The default kind is ImpeachmentSeam (the
+// behaviorally-discovered category); an explicit kind is kept verbatim but MUST name
+// a recognized blindspots.Kind — an unknown kind is a config error (returned), never
+// a silent passthrough that would let a typo'd kind ride the gated artifact. An entry
+// with no site is skipped (nothing to blind; config.validate already rejects this on
+// load, so the skip is belt-and-suspenders for callers that build a Config directly).
+//
+// On a (kind, site) collision the kept Detail is the lexically-smallest of the
+// colliding entries, NOT the first by arrival: the tie-break is intrinsic to the
+// data, so the merged manifest is identical no matter the order detection or config
+// presented the duplicates (CLAUDE.md determinism: never break a tie on arrival
+// order).
+func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config) ([]blindspots.BlindSpot, error) {
 	if cfg == nil || len(cfg.Static.DeclaredBlindSpots) == 0 {
-		return detected
+		return detected, nil
 	}
-	seen := map[[2]string]bool{}
+	// Collapse to one entry per (kind, site), keeping the lexically-smallest Detail.
+	byKey := map[[2]string]blindspots.BlindSpot{}
+	add := func(b blindspots.BlindSpot) {
+		key := [2]string{string(b.Kind), b.Site}
+		if cur, ok := byKey[key]; !ok || b.Detail < cur.Detail {
+			byKey[key] = b
+		}
+	}
 	for _, b := range detected {
-		seen[[2]string{string(b.Kind), b.Site}] = true
+		add(b)
 	}
-	out := append([]blindspots.BlindSpot(nil), detected...)
-	for _, d := range cfg.Static.DeclaredBlindSpots {
+	for i, d := range cfg.Static.DeclaredBlindSpots {
 		kind := d.Kind
 		if kind == "" {
 			kind = string(blindspots.ImpeachmentSeam)
 		}
-		key := [2]string{kind, d.Site}
-		if d.Site == "" || seen[key] {
+		if !blindspots.Recognized(blindspots.Kind(kind)) {
+			return nil, fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): kind %q is not a recognized blind-spot category", i, d.Site, kind)
+		}
+		if d.Site == "" {
 			continue
 		}
-		seen[key] = true
-		out = append(out, blindspots.BlindSpot{Kind: blindspots.Kind(kind), Site: d.Site, Detail: d.Reason})
+		add(blindspots.BlindSpot{Kind: blindspots.Kind(kind), Site: d.Site, Detail: d.Reason})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
-		}
-		if out[i].Site != out[j].Site {
-			return out[i].Site < out[j].Site
-		}
-		return out[i].Detail < out[j].Detail
-	})
-	return out
+	out := make([]blindspots.BlindSpot, 0, len(byKey))
+	for _, b := range byKey {
+		out = append(out, b)
+	}
+	blindspots.SortBlindSpots(out)
+	return out, nil
 }
 
 // Build renders the full first-party graph of res. If entry is non-empty, the
@@ -218,7 +232,11 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 	// the disclosure incomplete. Done here so a declared seam rides the graph exactly
 	// like an auto-detected blind spot — the consumer (groundwork) cannot tell them
 	// apart, and the next run is honest at the seam.
-	g.BlindSpots = mergeDeclaredBlindSpots(g.BlindSpots, res.Config)
+	merged, err := mergeDeclaredBlindSpots(g.BlindSpots, res.Config)
+	if err != nil {
+		return nil, err
+	}
+	g.BlindSpots = merged
 	rootFns := rootFuncSet(res)
 	if entry == "" {
 		for _, r := range res.Roots.Roots {

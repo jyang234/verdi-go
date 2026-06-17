@@ -199,6 +199,14 @@ func effectMatchSurface(ix *graph.Index, effect string) []string {
 // projected onto the graph), minus the emitters, so the from-binding can never
 // drift from what the severance walk mapped. Empty at L0 for a missed root (no
 // mapped path node), which fail-closes that case to a bare impeachment.
+//
+// SOUNDNESS INVARIANT (pinned by TestWitnessFromSurfaceExcludesEmitters): Anchors
+// is the chain entry→…→emitter (severance.assembleAnchors), so the emitter is
+// ALWAYS the chain's terminus and is the ONLY member that is not a strict causal
+// ancestor of the effect. Subtracting exactly the emitters leaves only genuine
+// upstream path nodes — never the tautology "the emitter reaches the effect it
+// emits", which would mint a false VIOLATED for any from-pattern that happens to
+// match the emitting function.
 func witnessFromSurface(ix *graph.Index, w Witness) []string {
 	if w.Severance == nil {
 		return nil

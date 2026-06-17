@@ -164,6 +164,75 @@ func TestResolveNeverTouchesDowngrades(t *testing.T) {
 	}
 }
 
+// TestWitnessFromSurfaceExcludesEmitters pins the §13 soundness invariant (#12):
+// the effect emitter is the terminus of the localized anchor chain, and the
+// from-surface subtracts exactly the emitters — so a must_not_reach `from` pattern
+// can never bind the emitting function and mint the tautology "the emitter reaches
+// the effect it emits" as a witnessed VIOLATED.
+func TestWitnessFromSurfaceExcludesEmitters(t *testing.T) {
+	ix, r, _ := impeachFixture(t)
+	w := r.Candidates[0]
+	emitters := staticEmitters(ix, w.Effect)
+	if len(emitters) == 0 {
+		t.Fatal("fixture should model an emitter")
+	}
+	if w.Severance == nil {
+		t.Fatal("an impeachment must carry a severance")
+	}
+	// The emitter IS in the anchor chain (its terminus) — the invariant the
+	// subtraction relies on.
+	emitterInAnchors := false
+	for _, a := range w.Severance.Anchors {
+		for _, e := range emitters {
+			if a == e {
+				emitterInAnchors = true
+			}
+		}
+	}
+	if !emitterInAnchors {
+		t.Fatalf("emitter absent from anchors %v; the strip-emitters invariant assumes the emitter is the chain terminus", w.Severance.Anchors)
+	}
+	// ...but the from-surface strips it.
+	surface := witnessFromSurface(ix, w)
+	for _, s := range surface {
+		for _, e := range emitters {
+			if s == e {
+				t.Errorf("from-surface %v includes emitter %q: a tautological from→its-own-effect breach could be minted", surface, e)
+			}
+		}
+	}
+	// The discovered entry handler (a genuine causal ancestor) survives.
+	found := false
+	for _, s := range surface {
+		if s == "svc.handler" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("from-surface %v dropped the entry handler (the real causal ancestor)", surface)
+	}
+}
+
+// TestResolveLivePreservesDisclosure pins that the live-corpus gate FENCE (no
+// blocker — non-deterministic traffic must never gate) does NOT suppress the
+// DISCLOSURE (#21): the witnessed breach is still upgraded to VIOLATED in the
+// report so observe-first surfaces it. The fence is on gating, not on telling the
+// truth — silently dropping the verdict on a live corpus would be a hidden
+// disclosure, the worst outcome under the prime directive.
+func TestResolveLivePreservesDisclosure(t *testing.T) {
+	ix, r, _ := impeachFixture(t)
+	rules := []policy.ReachRule{{
+		Name: "no-delete-from-web", From: []string{"svc.handler"}, To: []string{"boundary:db DELETE ledger"},
+	}}
+	res := Resolve(r, ix, rules, OriginLive)
+	if len(res.GateBlockers()) != 0 {
+		t.Fatalf("live corpus gated (must be audit-only): %+v", res.GateBlockers())
+	}
+	if res.Candidates[0].Verdict != VerdictViolated {
+		t.Errorf("live disclosure lost: verdict = %q, want %q recorded in the report", res.Candidates[0].Verdict, VerdictViolated)
+	}
+}
+
 // TestResolveDeterministic: the resolved report's digest is a pure function of its
 // inputs and independent of must_not_reach rule order (the dependent set is sorted).
 func TestResolveDeterministic(t *testing.T) {

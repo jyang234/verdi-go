@@ -28,6 +28,13 @@ const (
 // repair carries — a disclosed seam discovered by behavior, distinct from the
 // statically-detected kinds (reflect, HighFanOut, …). It is also the ratchet
 // allow-list entry's Kind, so the co-update (§8) matches the repair exactly.
+//
+// This MUST equal string(blindspots.ImpeachmentSeam): the same seam kind is named
+// here (where the repair is proposed) and there (where it is recognized in the
+// static manifest). impeach cannot import blindspots without a cycle, so the value
+// is spelled by hand and the parity is guarded by TestBlindSpotKindParity in
+// blindspots (one-source-of-truth: the copies are pinned equal, not allowed to
+// drift).
 const BlindSpotKindImpeachment = "ImpeachmentSeam"
 
 // ProposedRepair mirrors blindspots.BlindSpot / frontier.Marker on purpose (§5):

@@ -363,6 +363,20 @@ func (c *Config) validate() error {
 			return fmt.Errorf("flowmap config: static.routers[%d].handlerArg %d must be >= 0", i, *r.HandlerArg)
 		}
 	}
+	// A ratified seam must name a site to blind and a reason (the impeachment
+	// witness). A seam with no site blinds nothing; a seam with no reason is
+	// undisclosed drift, not a ratified disclosure — fail closed at load rather
+	// than silently merging a reasonless blind spot. The Kind is validated against
+	// the recognized set in graphio (config cannot import blindspots — that package
+	// imports config), where the merge happens.
+	for i, b := range c.Static.DeclaredBlindSpots {
+		if b.Site == "" {
+			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d]: site is required", i)
+		}
+		if b.Reason == "" {
+			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): reason is required (the impeachment witness)", i, b.Site)
+		}
+	}
 	return nil
 }
 

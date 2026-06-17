@@ -63,6 +63,20 @@ func Kinds() []Kind {
 	}
 }
 
+// Recognized reports whether k names a known blind-spot category. It backs
+// validation of config-declared seams (graphio.mergeDeclaredBlindSpots): a seam
+// declared with a Kind outside this set is a config error, not a silent passthrough
+// of an unknown category. Derived from Kinds() so a new const is covered without a
+// second edit.
+func Recognized(k Kind) bool {
+	for _, known := range Kinds() {
+		if k == known {
+			return true
+		}
+	}
+	return false
+}
+
 // Boundary reports whether a blind spot belongs to the GATED boundary subset.
 // Only the categories that describe an inter-service boundary surface gate: a
 // dynamically-named boundary effect and an unresolved entry-point registration.
@@ -265,8 +279,19 @@ func dedupSort(in []BlindSpot) []BlindSpot {
 		seen[b] = true
 		out = append(out, b)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
+	SortBlindSpots(out)
+	return out
+}
+
+// SortBlindSpots sorts a manifest in place by the canonical, run-independent order
+// (Kind, then Site, then Detail) — the ONE comparator every blind-spot ordering
+// uses, so a manifest's byte form does not depend on detection or declaration
+// order. Both Detect (via dedupSort) and the graphio declared-seam merge sort
+// through here; keeping the tie-break in one place is what stops the two copies
+// from drifting (CLAUDE.md "one source of truth").
+func SortBlindSpots(bs []BlindSpot) {
+	sort.Slice(bs, func(i, j int) bool {
+		a, b := bs[i], bs[j]
 		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
 		}
@@ -275,5 +300,4 @@ func dedupSort(in []BlindSpot) []BlindSpot {
 		}
 		return a.Detail < b.Detail
 	})
-	return out
 }

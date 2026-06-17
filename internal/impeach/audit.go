@@ -542,12 +542,22 @@ func lessObserved(a, b observedEffect) bool {
 // arrival order and of a trace appearing twice — the report is a function of
 // WHICH canonical traces were seen, not how the slice was assembled (§5).
 //
-// Each trace is digested with its code-identity Stamp zeroed, mirroring
+// Each trace is digested with its code-identity Stamp zeroed, as in
 // golden.canonicalBytes: the Stamp is run-varying provenance EXCLUDED from trace
 // equality, so two captures of one flow on different deploys are the same
 // canonical trace and yield the same corpus digest. The corpus's deploy identity
 // is carried separately as Report.TraceIdentity, never folded into the structural
 // digest (else this digest would churn per deploy).
+//
+// The capture-Provenance grade is DELIBERATELY RETAINED here — the one field where
+// this digest diverges from golden.canonicalBytes, which zeroes it. For the golden
+// the grade is not behavioral, so equality must ignore it (a "production" re-drive
+// and an "integration" re-drive of identical behavior are the same snapshot). For
+// the AUDIT the grade IS identity: a production-grade corpus and an
+// integration-grade corpus of the same flow license different verdicts (only the
+// trusted grades promote an impeachment), so they must digest DIFFERENTLY — folding
+// the grade in is what keeps the audit's identity honest about what it was allowed
+// to conclude.
 func corpusDigest(traces []*ir.CanonicalTrace) string {
 	seen := map[string]bool{}
 	var digs []string
@@ -556,7 +566,7 @@ func corpusDigest(traces []*ir.CanonicalTrace) string {
 			continue
 		}
 		cp := *t
-		cp.Stamp = ""
+		cp.Stamp = "" // Provenance intentionally kept (see doc): grade is audit identity
 		d := canonicalDigest(&cp)
 		if !seen[d] {
 			seen[d] = true
