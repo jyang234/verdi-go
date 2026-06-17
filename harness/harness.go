@@ -168,6 +168,13 @@ func (startProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) 
 // It fails CLOSED: no SUT frame ⇒ "" ⇒ the span carries no tag, an honest ⊥ that
 // keeps the severance walk at L0, never a guessed or driver frame. Determinism
 // holds: the FQN is a property of the call path, not of timing.
+//
+// COST: this runs synchronously in OnStart for EVERY span, walking up to 32 stack
+// frames per span. That is acceptable here — the harness is a TEST/capture-time
+// tool, not a production hot path, and correctness of the L1 tag outranks the walk
+// cost under the prime directive. A production-grade in-process producer that ever
+// adopted this would want to bound or cache the walk; the fixed 32-frame cap keeps
+// it O(1) per span regardless.
 func firstPartyFQN() string {
 	var pcs [32]uintptr
 	// Skip runtime.Callers, firstPartyFQN, and OnStart, so the walk starts at the

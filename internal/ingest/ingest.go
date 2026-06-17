@@ -112,12 +112,7 @@ func assemble(slug, svc string, spans []capture.Span) FlowCapture {
 // bucket whose spans disagree on the grade yields "" (unestablished ⇒ the
 // impeachment capture-fidelity rung fails closed). Producer-set, never inferred.
 func flowProvenance(spans []capture.Span) string {
-	vals := make([]string, len(spans))
-	for i := range spans {
-		vals[i] = spans[i].Attr(capture.CaptureProvenanceAttr)
-	}
-	grade, _ := capture.AgreedStamp(vals)
-	return grade
+	return flowAttrAgreed(spans, capture.CaptureProvenanceAttr)
 }
 
 // flowStamp lifts the per-service code-identity stamp off the bucket's spans (the
@@ -130,14 +125,25 @@ func flowProvenance(spans []capture.Span) string {
 // not veto a stamp the real spans agree on, and an all-stampless bucket is simply
 // stampless.
 func flowStamp(spans []capture.Span) string {
-	stamps := make([]string, len(spans))
+	return flowAttrAgreed(spans, capture.CodeStampAttr)
+}
+
+// flowAttrAgreed is the ONE per-bucket attribute reducer behind flowStamp and
+// flowProvenance, parameterized over the resource-attribute key. It applies the
+// shared capture.AgreedStamp discipline with the INGEST-layer empty-policy: a span
+// MAY lack the attribute without vetoing (AgreedStamp ignores blanks), so a
+// synthesized root carrying none does not veto a value the real spans agree on; a
+// disagreement (ok=false) and an all-blank bucket both yield "". This empty-policy
+// is deliberately more lenient than impeach.corpusAgreed's (which short-circuits on
+// any blank) — the half capture.AgreedStamp documents the two are allowed to differ
+// on. One source so the stamp and grade lifts cannot drift.
+func flowAttrAgreed(spans []capture.Span, key string) string {
+	vals := make([]string, len(spans))
 	for i := range spans {
-		stamps[i] = spans[i].Attr(capture.CodeStampAttr)
+		vals[i] = spans[i].Attr(key)
 	}
-	// A disagreement (ok=false) is the fail-closed "" we want; ("",true) is an
-	// all-stampless bucket, also "". Either way the agreed stamp is the result.
-	stamp, _ := capture.AgreedStamp(stamps)
-	return stamp
+	v, _ := capture.AgreedStamp(vals)
+	return v
 }
 
 // WholeFlows is the cross-service analog of Group, for rendering rather than

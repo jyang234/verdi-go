@@ -248,17 +248,7 @@ func q(s string) string { return strconv.Quote(s) }
 // agree — a supplied identity that contradicts the corpus is a caller error, and
 // fails CLOSED to "" (unestablished) rather than letting either win silently.
 func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
-	derived := corpusIdentity(traces)
-	switch {
-	case derived == "":
-		return prov.TraceIdentity // stampless corpus ⇒ caller injection (committed path)
-	case prov.TraceIdentity == "":
-		return derived // self-describing live corpus
-	case derived == prov.TraceIdentity:
-		return derived
-	default:
-		return "" // injected identity contradicts the corpus ⇒ fail closed
-	}
+	return reconcileSelfDescribed(corpusIdentity(traces), prov.TraceIdentity)
 }
 
 // corpusIdentity is the single code identity the trace corpus self-describes, or
@@ -272,24 +262,7 @@ func resolveIdentity(traces []*ir.CanonicalTrace, prov Provenance) string {
 // stamp (a stampless trace cannot ride a stamped sibling's identity), so any empty
 // Stamp short-circuits to "" before the reducer ever sees the corpus.
 func corpusIdentity(traces []*ir.CanonicalTrace) string {
-	stamps := make([]string, 0, len(traces))
-	for _, t := range traces {
-		if t == nil {
-			continue
-		}
-		if t.Stamp == "" {
-			return "" // an unstamped trace ⇒ identity unestablished (fail closed)
-		}
-		stamps = append(stamps, t.Stamp)
-	}
-	if len(stamps) == 0 {
-		return "" // empty corpus ⇒ nothing to establish
-	}
-	id, ok := capture.AgreedStamp(stamps)
-	if !ok {
-		return "" // mixed deploys ⇒ no single identity (fail closed)
-	}
-	return id
+	return corpusAgreed(traces, func(t *ir.CanonicalTrace) string { return t.Stamp })
 }
 
 // resolveCaptureProvenance reconciles the corpus's PRODUCER-SET capture grade
@@ -302,17 +275,7 @@ func corpusIdentity(traces []*ir.CanonicalTrace) string {
 // mechanically honest: the audit caller can no longer assert a grade the capture
 // contradicts.
 func resolveCaptureProvenance(traces []*ir.CanonicalTrace, prov Provenance) string {
-	derived := corpusProvenance(traces)
-	switch {
-	case derived == "":
-		return prov.Capture // ungraded corpus ⇒ caller's grade (older/unmarked path)
-	case prov.Capture == "":
-		return derived // self-describing graded corpus
-	case derived == prov.Capture:
-		return derived
-	default:
-		return "" // caller grade contradicts the corpus ⇒ fail closed (untrusted)
-	}
+	return reconcileSelfDescribed(corpusProvenance(traces), prov.Capture)
 }
 
 // corpusProvenance is the single capture grade the corpus self-describes, or "" when
@@ -320,22 +283,53 @@ func resolveCaptureProvenance(traces []*ir.CanonicalTrace, prov Provenance) stri
 // trace must carry the SAME non-empty Provenance (a mixed or partly-ungraded corpus
 // is ambiguous ⇒ ""), reusing the shared capture.AgreedStamp reducer (one source).
 func corpusProvenance(traces []*ir.CanonicalTrace) string {
-	grades := make([]string, 0, len(traces))
+	return corpusAgreed(traces, func(t *ir.CanonicalTrace) string { return t.Provenance })
+}
+
+// reconcileSelfDescribed is the ONE reconciliation rule both the code-identity and
+// the capture-grade rungs use: a value the corpus DERIVED for itself vs a value the
+// caller INJECTED. The two are merged fail-closed — either alone wins when the other
+// is "", they pass through when they agree, and a contradiction yields "" rather than
+// letting one silently override the evidence. Parameterizing it keeps resolveIdentity
+// and resolveCaptureProvenance from drifting (CLAUDE.md one-source-of-truth): the
+// fail-closed-on-contradiction property is asserted once and reused.
+func reconcileSelfDescribed(derived, injected string) string {
+	switch {
+	case derived == "":
+		return injected // corpus does not self-describe ⇒ caller's value
+	case injected == "":
+		return derived // self-describing corpus, no caller assertion
+	case derived == injected:
+		return derived
+	default:
+		return "" // caller value contradicts the corpus ⇒ fail closed
+	}
+}
+
+// corpusAgreed is the ONE "single value the corpus self-describes, or """ reducer,
+// parameterized over which per-trace field to read (Stamp for identity, Provenance
+// for the capture grade). It fails CLOSED uniformly: a nil trace is skipped, but any
+// non-nil trace carrying an EMPTY field short-circuits to "" (a blank cannot ride a
+// sibling's value), an empty corpus is "", and a disagreement under the shared
+// capture.AgreedStamp reducer is "". One source for both rungs' derive logic.
+func corpusAgreed(traces []*ir.CanonicalTrace, field func(*ir.CanonicalTrace) string) string {
+	vals := make([]string, 0, len(traces))
 	for _, t := range traces {
 		if t == nil {
 			continue
 		}
-		if t.Provenance == "" {
-			return "" // an ungraded trace ⇒ grade unestablished (fail closed)
+		v := field(t)
+		if v == "" {
+			return "" // an unset field ⇒ unestablished (fail closed)
 		}
-		grades = append(grades, t.Provenance)
+		vals = append(vals, v)
 	}
-	if len(grades) == 0 {
+	if len(vals) == 0 {
 		return "" // empty corpus ⇒ nothing to establish
 	}
-	grade, ok := capture.AgreedStamp(grades)
+	agreed, ok := capture.AgreedStamp(vals)
 	if !ok {
-		return "" // mixed grades ⇒ no single grade (fail closed)
+		return "" // disagreement ⇒ no single value (fail closed)
 	}
-	return grade
+	return agreed
 }
