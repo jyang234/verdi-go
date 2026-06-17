@@ -23,11 +23,14 @@ fmt-check:
 lint:
 	golangci-lint run
 
-# fixture builds and gates the hermetic fixture module (a separate module under
-# testdata): its flows/ package is the behavioral snapshot gate, driven through
-# the public harness/flow packages and run in go.work workspace mode.
+# fixture builds and gates the hermetic fixture modules (separate modules under
+# testdata): their flows/ packages are the behavioral snapshot gates, driven
+# through the public harness/flow packages and run in go.work workspace mode.
+# impeachsvc is the behavioral-impeachment fixture (a missed-route DB DELETE), so
+# its captured trace golden is gated here alongside loansvc's.
 fixture:
 	cd testdata/fixtures/loansvc && go build ./... && go test ./...
+	cd testdata/fixtures/impeachsvc && go build ./... && go test ./...
 
 # verify is the per-phase gate: it must stay green at the end of every phase.
 verify: build vet lint test fixture

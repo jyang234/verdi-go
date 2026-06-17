@@ -1,0 +1,30 @@
+{
+  "flow": "DELETE /admin/ledger",
+  "service": "impeachsvc",
+  "schema_version": "flowmap.trace/v1",
+  "root": {
+    "op": "HTTP DELETE /admin/ledger",
+    "kind": "server",
+    "peer": "",
+    "tier": 1,
+    "children": [
+      {
+        "members": [
+          {
+            "op": "DB postgres DELETE ledger",
+            "kind": "client",
+            "peer": "postgres",
+            "tier": 1,
+            "attrs": {
+              "db.statement": "DELETE FROM ledger WHERE loan_id = ?"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "discards": {
+    "ids": "dropped",
+    "timing": "dropped"
+  }
+}

@@ -62,6 +62,15 @@ flowmap graph testdata/fixtures/loansvc >testdata/groundwork/goldens/loansvc.gra
 strip_tool testdata/groundwork/goldens/loansvc.graph.json
 echo "wrote testdata/groundwork/goldens/loansvc.graph.json"
 
+# impeachsvc is the behavioral-impeachment fixture: a service with a custom
+# (unhinted) admin router whose DELETE-ledger effect is a MISSED ROOT — present
+# in the graph, unreachable from any discovered entrypoint, and undisclosed. Its
+# graph golden is owned by the impeach package (not the groundwork manifest), and
+# its trace golden is produced by the fixture's flows test (-update).
+flowmap graph testdata/fixtures/impeachsvc >internal/impeach/testdata/impeachsvc.graph.json
+strip_tool internal/impeach/testdata/impeachsvc.graph.json
+echo "wrote internal/impeach/testdata/impeachsvc.graph.json"
+
 # Boundary contracts for the `diff` demo. flowmap boundary writes in-place, so we
 # generate, copy to the goldens dir, and drop the in-fixture file. The branch
 # contract is the base with the PUT route removed (breaking), a /healthz route
