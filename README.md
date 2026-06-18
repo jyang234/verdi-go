@@ -1,4 +1,4 @@
-# flowmap + groundwork
+# Verdi-Go: flowmap + groundwork = verdict
 
 **Deterministic guardrails for AI-speed Go development.**
 
