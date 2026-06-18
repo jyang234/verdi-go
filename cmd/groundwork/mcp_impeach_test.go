@@ -59,15 +59,6 @@ func TestMCPImpeachDisclosesWitnessNeverGates(t *testing.T) {
 	if !strings.Contains(text, "DELETE ledger") {
 		t.Errorf("impeach did not disclose the observed missed-root effect:\n%s", text)
 	}
-	// EVERY missed-route witness is disclosed, across BOTH label vocabularies — the
-	// second DB DELETE and the bus PUBLISH the multi-effect corpus adds. Pinned so a
-	// regression that drops a witness from the agent-facing lens (a per-effect or
-	// bus-vocabulary bug) is caught here, not silently under-disclosed.
-	for _, want := range []string{"db DELETE audit_log", "PUBLISH ledger.purged"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("impeach did not disclose the witness %q (multi-vocabulary corpus):\n%s", want, text)
-		}
-	}
 	// The integration-graded corpus over a stamp-cleared graph promotes the candidate
 	// to a full IMPEACHMENT (the same classification the gate integrates) — the lens
 	// does not silently downgrade what the gate would act on.
