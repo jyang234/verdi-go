@@ -10,19 +10,25 @@ import (
 )
 
 // TestBusEffectKeyParity is the bus analogue of TestDBEffectKeyParity: the static
-// PUBLISH effect (graph.BusEffect, event carried separately) and the behavioral
-// producer op (canon's opkey.PublishPrefix + event) must reduce to the SAME join key
-// through the one helper, BusEffectKey. Before BusEffectKey the two sides built the
-// key from two independent constants (graph.BusPublish vs opkey.PublishPrefix) with no
-// parity test — agreeing only by coincidence; a drift would silently miss every bus
-// impeachment or mint spurious ones (the failure effectkey.go warns of for DB).
+// PUBLISH effect (decoded by the REAL ix.BusEffects, event composed via BusEffectKey)
+// and the behavioral producer op (canon's opkey.PublishPrefix + event, via observedKey)
+// must reduce to the SAME join key. Before BusEffectKey the two sides built the key from
+// two independent constants (graph.BusPublish vs opkey.PublishPrefix) with no parity
+// test — agreeing only by coincidence; a drift would silently miss every bus impeachment
+// or mint spurious ones (the failure effectkey.go warns of for DB).
 func TestBusEffectKeyParity(t *testing.T) {
 	for _, event := range []string{"loan.approved", "ledger.purged", "disbursement.initiated"} {
 		t.Run(event, func(t *testing.T) {
 			want := "PUBLISH " + event
 
-			// Static: the graph's bus effect renders through BusEffectKey.
-			if sk := BusEffectKey(event); sk != want {
+			// Static: the graph's bus label decodes through the REAL ix.BusEffects
+			// decoder and renders the key via BusEffectKey (the composition audit.go
+			// uses), not BusEffectKey in isolation.
+			sk, ok := staticBusKey(t, "boundary:bus PUBLISH "+event)
+			if !ok {
+				t.Fatalf("static decoder produced no effect for %q", event)
+			}
+			if sk != want {
 				t.Errorf("static key = %q, want %q", sk, want)
 			}
 
@@ -35,8 +41,8 @@ func TestBusEffectKeyParity(t *testing.T) {
 			if bk != want {
 				t.Errorf("behavioral key = %q, want %q", bk, want)
 			}
-			if BusEffectKey(event) != bk {
-				t.Errorf("parity broken: static %q != behavioral %q", BusEffectKey(event), bk)
+			if sk != bk {
+				t.Errorf("parity broken: static %q != behavioral %q", sk, bk)
 			}
 		})
 	}
@@ -64,6 +70,23 @@ func staticDBKey(t *testing.T, label string) (key string, ok bool) {
 		return "", false
 	}
 	return DBEffectKey(effs[0].Op, effs[0].Table), true
+}
+
+// staticBusKey decodes a "boundary:bus PUBLISH <event>" label through the REAL static
+// decoder (graph.BusEffects, the schema owner) and renders the canonical join key —
+// the bus analogue of staticDBKey, so the parity test exercises the decoder→key
+// composition audit.go uses (ix.BusEffects().Event → BusEffectKey), not BusEffectKey
+// in isolation.
+func staticBusKey(t *testing.T, label string) (key string, ok bool) {
+	t.Helper()
+	ix := graph.NewIndex(&graph.Graph{
+		Edges: []graph.Edge{{From: "svc.emit", To: label, Boundary: "outbound-async"}},
+	})
+	effs, _ := ix.BusEffects()
+	if len(effs) != 1 {
+		return "", false
+	}
+	return BusEffectKey(effs[0].Event), true
 }
 
 // observedDBKey decodes a "DB <system> <OP> <table>" op key through the REAL

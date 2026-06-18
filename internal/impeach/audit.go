@@ -505,22 +505,31 @@ func isDBKey(k string) bool { return strings.HasPrefix(k, "db ") }
 // carries the FQN tags pathSig folds in (Observation.CausalPath drops them), so the
 // tie-break is over the full path identity.
 func lessWitness(a, b Witness) bool {
-	if a.Effect != b.Effect {
-		return a.Effect < b.Effect
+	ka, kb := witnessSortKey(a), witnessSortKey(b)
+	for i := range ka {
+		if ka[i] != kb[i] {
+			return ka[i] < kb[i]
+		}
 	}
-	if a.Observed.Flow != b.Observed.Flow {
-		return a.Observed.Flow < b.Observed.Flow
+	return false
+}
+
+// witnessSortKey is the ONE definition of a witness's intrinsic sort identity (§5):
+// effect, then the observation's flow/service/entry/op, then the causal-path
+// signature (which folds the FQN tags, so two paths to one effect order distinctly).
+// lessWitness compares it element-wise and the determinism fuzz mirrors it through
+// THIS helper, so the comparator and its property test cannot drift on which fields
+// constitute identity (CLAUDE.md one-source). Equal keys ⇒ equal witness for the sort;
+// the dedup (audit.go observedEffects) guarantees no two candidates share one.
+func witnessSortKey(w Witness) [6]string {
+	return [6]string{
+		w.Effect,
+		w.Observed.Flow,
+		w.Observed.Service,
+		w.Observed.Entry,
+		w.Observed.Op,
+		pathSig(w.chain),
 	}
-	if a.Observed.Service != b.Observed.Service {
-		return a.Observed.Service < b.Observed.Service
-	}
-	if a.Observed.Entry != b.Observed.Entry {
-		return a.Observed.Entry < b.Observed.Entry
-	}
-	if a.Observed.Op != b.Observed.Op {
-		return a.Observed.Op < b.Observed.Op
-	}
-	return pathSig(a.chain) < pathSig(b.chain)
 }
 
 func lessObserved(a, b observedEffect) bool {

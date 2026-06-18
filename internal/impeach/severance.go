@@ -322,7 +322,7 @@ func effectEmitters(ix *graph.Index, effect string) []emitterRef {
 	case isBusKey(effect):
 		busEffs, _ := ix.BusEffects()
 		for _, be := range busEffs {
-			if be.Op == graph.BusPublish && graph.BusPublish+" "+be.Event == effect {
+			if be.Op == graph.BusPublish && BusEffectKey(be.Event) == effect {
 				out = append(out, emitterRef{From: be.From, Label: be.Label})
 			}
 		}

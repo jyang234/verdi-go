@@ -11,35 +11,35 @@ import (
 // FuzzWitnessSortStrictWeakOrder pins the determinism the candidate sort rests on as a
 // SELF-CHECKING invariant rather than a property of any committed fixture (tenet 5;
 // CLAUDE.md "new ordering paths ship with a determinism test or a fuzz"). lessWitness
-// is the witness sort's comparator (§5); Go's sort.Slice requires it to be a STRICT
-// WEAK ORDERING, and a deterministic, arrival-order-independent candidate order
-// requires it to be a strict TOTAL order over the witness identity tuple (Effect,
-// Flow, Service, Entry, Op, pathSig). A pair of DISTINCT-identity witnesses that
-// compares "equal" (neither less) would be ordered by arrival — the §12.5
-// non-determinism the dedup exists to prevent. Until now this was exercised only by
-// hand-picked fixtures (TestSeverancePathsDistinctByTag, the multi-DELETE corpus).
+// is the witness sort's comparator (§5); for the non-stable candidate sort to be
+// deterministic and arrival-order-independent it must be a strict TOTAL order over the
+// witness identity tuple (witnessSortKey: Effect, Flow, Service, Entry, Op, pathSig).
 //
-// Over GENERATED witnesses the fuzz asserts the four axioms that characterize a strict
-// weak ordering — irreflexivity, asymmetry, transitivity, and transitivity of
-// incomparability — plus totality on distinct identities (incomparable ⟺ identical
-// identity). It then asserts permutation-invariance of the PRODUCTION sort (sort.Slice,
-// non-stable) on inputs whose identities are all distinct — the invariant the dedup
-// guarantees in production, and the end-user property the whole exercise is about.
+// Over GENERATED witnesses the fuzz asserts the properties that make it exactly that:
+// irreflexivity, asymmetry, transitivity, and TOTALITY on distinct identities — every
+// two witnesses with different identity tuples must be comparable, so no pair ever
+// falls back to arrival order (the §12.5 non-determinism the dedup exists to prevent);
+// equal tuples compare equal, and the dedup (observedEffects) guarantees those never
+// coexist as candidates. It then asserts permutation-invariance of the production sort
+// (sort.Slice, non-stable) on all-distinct inputs — the end-user property. The chain
+// carries a flowmap.fqn tag, so pathSig's tag-folding (the deepest tie-break: two paths
+// to one effect distinguished only by their FQN tag) is exercised, not just bare ops.
+//
+// The identity tuple is witnessSortKey — the SAME helper lessWitness compares — so the
+// comparator and this property test cannot drift on which fields constitute identity.
 func FuzzWitnessSortStrictWeakOrder(f *testing.F) {
-	// Two witnesses identical but for the path (the deepest tie-break key, pathSig).
-	f.Add("db DELETE ledger\tPOST /x\tsvc\tHTTP\tDB DELETE\tp\n" +
-		"db DELETE ledger\tPOST /x\tsvc\tHTTP\tDB DELETE\tq")
-	// A spread that ties on various prefixes of the key tuple.
-	f.Add("a\tb\tc\td\te\tf\nA\tb\tc\td\te\tf\na\tB\tc\td\te\tf\na\tb\tc\td\te\tg")
+	// Two witnesses identical but for the chain's FQN TAG — the deepest tie-break key
+	// (pathSig folds the tag), distinct identities the sort must still order.
+	f.Add("db DELETE ledger\tPOST /x\tsvc\tHTTP\tDB DELETE\twork\ttagA\n" +
+		"db DELETE ledger\tPOST /x\tsvc\tHTTP\tDB DELETE\twork\ttagB")
+	// A spread that ties on various prefixes of the key tuple, mixing tagged/untagged.
+	f.Add("a\tb\tc\td\te\tf\t\nA\tb\tc\td\te\tf\tt\na\tB\tc\td\te\tf\t\na\tb\tc\td\te\tg\tt")
 	f.Fuzz(func(t *testing.T, raw string) {
 		ws := decodeFuzzWitnesses(raw)
 		if len(ws) < 2 {
 			return
 		}
-		id := func(w Witness) [6]string {
-			return [6]string{w.Effect, w.Observed.Flow, w.Observed.Service, w.Observed.Entry, w.Observed.Op, pathSig(w.chain)}
-		}
-		incomparable := func(a, b Witness) bool { return !lessWitness(a, b) && !lessWitness(b, a) }
+		id := witnessSortKey // the one identity definition lessWitness also orders on
 
 		for _, a := range ws {
 			if lessWitness(a, a) { // irreflexivity
@@ -62,15 +62,11 @@ func FuzzWitnessSortStrictWeakOrder(f *testing.F) {
 				}
 			}
 		}
-		for _, a := range ws {
+		for _, a := range ws { // transitivity
 			for _, b := range ws {
 				for _, c := range ws {
 					if lessWitness(a, b) && lessWitness(b, c) && !lessWitness(a, c) {
 						t.Fatalf("transitivity broken: a<b<c but !a<c: %v %v %v", id(a), id(b), id(c))
-					}
-					// A strict weak ordering requires incomparability to be transitive.
-					if incomparable(a, b) && incomparable(b, c) && !incomparable(a, c) {
-						t.Fatalf("incomparability not transitive (not a strict weak order): %v %v %v", id(a), id(b), id(c))
 					}
 				}
 			}
@@ -97,22 +93,28 @@ func FuzzWitnessSortStrictWeakOrder(f *testing.F) {
 	})
 }
 
-// decodeFuzzWitnesses parses up to 6 witnesses from raw: records split on '\n', the six
-// sort-relevant fields on '\t' (Effect, Flow, Service, Entry, Op, path-op). The path
-// field becomes a one-span chain so pathSig — the final tie-break key — varies with it.
-// 6 caps the O(n^3) transitivity loop. Records without exactly six fields are skipped.
+// decodeFuzzWitnesses parses up to 6 witnesses from raw: records split on '\n', SEVEN
+// sort-relevant fields on '\t' (Effect, Flow, Service, Entry, Op, path-op, path-fqn-tag).
+// The last two become a one-span chain — its Op plus, when the tag field is non-empty,
+// a flowmap.fqn tag — so pathSig (the final tie-break key) varies with both, exercising
+// its tag-folding branch as well as the no-tag path. 6 caps the O(n^3) transitivity
+// loop. Records without exactly seven fields are skipped.
 func decodeFuzzWitnesses(raw string) []Witness {
 	const maxN = 6
 	var ws []Witness
 	for _, rec := range strings.Split(raw, "\n") {
 		f := strings.Split(rec, "\t")
-		if len(f) != 6 {
+		if len(f) != 7 {
 			continue
+		}
+		span := &ir.CanonicalSpan{Op: f[5]}
+		if f[6] != "" { // exercise pathSig's FQN-tag folding (the path-identity tie-break)
+			span.Attrs = map[string]string{FQNTagKey: f[6]}
 		}
 		ws = append(ws, Witness{
 			Effect:   f[0],
 			Observed: Observation{Flow: f[1], Service: f[2], Entry: f[3], Op: f[4]},
-			chain:    []*ir.CanonicalSpan{{Op: f[5]}},
+			chain:    []*ir.CanonicalSpan{span},
 		})
 		if len(ws) == maxN {
 			break
