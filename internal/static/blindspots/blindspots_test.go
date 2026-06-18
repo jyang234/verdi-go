@@ -180,6 +180,53 @@ func main() {
 	}
 }
 
+// TestDetectUnresolvedCallDeterministic is the determinism test the UnresolvedCall
+// disclosure path ships with (CLAUDE.md: "New ordering or canonicalization paths ship
+// with a determinism test"). TestDetectDeterministic runs on loansvc, which emits ZERO
+// UnresolvedCall, so it cannot catch a regression in this path. This module emits
+// SEVERAL (multiple unserved func-value calls across functions), so any map-iteration
+// or arrival-order leak in unresolvedFuncValueCalls / the surrounding Detect loop would
+// surface as a run-to-run difference. The walk is over fn.Blocks/b.Instrs (intrinsic
+// SSA order) and the manifest is SortBlindSpots'd, so the output must be byte-stable.
+func TestDetectUnresolvedCallDeterministic(t *testing.T) {
+	const src = `package main
+
+type handler struct{ a, b func(string) }
+
+func one(h handler)   { h.a("1") }
+func two(h handler)   { h.b("2") }
+func three(h handler) { h.a("3"); h.b("4") }
+
+func main() {
+	one(handler{})
+	two(handler{})
+	three(handler{})
+}
+`
+	res := analyzeModule(t, map[string]string{
+		"go.mod":  "module example.com/m\n\ngo 1.24\n",
+		"main.go": src,
+	})
+	hints := features.NewHintSet(res.Config)
+
+	first := blindspots.Detect(res, hints)
+	var unresolved int
+	for _, b := range first {
+		if b.Kind == blindspots.UnresolvedCall {
+			unresolved++
+		}
+	}
+	if unresolved == 0 {
+		t.Fatal("module emitted no UnresolvedCall; the determinism check would be vacuous")
+	}
+	// Repeat: the manifest must be identical every run (order and content).
+	for i := 0; i < 8; i++ {
+		if got := blindspots.Detect(res, hints); !reflect.DeepEqual(first, got) {
+			t.Fatalf("UnresolvedCall detection not deterministic on run %d:\n%+v\n%+v", i, first, got)
+		}
+	}
+}
+
 // highFanOutMain renders a main package whose interface has n implementations,
 // all instantiated, so RTA resolves the interface call to n callees.
 func highFanOutMain(n int) string {

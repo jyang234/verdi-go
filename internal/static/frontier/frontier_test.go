@@ -76,6 +76,47 @@ func TestStrictServerFrontierSection(t *testing.T) {
 	}
 }
 
+// TestUnresolvedCallFrontierDedup pins the conditional exclusion of UnresolvedCall:
+// it is deduped ONLY against a structural marker at the SAME site (where it would
+// double-count a seam already counted), and is otherwise emitted so the frontier
+// section stays complete. Driven through frontier.Classify with a minimal Input so
+// both branches are exercised without needing two whole fixtures.
+func TestUnresolvedCallFrontierDedup(t *testing.T) {
+	// Coinciding: X is a starved-entrypoint (reaches no effect itself but owns the
+	// severed, effect-bearing closure X$1). An UnresolvedCall at X is redundant.
+	coinciding := frontier.Input{
+		Nodes:       []string{"X", "X$1"},
+		Edges:       []frontier.InEdge{{From: "X$1", To: "boundary:db DELETE ledger"}},
+		Entrypoints: []frontier.InEntry{{Fn: "X", Name: "GET /x"}},
+		BlindSpots:  []frontier.InBlindSpot{{Kind: "UnresolvedCall", Site: "X"}},
+	}
+	for _, m := range frontier.Classify(&coinciding).Markers {
+		if m.Kind == "UnresolvedCall" {
+			t.Errorf("UnresolvedCall at a structurally-marked site must be deduped, got marker %+v", m)
+		}
+	}
+
+	// Standalone: Z carries an UnresolvedCall but no structural marker (a func-value
+	// call outside any recognized dispatch seam). It MUST be disclosed, as BinA.
+	standalone := frontier.Input{
+		Nodes:      []string{"Z"},
+		BlindSpots: []frontier.InBlindSpot{{Kind: "UnresolvedCall", Site: "Z"}},
+	}
+	var got *frontier.Marker
+	for _, m := range frontier.Classify(&standalone).Markers {
+		if m.Kind == "UnresolvedCall" {
+			mm := m
+			got = &mm
+		}
+	}
+	if got == nil {
+		t.Fatal("standalone UnresolvedCall (no structural marker) must be disclosed in the frontier, got none")
+	}
+	if got.Site != "Z" || got.Bin != frontier.BinA {
+		t.Errorf("standalone UnresolvedCall marker = %+v, want Site=Z Bin=A", *got)
+	}
+}
+
 // A scoped (--entry) build carries NO frontier section: it is a whole-service
 // disclosure, and a scoped cone drops entrypoints and prunes effect paths, so its
 // starvation / attribution-loss signal would be a scoping artifact. Gating it on
