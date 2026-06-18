@@ -260,10 +260,13 @@ func TestSeveranceDeterministic(t *testing.T) {
 	if a.Digest != b.Digest {
 		t.Errorf("severance broke order-independence: %s != %s", a.Digest, b.Digest)
 	}
-	// Two localized candidates, in an order-independent sequence (the localization
-	// pass does not perturb the witness sort).
-	if !slices.Equal(effectsOf(a), effectsOf(b)) {
-		t.Errorf("severance broke candidate-order independence: %v != %v", effectsOf(a), effectsOf(b))
+	// Two localized candidates, in an order-independent sequence. The count is pinned
+	// FIRST: without it, a regression to zero candidates would make both effectsOf
+	// slices empty (slices.Equal passes) and skip the loop body — a vacuous green that
+	// proves nothing. The expected sequence is concrete, so emptiness cannot satisfy it.
+	wantOrder := []string{"db DELETE audit_log", "db DELETE ledger"}
+	if !slices.Equal(effectsOf(a), wantOrder) || !slices.Equal(effectsOf(b), wantOrder) {
+		t.Fatalf("severance broke candidate ordering: a=%v b=%v, want %v", effectsOf(a), effectsOf(b), wantOrder)
 	}
 	for _, w := range a.Candidates {
 		if w.Severance == nil {

@@ -60,7 +60,7 @@ func TestImpeachsvcCatchesUndisclosedMissedRoot(t *testing.T) {
 	if r.Digest != rev.Digest {
 		t.Error("report not order-independent over the real corpus")
 	}
-	wantOrder := []string{"db DELETE audit_log", "db DELETE ledger"} // lexical by effect (§5 tie-break)
+	wantOrder := []string{"db DELETE audit_log", "db DELETE ledger"} // lexical on the PRIMARY sort key, effect (§5); distinct effects, so no tie-break is reached
 	if got := effectsOf(r); !slices.Equal(got, wantOrder) {
 		t.Errorf("candidate order = %v, want %v (deterministic sort on intrinsic effect key)", got, wantOrder)
 	}

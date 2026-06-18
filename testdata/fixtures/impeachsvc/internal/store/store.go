@@ -65,10 +65,11 @@ func (l *Loans) Purge(ctx context.Context, loanID string) error {
 // PurgeAudit deletes the ledger's audit trail — a SECOND named DB mutate effect
 // reached only through the same missed admin route. With it the missed route
 // impeaches TWO effects from one capture (DELETE ledger + DELETE audit_log),
-// exercising per-effect witness separation and the multi-candidate tie-break (same
-// op, distinct table) on a real trace — the witness sort the single-effect corpus
-// never drove over more than one finding. Constant SQL keeps it statically NAMED
-// (boundary:db DELETE audit_log), the impeachment precondition.
+// exercising per-effect witness separation and the deterministic multi-candidate
+// witness sort on a real trace — the ordering the single-effect corpus never drove
+// over more than one finding (the two differ in their effect key, the sort's primary
+// discriminator). Constant SQL keeps it statically NAMED (boundary:db DELETE
+// audit_log), the impeachment precondition.
 func (l *Loans) PurgeAudit(ctx context.Context, loanID string) error {
 	const q = "DELETE FROM audit_log WHERE loan_id = $1"
 	ctx, span := dbSpan(ctx, q)
