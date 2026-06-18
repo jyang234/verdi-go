@@ -208,7 +208,27 @@ func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config
 
 // Build renders the full first-party graph of res. If entry is non-empty, the
 // graph is scoped to the functions reachable from the matching entry-point root.
-func Build(res *analyze.Result, entry string) (*Graph, error) {
+// BuildOption tunes a graph build. Options are opt-in refinements (D2-style): the
+// zero set reproduces the default graph byte-for-byte, so every committed golden
+// is unchanged unless a caller explicitly asks for a refinement.
+type BuildOption func(*buildOptions)
+
+type buildOptions struct {
+	foldSQL bool
+}
+
+// WithSQLFold enables the SQL const-accumulation label reclaimer (--reclaim-sql):
+// DB effects whose statement is non-constant at the call site but provably built
+// from constant fragments get their verb recovered and the edge tagged
+// via=sqlfold.Via. Off by default; sound-or-abstain (docs/design/
+// sql-constfold-reclaim-plan.md).
+func WithSQLFold() BuildOption { return func(o *buildOptions) { o.foldSQL = true } }
+
+func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, error) {
+	var o buildOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	ext := features.NewExtractor(res.Config, res.Program.ModulePath)
 	hints := ext.Hints()
 
@@ -295,7 +315,7 @@ func Build(res *analyze.Result, entry string) (*Graph, error) {
 		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
 		for _, e := range n.Out {
-			edges := edgeOf(ext, hints, e, scope)
+			edges := edgeOf(ext, hints, e, scope, o.foldSQL)
 			nodeEdges = append(nodeEdges, edges...)
 			if entry == "" && e.Site != nil && len(edges) == 1 && committedEffect(edges[0].To) {
 				directEffects[fn] = append(directEffects[fn], obligations.EffectSite{Label: edges[0].To, Site: e.Site})
@@ -484,7 +504,7 @@ func (e *EntryNotFoundError) Error() string { return "no entry point named " + e
 // edgeOf renders zero or one graph edges for an SSA call edge: a typed boundary
 // edge for publish/HTTP/DB calls, an internal edge for first-party→first-party
 // calls, and nothing for calls into unhinted stdlib/third-party code.
-func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool) []Edge {
+func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL bool) []Edge {
 	from := e.Caller.Func.RelString(nil)
 	callee := e.Callee.Func
 	f := ext.Edge(e.Caller.Func, callee, e.Site)
@@ -512,7 +532,8 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	case hints.IsHTTP(callee):
 		return []Edge{{From: from, To: "boundary:" + httpLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsDB(callee):
-		return []Edge{{From: from, To: "boundary:db " + dbLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
+		label, via := dbLabel(e.Site, foldSQL)
+		return []Edge{{From: from, To: "boundary:db " + label, Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent, Via: via}}
 	case scope[callee]:
 		return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
 	default:

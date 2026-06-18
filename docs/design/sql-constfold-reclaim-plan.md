@@ -2,14 +2,28 @@
 
 > **`PROPOSAL`** · exploratory, building the case · _drafted 2026-06-18_
 
-**Status:** designed-not-built. This plan is the SQL-label analogue of the
-strict-server *edge* reclaimer shipped in
-`frontier-instrumentation-plan.md` (component 3, `internal/static/reclaim`). It
-inherits that plan's doctrine wholesale (R1–R4, the A/B/B2/C taxonomy, opt-in +
-provenance discipline) and adds the one new soundness argument a *label*
-reclaimer needs that an *edge* reclaimer does not. The motivating measurement is
-field report §18 (pin `d237b59`), observed-plus-source on the `event-bus` +
-`cgate` fleet.
+**Status:** phase 1 (the fold + trichotomy + provenance) is **shipped, opt-in** as
+`internal/static/sqlfold`, wired into the labeler via `graphio.WithSQLFold`
+(`flowmap graph --reclaim-sql` / `flowmap frontier --reclaim-sql`); the committed
+fixture `testdata/fixtures/sqlbuildersvc` is its motivating measurement (6 B2
+markers → 2 with the fold, the two genuine-dynamic sites correctly retained).
+Phases 2–3 (finite-constant table naming, the B2a/B2b disclosure split) remain
+designed-not-built. This plan is the SQL-label analogue of the strict-server
+*edge* reclaimer shipped in `frontier-instrumentation-plan.md` (component 3,
+`internal/static/reclaim`). It inherits that plan's doctrine wholesale (R1–R4, the
+A/B/B2/C taxonomy, opt-in + provenance discipline) and adds the one new soundness
+argument a *label* reclaimer needs that an *edge* reclaimer does not. The
+motivating measurement is field report §18 (pin `d237b59`), observed-plus-source
+on the `event-bus` + `cgate` fleet.
+
+> **Build note (phase 1).** The decision to fold *reads* (per the answer to the
+> slice-1 scope question) made the chain-following exactness load-bearing: an early
+> implementation compared `types.Type` with `==`, which silently dropped the rest
+> of a fluent chain (distinct `*types.Pointer` instances are not pointer-equal), so
+> a `SELECT … + dynamicCol` read its clean constant prefix and declared the
+> statement *complete* — a false read, the cardinal sin. Fixed with
+> `types.Identical` plus an escape check so `complete` means "provably saw every
+> write." `TestFoldAbstainsOnDynamicTextSpliceInSelect` pins it.
 
 The framing question this answers for the owner: **a large, dominant slice of the
 B2 "opaque SQL" frontier is not dynamic at all — it is a compile-time-constant
@@ -266,11 +280,16 @@ tag (the groundwork decoder already round-trips a per-edge `via`,
 
 ## 6. Phasing
 
-1. **Structural fold + trichotomy (this plan's core).** The `strings.Builder`
-   summary, the verb/placeholder/text-hole decision, wired into `dbLabel` with the
-   `via` tag and the substrate caveat. Convention-free, catches both fleet builders
-   and inline `strings.Builder`; gets `cgate` end-to-end and the `event-bus` write
-   residue (as write/`<dynamic>`-table) in one slice. Opt-in; goldens unchanged.
+1. **Structural fold + trichotomy (this plan's core). ✅ DONE (opt-in).** The
+   `strings.Builder` summary, the verb/placeholder/text-hole decision, wired into
+   `dbLabel` with the `via` tag (`sqlfold.Via`) and the substrate caveat
+   (`graph.SQLFoldCaveat`). Convention-free, catches both fleet builders and inline
+   `strings.Builder`; gets `cgate` end-to-end and the `event-bus` write residue (as
+   write/`<dynamic>`-table) in one slice. Opt-in; default `Build` and every golden
+   unchanged. Shipped as `internal/static/sqlfold` with the determinism test and the
+   `sqlbuildersvc` fixture spanning all five outcomes (read / write-via-QueryRow /
+   dynamic-table write / branched write / abstain) plus the dynamic-splice read
+   guard.
 2. **Finite-constant table naming (optional, separable).** Resolve a small
    constant-set identifier hole (`s.table ∈ {…}`) to name the write target. Verdict-
    neutral on the fleet (the set is all-writes); purely a naming nicety. Build only
