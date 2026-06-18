@@ -492,6 +492,19 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	concurrent := f.Concurrent
 
 	switch {
+	case isPkgInit(callee):
+		// A call to a package initializer is init-ordering plumbing: the
+		// synthesized `init` of every package calls the `init` of each package it
+		// imports. It is never a real boundary operation, so it must NOT be
+		// classified by the package-keyed hints — without this guard, rooting
+		// init() turns `store.init -> database/sql.init` into a spurious
+		// "boundary:db init" effect (a false write in the canonical IR). The
+		// internal edge is kept when the callee is first-party so init reachability
+		// still propagates; a crossing into stdlib/third-party renders nothing.
+		if scope[callee] {
+			return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
+		}
+		return nil
 	case hints.IsPublish(callee):
 		return []Edge{{From: from, To: "boundary:bus PUBLISH " + eventLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsConsume(callee):
@@ -505,6 +518,15 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	default:
 		return nil // a call into unhinted stdlib/third-party code; not part of the view
 	}
+}
+
+// isPkgInit reports whether fn is a package initializer — the synthesized `init`
+// that runs package-level var inits and the explicit init() funcs. SSA names that
+// one exactly "init" with no receiver; user-written init() funcs are renamed
+// init#1, init#2, … and free functions cannot be named init, so this matches only
+// the init-ordering plumbing, never a real init body that performs a boundary call.
+func isPkgInit(fn *ssa.Function) bool {
+	return fn != nil && fn.Name() == "init" && fn.Signature != nil && fn.Signature.Recv() == nil
 }
 
 // committedEffect reports whether a boundary label is a committed external

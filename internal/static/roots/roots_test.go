@@ -25,9 +25,26 @@ func TestDiscoverFixtureRoots(t *testing.T) {
 
 	type rk struct{ kind, name, fqn string }
 	got := make(map[rk]bool)
+	var primary []rk
+	initRoots := 0
 	for _, r := range res.Roots {
-		got[rk{string(r.Kind), r.Name, r.FQN()}] = true
+		key := rk{string(r.Kind), r.Name, r.FQN()}
+		got[key] = true
+		if r.Kind == roots.KindInit {
+			// Every first-party package contributes its synthesized init root,
+			// always with an empty Name; the count is the package count, asserted
+			// loosely (>0) so the test does not churn when a package is added.
+			initRoots++
+			if r.Name != "" {
+				t.Errorf("init root has a non-empty Name: %+v", r)
+			}
+			continue
+		}
+		primary = append(primary, key)
 	}
+
+	// The PRIMARY (non-init) root set is pinned exactly: mains, HTTP handlers, and
+	// bus consumers. Init roots are partitioned out above.
 	want := []rk{
 		{"main", "", "example.com/loansvc.main"},
 		{"http", "POST /loan-application", "(*example.com/loansvc/internal/handler.App).Create"},
@@ -39,8 +56,13 @@ func TestDiscoverFixtureRoots(t *testing.T) {
 			t.Errorf("missing root %+v", w)
 		}
 	}
-	if len(res.Roots) != len(want) {
-		t.Errorf("got %d roots, want %d: %+v", len(res.Roots), len(want), res.Roots)
+	if len(primary) != len(want) {
+		t.Errorf("got %d primary roots, want %d: %+v", len(primary), len(want), primary)
+	}
+	// init() is always rooted (it runs unconditionally before main); the fixture
+	// spans several first-party packages, so there must be at least one.
+	if initRoots == 0 {
+		t.Errorf("expected init roots (init runs before main); got none in %+v", res.Roots)
 	}
 	// The fixture's registrations are all statically resolvable.
 	if len(res.BlindSpots) != 0 {

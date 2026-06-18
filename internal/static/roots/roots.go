@@ -30,6 +30,7 @@ type Kind string
 
 const (
 	KindMain     Kind = "main"     // a command's main function
+	KindInit     Kind = "init"     // a package initializer (always runs before main)
 	KindHTTP     Kind = "http"     // an HTTP handler registered on a router
 	KindConsumer Kind = "consumer" // a bus consumer registered via subscribe
 	KindExport   Kind = "export"   // an exported function (library fallback)
@@ -164,6 +165,21 @@ func Discover(prog *ssabuild.Program, registrars []Registrar) *Result {
 		}
 	}
 
+	// Package initializers. Every first-party package's synthesized "init" runs
+	// unconditionally before main — it executes package-level var initializers and
+	// the explicit init() funcs — so it is a genuine, always-taken entry point, not
+	// an over-approximation. Rooting it is what lets the graph see addresses taken
+	// only in init (the idiomatic registration site: `func init(){ register(h) }` or
+	// `var reg = map[string]F{...: h}`); without it, a func value registered only in
+	// init resolves to no callee and its handler's effects vanish from the graph —
+	// the silent provenAbsent the UnresolvedCall disclosure (blindspots) otherwise
+	// has to abstain on. An empty init contributes only an isolated node.
+	for _, p := range prog.ServicePkgs {
+		if initFn := p.Func("init"); initFn != nil {
+			add(initFn, KindInit, "")
+		}
+	}
+
 	// HTTP handlers and bus consumers, from registration calls in first-party code.
 	byKey := indexRegistrars(registrars)
 	for fn := range ssautil.AllFunctions(prog.Prog) {
@@ -202,8 +218,12 @@ func Discover(prog *ssabuild.Program, registrars []Registrar) *Result {
 		}
 	}
 
-	// Library fallback: nothing to root from, so root at every exported function.
-	if len(res.Roots) == 0 {
+	// Library fallback: no PRIMARY entry point (main, HTTP handler, or bus
+	// consumer) to root from, so root at every exported function. Init roots are
+	// excluded from this test — every package has a synthesized init, so counting
+	// them would permanently suppress the fallback and leave a pure library's
+	// exported surface unrooted.
+	if !hasPrimaryRoot(res.Roots) {
 		for _, p := range prog.ServicePkgs {
 			for _, m := range p.Members {
 				if fn, ok := m.(*ssa.Function); ok && fn.Object() != nil && fn.Object().Exported() {
@@ -215,6 +235,20 @@ func Discover(prog *ssabuild.Program, registrars []Registrar) *Result {
 
 	sortResult(res)
 	return res
+}
+
+// hasPrimaryRoot reports whether the set contains a primary entry point — a main,
+// an HTTP handler, or a bus consumer. Init and export roots do not count: init is
+// synthesized for every package (so it is always present), and exports ARE the
+// library fallback this predicate gates.
+func hasPrimaryRoot(rs []Root) bool {
+	for _, r := range rs {
+		switch r.Kind {
+		case KindMain, KindHTTP, KindConsumer:
+			return true
+		}
+	}
+	return false
 }
 
 type regKey struct{ pkgPath, name string }

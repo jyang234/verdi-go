@@ -4,10 +4,11 @@
 // value (address-taken) and Dispatch invokes one by a runtime key: a plain func-value
 // indirection with NO reflect/unsafe/cgo/linkname marker.
 //
-// The probe (internal/static/soundness) measures whether the must_not_reach checker
-// silently proves absence past this seam. A directly-reachable decoy (Report→audit)
-// issues the SAME DB DELETE so the target label binds in the graph — otherwise the
-// unbindable-target safeguard would mask the gap.
+// The probe (internal/static/soundness) confirms the must_not_reach checker CATCHES the
+// effect past this seam: rooting init() lets RTA resolve the registry hop, so
+// Handle→Dispatch→purge is a Violation rather than the silent provenAbsent it once was.
+// A directly-reachable decoy (Report→audit) issues the SAME DB DELETE as an independent
+// positive control on the identical effect.
 package main
 
 import (
@@ -31,8 +32,10 @@ func Dispatch(ctx context.Context, db *sql.DB, name string) {
 }
 
 // purge issues a DB DELETE — reached at runtime ONLY through the registry (never called
-// directly). Its address is taken in init(), which is NOT a call-graph root, so the
-// builder never sees it: purge and its DELETE are absent from the static graph.
+// directly). Its address is taken in init(); because init() is rooted, RTA sees the
+// registration and resolves the registry hop to purge, so purge and its DELETE are in
+// the static graph and Handle→Dispatch→purge is caught. (Before init() was rooted this
+// edge vanished silently — the gap probe #2 closes.)
 func purge(ctx context.Context, db *sql.DB) {
 	const q = "DELETE FROM ledger WHERE id = $1"
 	_, _ = db.ExecContext(ctx, q, "L1")

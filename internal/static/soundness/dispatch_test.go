@@ -71,30 +71,32 @@ func mustNotReachFindings(ix *graph.Index, from string) []fitness.Finding {
 	return out
 }
 
-// TestInitRegisteredDispatchAbstainsAtTheSeam is probe #2 of the static-checker audit.
+// TestInitRegisteredDispatchIsCaught is probe #2 of the static-checker audit, asserting
+// the seam is now soundly handled end-to-end by BOTH fixes.
 //
-// FINDING (soundness gap, demonstrated then closed by the UnresolvedCall blind spot):
-// the call-graph root set (roots.Discover) is {main, recognized HTTP/bus registrars} —
-// it EXCLUDES init(). A func value whose address is taken only in init() (the
-// idiomatic place to register) is never explored, so an unrecognized registry
-// populated in init() loses its handlers and their effects from the graph. Before the
-// fix this surfaced as a clean provenAbsent — laundering an unknown into a concrete
-// claim, the exact "say so explicitly, never launder" tenet (CLAUDE.md core tenet 3)
-// that the comparable seams (reflect/unsafe/cgo/linkname/high-fan-out) all honor.
+// FINDING (the original gap): the call-graph root set (roots.Discover) was {main,
+// recognized HTTP/bus registrars} — it EXCLUDED init(). A func value whose address is
+// taken only in init() (the idiomatic place to register) was never explored, so an
+// unrecognized registry populated in init() lost its handlers and their effects from
+// the graph. must_not_reach then read a clean provenAbsent — laundering an unknown into
+// a concrete claim, the exact "say so explicitly, never launder" tenet (CLAUDE.md core
+// tenet 3) the comparable seams (reflect/unsafe/cgo/linkname/high-fan-out) all honor.
 //
-// THE FIX (B): blindspots.Detect now flags a func-value call that resolves to NO
-// callee (UnresolvedCall) — the zero-resolution mirror of HighFanOut, invisible to the
-// edge-walking detector because a site with no callee has no out-edge. The Dispatch
-// hop is now disclosed blind, so must_not_reach abstains (noPathFound → Caution)
-// instead of proving absence. The control proves the effect is genuinely in the graph
-// and caught when reached directly.
+// THE FIXES, layered:
+//   - B (blindspots.UnresolvedCall) discloses a func-value call that resolves to no
+//     callee, so an UNRECOVERABLE seam abstains (noPathFound) instead of proving
+//     absence — the backstop, exercised in isolation by the reflect probe and the
+//     blindspots unit test.
+//   - A (rooting init() in roots.Discover) makes init's address-takes visible, so RTA
+//     RESOLVES the registry hop to purge: the edge and its DELETE re-enter the graph.
+//     Recovery dominates disclosure — there is no longer a blind spot here because the
+//     call is no longer unresolved.
 //
-// NOTE the residual: B abstains but does not RECOVER the edge — purge and its DELETE
-// are still absent (the registry handler is unreachable until init() is rooted). Probe
-// #2's companion fix (A, rooting init()) reconnects the hop and flips the verdict from
-// Caution to Violation; when A lands, the Handle assertion below is updated to require
-// a Violation and the purge-absent / blind-spot assertions are removed.
-func TestInitRegisteredDispatchAbstainsAtTheSeam(t *testing.T) {
+// So for this fixture the verdict is the strongest one: Handle→Dispatch→purge→DELETE is
+// a Violation, exactly as the directly-reached control. (If A regresses, the call goes
+// unresolved again and B catches it as a Caution — fail-closed either way; this test
+// would then need to assert that weaker-but-safe outcome.)
+func TestInitRegisteredDispatchIsCaught(t *testing.T) {
 	ix := indexFixture(t, "dispatchsvc")
 
 	handle := nodeWithSuffix(ix, "dispatchsvc.Handle")
@@ -103,36 +105,31 @@ func TestInitRegisteredDispatchAbstainsAtTheSeam(t *testing.T) {
 		t.Fatalf("fixture entrypoints missing: Handle=%q Report=%q", handle, report)
 	}
 
-	// The forbidden effect IS in the graph (via the directly-reachable decoy), so the
-	// unbindable-target safeguard does not fire — the abstain below is a real
-	// noPathFound at the seam, not a vacuous "target binds nothing".
-	if nodeWithSuffix(ix, "dispatchsvc.audit") == "" {
-		t.Fatal("decoy audit() missing from graph; the DELETE label would not bind")
+	// RECOVERY (A): purge — reachable only via the init-registered registry hop — is now
+	// in the graph, so the edge that was silently lost is modeled.
+	if nodeWithSuffix(ix, "dispatchsvc.purge") == "" {
+		t.Fatal("purge missing from graph; rooting init() did not recover the registry hop")
 	}
-	// purge (the init-registered handler) and its DELETE are still absent: B discloses
-	// the seam, it does not reconnect it. Recovery is A's job (rooting init()).
-	if p := nodeWithSuffix(ix, "dispatchsvc.purge"); p != "" {
-		t.Errorf("purge unexpectedly in graph (%s) — the init-registry edge may now be "+
-			"recovered (A landed); update this probe to assert the Violation behavior", p)
-	}
-
-	// THE DISCLOSURE: the Dispatch hop is flagged UnresolvedCall, so the loss is no
-	// longer silent — there is a blind spot on Handle's reachable cone.
+	// The hop resolves now, so there is no UnresolvedCall to disclose on Handle's cone:
+	// recovery (a real edge) dominates the abstain backstop.
 	cone := append([]string{handle}, ix.Reachable(handle)...)
-	if !coneHasBlindSpot(ix, cone) {
-		t.Error("expected an UnresolvedCall blind spot on Handle's cone; the seam is silent again")
+	if coneHasBlindSpot(ix, cone) {
+		for _, fn := range cone {
+			if bs := ix.BlindSpotsAt(fn); len(bs) > 0 {
+				t.Errorf("unexpected blind spot after recovery at %s: %+v", fn, bs)
+			}
+		}
 	}
 
-	// THE ABSTAIN: must_not_reach over the init-registry path now yields a Caution
-	// (noPathFound), not a silent provenAbsent — the checker says it cannot prove
-	// absence past the unresolved func-value hop.
+	// THE CATCH: must_not_reach over the init-registry path is now a Violation — the
+	// effect is reachable from Handle through the recovered hop.
 	got := mustNotReachFindings(ix, handle)
-	if len(got) != 1 || got[0].Severity != fitness.Caution {
-		t.Fatalf("Handle must_not_reach = %+v, want one Caution (noPathFound at the seam)", got)
+	if len(got) != 1 || got[0].Severity != fitness.Violation {
+		t.Fatalf("Handle must_not_reach = %+v, want one Violation (Handle reaches DELETE via the recovered registry hop)", got)
 	}
 
-	// CONTROL: the SAME effect, reached directly, is a Violation — proving it is in the
-	// graph and the abstain above is the dispatch seam, not an absent target.
+	// CONTROL: the SAME effect reached directly is also a Violation — the recovered path
+	// produces the identical verdict as the statically-obvious one.
 	ctrl := mustNotReachFindings(ix, report)
 	if len(ctrl) != 1 || ctrl[0].Severity != fitness.Violation {
 		t.Fatalf("control failed: must_not_reach(Report, DELETE) = %+v, want one Violation", ctrl)
