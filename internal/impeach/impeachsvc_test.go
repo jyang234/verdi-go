@@ -170,6 +170,79 @@ func TestImpeachsvcCatchesBusPublishMissedRoot(t *testing.T) {
 	}
 }
 
+// TestImpeachsvcCrossServiceDowngrade exercises the service-scope rung (§4 rung 4)
+// over a multi-service span tree, end to end through the full audit+ladder — not the
+// rung-in-isolation unit. An impeachsvc flow whose effect span is owned by a FOREIGN
+// service (a downstream peer's DB write appearing in the same distributed trace) must
+// downgrade to CROSS-SERVICE: behavior on another service's span cannot impeach THIS
+// service's static negative (fail-closed, §4). The discrimination is exact — the SAME
+// effect on impeachsvc's OWN span promotes to a full IMPEACHMENT, so the span's owning
+// service is the only thing that flips the verdict.
+//
+// The trace is hand-authored: the in-process harness captures a single service, so a
+// real multi-service OTLP capture is the one cross-service residual the audit deferred
+// (§17). This still drives the whole pipeline — candidate formation from a realistic
+// span tree, the full five-rung ladder, classify — the integration evidence a
+// rung-in-isolation unit test cannot give.
+func TestImpeachsvcCrossServiceDowngrade(t *testing.T) {
+	g, err := graph.LoadFile(impeachsvcGraph)
+	if err != nil {
+		t.Fatalf("load graph: %v", err)
+	}
+	const commit = "deadbeefcafe"
+	g.Stamp = commit
+	ix := graph.NewIndex(g)
+	prov := Provenance{TraceIdentity: commit}
+
+	// An impeachsvc flow whose DB effect is observed on effectService's span; the
+	// effect (peer_ledger) is one impeachsvc's graph models no emitter for, so it
+	// forms an ABSENT candidate and the only open question is whose span it is on.
+	xsvc := func(effectService string) *ir.CanonicalTrace {
+		return &ir.CanonicalTrace{
+			Flow: "DELETE /admin/ledger", Service: "impeachsvc", Provenance: "integration",
+			Root: &ir.CanonicalSpan{
+				Op: "HTTP DELETE /admin/ledger", Kind: ir.KindServer, Service: "impeachsvc",
+				Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+					{Op: "DB postgres DELETE peer_ledger", Kind: ir.KindClient, Service: effectService},
+				}}},
+			},
+		}
+	}
+
+	// Foreign-service effect → CROSS-SERVICE. The verdict IS the first failing rung's
+	// downgrade, so CROSS-SERVICE proves rungs 1-3 cleared and service-scope is the
+	// decider — but assert the rung record explicitly for legibility.
+	foreign := Audit("impeachsvc", ix, []*ir.CanonicalTrace{xsvc("peersvc")}, prov)
+	fw := candidateFor(t, foreign, "db DELETE peer_ledger")
+	if fw.Verdict != DowngradeCrossService {
+		t.Errorf("Verdict = %q, want %q (effect on a foreign service's span)", fw.Verdict, DowngradeCrossService)
+	}
+	if fw.Observed.Service != "peersvc" {
+		t.Errorf("Observed.Service = %q, want the foreign owner", fw.Observed.Service)
+	}
+	cleared := map[string]bool{RungStaticAssertsNoPath: false, RungCodeIdentity: false, RungLabel: false}
+	for _, rung := range fw.Rungs {
+		if rung.Name == RungServiceScope && rung.Passed {
+			t.Errorf("service-scope rung passed on a foreign-service effect: %s", rung.Evidence)
+		}
+		if _, want := cleared[rung.Name]; want {
+			cleared[rung.Name] = rung.Passed
+		}
+	}
+	for name, passed := range cleared {
+		if !passed {
+			t.Errorf("rung %q did not clear before service-scope; CROSS-SERVICE not isolated to rung 4", name)
+		}
+	}
+
+	// Discrimination: the SAME effect on impeachsvc's OWN span promotes — only the
+	// owning service changed, so the service-scope rung is the sole decider.
+	own := Audit("impeachsvc", ix, []*ir.CanonicalTrace{xsvc("impeachsvc")}, prov)
+	if ow := candidateFor(t, own, "db DELETE peer_ledger"); ow.Verdict != VerdictImpeachment {
+		t.Errorf("Verdict = %q, want %q (same effect on the service's own span)", ow.Verdict, VerdictImpeachment)
+	}
+}
+
 // TestImpeachsvcLadderPromotesWithProvenance is the end-to-end IMPEACHMENT proof:
 // the SAME real graph + real captured traces that downgrade to VERSION-SKEW above
 // promote to a true IMPEACHMENT once the capture-side substrate the ladder needs
