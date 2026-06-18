@@ -64,10 +64,43 @@ func dbLabel(site ssa.CallInstruction, foldSQL bool) (labels []string, via strin
 			}
 		}
 	}
-	if c := site.Common().StaticCallee(); c != nil {
-		return []string{c.Name()}, ""
+	return []string{sinkMethodName(site)}, ""
+}
+
+// viaPassthrough tags a boundary edge whose DB effect was re-attributed from a
+// pass-through helper to one of its callers (the §19 Tier-B/C reclaimer): the verb
+// lives one call-hop above the database/sql sink, at the caller that built the
+// statement, so the recovered effect is homed there. Distinct from sqlfold.Via (a
+// sink-local fold) so the cross-boundary re-attribution is auditable on its own.
+const viaPassthrough = "sql-passthrough"
+
+// recoverDBLabelsFromValue recovers the "op table" label(s) of a DB statement VALUE
+// — the argument a caller passes into a pass-through helper — using the same two
+// disciplines as dbLabel at a sink: a compile-time constant read through the
+// canonical normalizer, else the const-accumulation fold (which also fans a
+// finite-constant table set into one label per target, Tier C). ok=false when
+// neither proves a verb, so the caller leaves the effect opaque.
+func recoverDBLabelsFromValue(q ssa.Value) ([]string, bool) {
+	if stmt, ok := features.ConstString(q); ok {
+		if op, table := sqlOpTable(stmt); op != "" {
+			return []string{joinOpTable(op, table)}, true
+		}
 	}
-	return []string{"call"}, ""
+	if op, tables, ok := sqlfold.Recover(q); ok {
+		return dbFoldLabels(op, tables), true
+	}
+	return nil, false
+}
+
+// sinkMethodName is the opaque label dbLabel falls back to for a DB call whose
+// statement it cannot read — the driver method name (ExecContext, QueryContext, …),
+// or "call" when the callee is indirect. Shared so a re-attributed-but-unrecoverable
+// effect re-homes the EXACT label the sink would otherwise have carried.
+func sinkMethodName(site ssa.CallInstruction) string {
+	if c := site.Common().StaticCallee(); c != nil {
+		return c.Name()
+	}
+	return "call"
 }
 
 // dbFoldLabels renders a recovered op + table set into one label per table (a

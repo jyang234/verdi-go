@@ -125,6 +125,43 @@ func (s *Store) ReadDynamicFilter(ctx context.Context, col, val string) error {
 	return err
 }
 
+// UpdateViaClosure builds the conditional SET-list through a closure that captures
+// the builder (the §19 Tier-A shape: (*PostgresStore).UpdateEventType). Capturing
+// the builder forces it into a memory cell, so the register def-use chain breaks —
+// yet the verb+table fragment ("UPDATE event_types SET ") is written unconditionally
+// BEFORE the closure exists, so the const-prefix fold recovers it as a WRITE to
+// event_types and abstains on the invisible (closure-appended) tail.
+func (s *Store) UpdateViaClosure(ctx context.Context, id, name string) error {
+	w := newSQLWriter()
+	w.Write("UPDATE event_types SET ")
+	writeSet := func(col string, val *string) {
+		if val != nil {
+			w.Write(col + " = ").Arg(*val)
+		}
+	}
+	writeSet("name", &name)
+	w.Write(" WHERE id = ").Arg(id)
+	query, args := w.Build()
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// UpdateClosurePrepend is the Tier-A soundness guard: the builder is captured by a
+// closure that is created BEFORE any constant verb is written, so an unseen append
+// (the closure) could prepend text ("WITH … (DELETE …)") that changes the leading
+// verb. The fold must NOT prove "UPDATE" leading here — the verb write does not
+// dominate the escape — so it abstains rather than assert a verb it cannot place.
+func (s *Store) UpdateClosurePrepend(ctx context.Context, id, name string) error {
+	w := newSQLWriter()
+	prepend := func() { w.Write("WITH t AS (SELECT 1) ") }
+	prepend()
+	w.Write("UPDATE event_types SET name = ").Arg(name)
+	w.Write(" WHERE id = ").Arg(id)
+	query, args := w.Build()
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
 // participantStore is the fleet's per-table store (§18 residue): the table name is
 // a struct field set to one of a finite set of string CONSTANTS at construction,
 // then interpolated into the statement text. The verb is constant (a write); the

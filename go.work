@@ -14,6 +14,7 @@ use (
 	./testdata/fixtures/reflectsvc
 	./testdata/fixtures/reclaimsvc
 	./testdata/fixtures/sqlbuildersvc
+	./testdata/fixtures/sqlpassthroughsvc
 	./testdata/groundwork/blindsvc
 	./testdata/groundwork/layeredsvc
 	./testdata/groundwork/obligsvc

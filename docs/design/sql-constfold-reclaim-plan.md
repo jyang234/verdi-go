@@ -328,6 +328,57 @@ Each phase ships with a determinism test and a `canon/sql` fuzz-corpus extension
 shapes so the fold's prevalence gate (D4, breadth) is met by a *class* of services,
 not one bespoke builder.
 
+### 6.1 The §19 residue extensions — closure-prefix, pass-through, value-set ∘ pass-through
+
+Field report §19 measured the post-phase-2 `event-bus` residue and showed all of it
+is reachable by sound static analysis, in three absence-capable extensions (assert
+only when proven; abstain otherwise — the same discipline as the fold itself). All
+three are **shipped, opt-in under `--reclaim-sql`**:
+
+- **Tier A — const-*prefix* fold through a memory-cell builder. ✅ DONE.** A partial
+  `UPDATE … SET` whose conditional column list is appended through a **closure that
+  captures the builder** forces the builder into an `*ssa.Alloc` cell, so each method
+  call loads the pointer afresh and the register def-use chain breaks — the fold saw
+  only the terminal and abstained. `assembleBuilder` now finds the builder whether it
+  lives in a register or a cell (`gatherBuilderCalls` → `cellCalls`/`chainCalls`), and
+  truncates the leading prefix at the first point the builder ESCAPES to an unseen
+  append (a closure capture, a pass-by-reference): an append is part of the trusted
+  prefix only if it dominates every such escape, so the recovered verb+table are
+  provably leading. The invisible (closure-appended) tail stays unrecovered — which is
+  all the write classification needs. `TestFoldRecoversPrefixThroughClosureCapturedBuilder`
+  pins the recovery; `TestFoldAbstainsWhenEscapePrecedesVerb` pins the soundness guard
+  (an escape created before the verb-write blocks the claim — an unseen prepend could
+  change the leading verb).
+- **Tier B — pass-through-sink re-attribution (interprocedural). ✅ DONE.** A helper
+  that forwards a `query` PARAMETER unmodified to a `database/sql` sink carries no
+  recoverable verb of its own; the statement lives one call-hop up, at each caller.
+  `passthroughReattribute` (`graphio`) detects the bare-parameter sink, enumerates the
+  helper's callers from the reverse call-graph index (`callerIndex` — an
+  over-approximation, so no real caller is missed), recovers each caller's SQL
+  (`recoverDBLabelsFromValue`, the same const/fold disciplines as `dbLabel`), and emits
+  a boundary edge from the **caller**, tagged `sql-passthrough`. The helper's opaque
+  sink edge is dropped, since every caller now carries the effect — so the effect
+  surface is preserved, never hidden. It is per-caller (one helper, different verbs
+  from different callers — `execExpectOne`'s INSERT+UPDATE), and **fails closed**:
+  unless every caller is an in-scope, statically-resolved call whose argument list
+  reaches the parameter slot, it leaves the normal opaque helper edge. An unrecoverable
+  caller (a dynamic verb) re-homes the opaque label at the caller — disclosed, not
+  dropped.
+- **Tier C — finite-value-set ∘ Tier B. ✅ DONE (falls out of B).** The participant
+  store reuses the pass-through helper with a `s.table`-interpolated DELETE. Phase-2's
+  finite-constant table resolution could not see through the helper's `query`
+  parameter; re-attributing at the caller (Tier B) runs `Recover` where the table field
+  IS visible, so the existing resolution composes for free — the caller's edge fans out
+  into `DELETE publishers` + `DELETE subscribers`. No new resolution logic; Tier C is a
+  fixture (`sqlpassthroughsvc`) proving the composition, asserted alongside B in
+  `TestPassthroughReattributesPerCaller`.
+
+The genuinely non-static residue — the *exact column set* in a conditional `UPDATE` —
+is the one thing no ratchet consumes (`io_budget`/`effect_ratchet`/`must_not_reach`
+key on verb + target table, not columns), so it is left unrecovered by design. The new
+`sqlpassthroughsvc` fixture and `TestPassthroughDeterministic` extend the determinism
+and breadth gates to the re-attribution path.
+
 ---
 
 ## 7. Determinism risk register
