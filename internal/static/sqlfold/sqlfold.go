@@ -135,7 +135,14 @@ func assemble(v ssa.Value, seen map[ssa.Value]bool) ([]frag, bool) {
 	if v == nil || seen[v] {
 		return []frag{{kind: fHole, val: v}}, false
 	}
+	// Path-based cycle detection: mark v for the duration of THIS subtree and unmark
+	// on return, so a value reachable from itself (a builder whose own Build()/
+	// String() result is written back into an append — `w.Write(w.Build())`) is
+	// caught as a hole instead of recursing forever, while a value legitimately
+	// reused across sibling fragments still contributes each time. `seen` is threaded
+	// through assembleBuilder/contribution so the guard survives the builder hop.
 	seen[v] = true
+	defer delete(seen, v)
 	if s, ok := features.ConstString(v); ok {
 		return []frag{{kind: fConst, text: s}}, true
 	}
@@ -154,12 +161,12 @@ func assemble(v ssa.Value, seen map[ssa.Value]bool) ([]frag, bool) {
 			return []frag{{kind: fPlaceholder}}, true
 		}
 		if inst, term, ok := builderTerminal(x, 0); ok {
-			return assembleBuilder(inst, term)
+			return assembleBuilder(inst, term, seen)
 		}
 	case *ssa.Extract:
 		if call, ok := x.Tuple.(*ssa.Call); ok {
 			if inst, term, ok := builderTerminal(call, x.Index); ok {
-				return assembleBuilder(inst, term)
+				return assembleBuilder(inst, term, seen)
 			}
 		}
 	}
@@ -192,7 +199,7 @@ func builderTerminal(call *ssa.Call, idx int) (inst ssa.Value, term *ssa.Call, o
 // concatenates their fragment contributions, stopping at the first call that does
 // not dominate the terminal (a conditional append) or the first hole. The leading
 // run it returns is what every execution path produces before any variability.
-func assembleBuilder(inst ssa.Value, term *ssa.Call) ([]frag, bool) {
+func assembleBuilder(inst ssa.Value, term *ssa.Call, seen map[ssa.Value]bool) ([]frag, bool) {
 	termBlock := term.Block()
 	calls, escaped := instanceCalls(inst)
 	sort.Slice(calls, func(i, j int) bool {
@@ -211,7 +218,7 @@ func assembleBuilder(inst ssa.Value, term *ssa.Call) ([]frag, bool) {
 		if c.Block() == nil || termBlock == nil || !c.Block().Dominates(termBlock) {
 			return out, false // a conditional append — the prefix ends here
 		}
-		cf, cc := contribution(c)
+		cf, cc := contribution(c, seen)
 		out = append(out, cf...)
 		if !cc {
 			return out, false
@@ -262,7 +269,7 @@ func instanceCalls(inst ssa.Value) (calls []*ssa.Call, escaped bool) {
 
 // contribution returns the fragments a single builder-method call appends, and
 // whether they are fully constant/placeholder (no hole).
-func contribution(call *ssa.Call) ([]frag, bool) {
+func contribution(call *ssa.Call, seen map[ssa.Value]bool) ([]frag, bool) {
 	callee := call.Common().StaticCallee()
 	if callee == nil {
 		return []frag{{kind: fHole}}, false
@@ -272,7 +279,7 @@ func contribution(call *ssa.Call) ([]frag, bool) {
 		switch callee.Name() {
 		case "WriteString", "Write":
 			if len(args) >= 2 {
-				return assemble(args[1], map[ssa.Value]bool{})
+				return assemble(args[1], seen)
 			}
 		case "WriteByte", "WriteRune":
 			if len(args) >= 2 {
@@ -304,7 +311,7 @@ func contribution(call *ssa.Call) ([]frag, bool) {
 				if tf.param >= len(args) {
 					return out, false
 				}
-				af, ac := assemble(args[tf.param], map[ssa.Value]bool{})
+				af, ac := assemble(args[tf.param], seen)
 				out = append(out, af...)
 				if !ac {
 					return out, false

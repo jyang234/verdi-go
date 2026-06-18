@@ -148,6 +148,17 @@ func TestFoldAbstainsWhenVerbIsDynamic(t *testing.T) {
 	}
 }
 
+// Regression: a builder whose own Build() result is written back into it is a
+// cyclic data dependency. The fold must TERMINATE (the path-based cycle guard) and
+// abstain — before the fix it recursed forever (fresh `seen` map per builder hop)
+// and overflowed the stack. If this test returns at all, the cycle was bounded.
+func TestFoldTerminatesOnSelfReferentialBuilder(t *testing.T) {
+	s := foldFixture(t)["SelfRef"]
+	if s.ok {
+		t.Errorf("SelfRef: a cyclic builder must abstain, got %+v", s)
+	}
+}
+
 // The prime-directive guard: a SELECT-prefixed statement with a dynamic TEXT
 // splice must NOT be classified as a read, because the splice could smuggle a
 // second, mutating statement. The verb is SELECT but the statement is incomplete,

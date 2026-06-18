@@ -51,15 +51,18 @@ func Propose(ix *graph.Index, service string) (*policy.Policy, string) {
 
 // proposeReclaimHint surfaces flowmap's existing strict-server reclaimer from the
 // verdict path (issue 2). groundwork consumes a pre-built graph and cannot run the
-// SSA-based reclaimer itself, so when it sees an UN-reclaimed oapi-codegen
-// strict-server dispatch seam — UnresolvedCall blind spots at the generated
-// ServerInterfaceWrapper route entries — it recommends rebuilding the graph with
-// `flowmap graph --reclaim`. That seam blinds the dominant Go HTTP entry pattern:
-// every route-anchored invariant is frontier-caveated at the endpoint entry, so a
-// must_not_reach reads "no path found, but the frontier is blind" instead of a real
-// proof. The reclaimer recovers the wrapper→handler edge soundly (R2: it only adds
-// edges real execution can take), un-blinding those invariants. Skipped when the
-// graph already carries reclaim provenance, so a reclaimed graph stays quiet.
+// SSA-based reclaimer itself, so when it sees an UN-reclaimed dispatch seam at an
+// HTTP route entry — an UnresolvedCall blind spot whose site IS a registered HTTP
+// handler (the framework wired the per-route handler through an interface field the
+// call-graph algorithm cannot resolve) — it recommends rebuilding the graph with
+// `flowmap graph --reclaim`. The signal is STRUCTURAL (UnresolvedCall ∩ HTTP route
+// handler), not a generated type name, so it covers the oapi-codegen strict-server
+// shape and any framework with the same blind-at-the-route-entry topology. That
+// seam blinds the dominant Go HTTP entry pattern: every route-anchored invariant is
+// frontier-caveated at the endpoint entry, so a must_not_reach reads "no path found,
+// but the frontier is blind" instead of a real proof. The reclaimer recovers the
+// wrapper→handler edge soundly (R2: it only adds edges real execution can take).
+// Skipped when the graph already carries reclaim provenance, so it stays quiet.
 func proposeReclaimHint(ix *graph.Index, g *guide) {
 	for _, e := range ix.Edges() {
 		// A non-boundary edge carrying a reclaimer's provenance: already reclaimed.
@@ -67,17 +70,23 @@ func proposeReclaimHint(ix *graph.Index, g *guide) {
 			return
 		}
 	}
+	httpRoute := map[string]bool{}
+	for _, ep := range ix.Entrypoints() {
+		if ep.Kind == "http" {
+			httpRoute[ep.Fn] = true
+		}
+	}
 	blind := 0
 	for _, b := range ix.BlindSpots() {
-		if b.Kind == string(blindspots.UnresolvedCall) && strings.Contains(b.Site, "ServerInterfaceWrapper") {
+		if b.Kind == string(blindspots.UnresolvedCall) && httpRoute[b.Site] {
 			blind++
 		}
 	}
 	if blind == 0 {
 		return
 	}
-	g.section("⚠️ Un-reclaimed strict-server dispatch — route entries are blind",
-		fmt.Sprintf("%d route entr(y/ies) are `UnresolvedCall` blind spots at the oapi-codegen `ServerInterfaceWrapper` dispatch seam (a stored interface field wired at runtime, which the call-graph algorithm cannot resolve). Every route-anchored invariant is therefore frontier-caveated at the endpoint entry — a `must_not_reach` keyed on a route reports \"no path found, but the frontier is blind\" rather than a proof.\n\n"+
+	g.section("⚠️ Un-reclaimed dispatch seam — HTTP route entries are blind",
+		fmt.Sprintf("%d HTTP route entr(y/ies) are `UnresolvedCall` blind spots: the framework dispatches the per-route handler through an interface field wired at runtime (the oapi-codegen strict-server shape, and any framework like it), which the call-graph algorithm cannot resolve. Every route-anchored invariant is therefore frontier-caveated at the endpoint entry — a `must_not_reach` keyed on a route reports \"no path found, but the frontier is blind\" rather than a proof.\n\n"+
 			"**Fix — rebuild the graph with `flowmap graph --reclaim`, then re-run init/fitness on it.** The strict-server reclaimer recovers the wrapper→handler edge: it is deterministic generated code with a fixed shape, so the edge is statically recoverable even though it is interface-dispatched, and adding it is SOUND (R2 — it only ever adds edges real execution can take, never a false proof of absence). This un-blinds the dominant Go HTTP entry pattern, making route-level invariants provable instead of frontier-caveated. The reclaimed graph carries `via: strict-server` provenance, disclosed on every verdict's substrate line, so a reclaim-informed verdict stays auditable.", blind))
 }
 

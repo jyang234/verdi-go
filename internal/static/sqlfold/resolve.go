@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"sync"
 
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -124,6 +125,41 @@ func resolveField(load *ssa.UnOp) ([]string, bool) {
 	idx := fa.Field
 	prog := load.Parent().Prog
 
+	// Memoize per (program, struct, field): computeFieldSet is a pure whole-program
+	// scan, so caching it is deterministic and collapses the O(sites × program) cost
+	// to one scan per DISTINCT field — many DB sites parameterized by the same field
+	// (the common shape) then share one result. Keyed on the program so it cannot
+	// collide across builds; a process builds few programs.
+	key := fieldKey{prog: prog, named: target, idx: idx}
+	if v, ok := fieldSetCache.Load(key); ok {
+		r := v.(fieldResult)
+		return r.set, r.ok
+	}
+	out, found := computeFieldSet(prog, target, idx)
+	fieldSetCache.Store(key, fieldResult{set: out, ok: found})
+	return out, found
+}
+
+// fieldSetCache memoizes computeFieldSet. The value is a pure function of the key,
+// so the cache never changes a result — it only avoids re-scanning. A sync.Map
+// keeps it safe if two builds run concurrently (e.g. parallel tests).
+var fieldSetCache sync.Map // fieldKey -> fieldResult
+
+type fieldKey struct {
+	prog  *ssa.Program
+	named *types.Named
+	idx   int
+}
+
+type fieldResult struct {
+	set []string
+	ok  bool
+}
+
+// computeFieldSet is the whole-program scan behind resolveField (gates a/b/c); see
+// resolveField's doc for the completeness argument. Factored out so the result can
+// be memoized.
+func computeFieldSet(prog *ssa.Program, target *types.Named, idx int) ([]string, bool) {
 	set := map[string]bool{}
 	var allocs []*ssa.Alloc
 	for fn := range ssautil.AllFunctions(prog) {

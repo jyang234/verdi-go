@@ -26,7 +26,6 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/reclaim"
 	"github.com/jyang234/golang-code-graph/internal/static/roots"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
-	"github.com/jyang234/golang-code-graph/internal/static/sqlfold"
 )
 
 // Graph is the non-gated call-graph view, optionally scoped to one entry point.
@@ -104,6 +103,13 @@ type Graph struct {
 	// no verdict — R3), omitted when there is nothing to disclose so a clean,
 	// unscoped service emits a byte-identical graph.
 	Frontier *FrontierSection `json:"frontier,omitempty"`
+
+	// foldSQL records whether this graph was built with the SQL const-fold
+	// (--reclaim-sql / WithSQLFold). Unexported, so it never serializes (no golden
+	// churn) and is an in-memory build flag only: the frontier classifier reads it
+	// to split the opaque-db disclosure into B2a/B2b, taken from the flag rather than
+	// inferred from tagged edges so an all-abstain fold run still reads as folded.
+	foldSQL bool
 }
 
 // FrontierSection is the disclosed frontier carried in the graph: the per-site
@@ -247,6 +253,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		Algo:       string(res.Graph.Algo),
 		Caveats:    res.Graph.Caveats,
 		Nodes:      []Node{}, Edges: []Edge{}, BlindSpots: []blindspots.BlindSpot{},
+		foldSQL: o.foldSQL,
 	}
 	if gs := blindspots.Graph(blindspots.Detect(res, hints)); len(gs) > 0 {
 		g.BlindSpots = gs
@@ -318,20 +325,20 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		for _, e := range n.Out {
 			edges := edgeOf(ext, hints, e, scope, o.foldSQL)
 			nodeEdges = append(nodeEdges, edges...)
-			// Record every committed effect at this site. A site yields one edge in
-			// the default build; a fold-resolved finite-table write fans out into one
-			// edge per target, each a committed effect to track.
-			if entry == "" && e.Site != nil {
-				for _, ed := range edges {
-					if !committedEffect(ed.To) {
-						continue
-					}
-					directEffects[fn] = append(directEffects[fn], obligations.EffectSite{Label: ed.To, Site: e.Site})
-					if labelSites[ed.To] == nil {
-						labelSites[ed.To] = map[ssa.Instruction]bool{}
-					}
-					labelSites[ed.To][e.Site] = true
+			// Record a committed effect only when the site yields exactly ONE — the
+			// unambiguous case. A fold-resolved finite-table write fans the site out
+			// into one edge PER possible target (e.g. DELETE publishers + DELETE
+			// subscribers), but only one of them is committed on any given run: each is
+			// a SOME-paths effect, so recording it as a directEffect would let the
+			// proof-only effect-order/fault-card derivation (below) cite a target the
+			// execution never wrote. The fan-out still rides g.Edges for the
+			// write-surface budget; it just must not enter the always-effect channel.
+			if entry == "" && e.Site != nil && len(edges) == 1 && committedEffect(edges[0].To) {
+				directEffects[fn] = append(directEffects[fn], obligations.EffectSite{Label: edges[0].To, Site: e.Site})
+				if labelSites[edges[0].To] == nil {
+					labelSites[edges[0].To] = map[ssa.Instruction]bool{}
 				}
+				labelSites[edges[0].To][e.Site] = true
 			}
 		}
 		g.Nodes = append(g.Nodes, Node{
@@ -427,19 +434,17 @@ func frontierSection(g *Graph) *FrontierSection {
 func ClassifyFrontier(g *Graph) *frontier.Result { return frontier.Classify(frontierInput(g)) }
 
 // frontierInput adapts the assembled graph into the classifier's serialization-free
-// input view (frontier imports nothing of graphio; graphio adapts to it).
+// input view (frontier imports nothing of graphio; graphio adapts to it). The fold
+// state comes from g.foldSQL — the actual build flag, NOT inferred from tagged
+// edges, so a --reclaim-sql run that recovers nothing is still reported as folded
+// (its remaining opaque-db markers are the genuine residue, not "untried").
 func frontierInput(g *Graph) *frontier.Input {
-	in := &frontier.Input{}
+	in := &frontier.Input{Folded: g.foldSQL}
 	for _, n := range g.Nodes {
 		in.Nodes = append(in.Nodes, n.FQN)
 	}
 	for _, e := range g.Edges {
 		in.Edges = append(in.Edges, frontier.InEdge{From: e.From, To: e.To})
-		// A boundary edge tagged with the SQL fold's provenance means --reclaim-sql
-		// ran: the remaining opaque-db markers are then the genuine B2b residue.
-		if e.Via == sqlfold.Via && strings.HasPrefix(e.To, "boundary:") {
-			in.Folded = true
-		}
 	}
 	for _, b := range g.BlindSpots {
 		in.BlindSpots = append(in.BlindSpots, frontier.InBlindSpot{Kind: string(b.Kind), Site: b.Site})

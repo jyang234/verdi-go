@@ -501,6 +501,10 @@ func TestProposeRecommendsReclaimForStrictServerSeam(t *testing.T) {
 		Edges: []graph.Edge{
 			{From: closure, To: "boundary:db SELECT event_types", Tier: 1, Boundary: "outbound-sync"},
 		},
+		// The wrapper IS the registered HTTP route handler, and it is an UnresolvedCall
+		// blind spot — the structural signal (UnresolvedCall ∩ HTTP route entry) the
+		// hint keys on, not the generated type name.
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /event-types/{id}", Fn: wrapper}},
 		BlindSpots: []graph.BlindSpot{
 			{Kind: "UnresolvedCall", Site: wrapper, Detail: "func-value call resolved to no callees"},
 		},
@@ -514,7 +518,7 @@ func TestProposeRecommendsReclaimForStrictServerSeam(t *testing.T) {
 	// via=strict-server) must NOT repeat the recommendation.
 	g.Edges = append(g.Edges, graph.Edge{From: wrapper, To: closure, Tier: 2, Via: "strict-server"})
 	_, guide = Propose(graph.NewIndex(g), "svc")
-	if strings.Contains(guide, "Un-reclaimed strict-server dispatch") {
+	if strings.Contains(guide, "Un-reclaimed dispatch seam") {
 		t.Errorf("a reclaimed graph must not be told to reclaim again; guide:\n%s", guide)
 	}
 }

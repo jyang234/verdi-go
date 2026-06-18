@@ -310,8 +310,10 @@ tag (the groundwork decoder already round-trips a per-edge `via`,
    hide a write. `TestFoldResolvesFiniteConstantTableSet` and
    `TestFoldAbstainsOnNonConstantTableField` pin both directions.
 3. **Disclosure reconciliation. ✅ DONE.** The frontier classifier
-   (`internal/static/frontier`) carries a fold-aware `Folded` signal (set by graphio
-   from the `sqlfold.Via` provenance on boundary edges). Unfolded, an `opaque-db`
+   (`internal/static/frontier`) carries a fold-aware `Folded` signal, taken from the
+   build flag (`graphio.Graph.foldSQL`, set by `WithSQLFold`) rather than inferred
+   from tagged edges — so a `--reclaim-sql` run that recovers nothing still reads as
+   folded (its residue is genuine, not "untried"). Unfolded, an `opaque-db`
    marker's hint points the reader at `--reclaim-sql` (which folds the B2a
    constant-fragment-builder sub-class for free); folded, the remaining `opaque-db`
    markers ARE the genuine B2b residue and the hint becomes the consumer ask ("make

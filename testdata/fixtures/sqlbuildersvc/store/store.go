@@ -179,6 +179,19 @@ func (p *dynParticipantStore) DeleteDyn(ctx context.Context, id string) error {
 	return err
 }
 
+// SelfRef feeds the builder's own Build() result back into a later Write — a
+// cyclic data dependency through the accumulator. The fold's cycle guard must make
+// this terminate (and abstain), never recurse forever.
+func (s *Store) SelfRef(ctx context.Context) error {
+	w := newSQLWriter()
+	w.Write("SELECT id FROM messages")
+	q, _ := w.Build()
+	w.Write(q)
+	query, args := w.Build()
+	_, err := s.db.QueryContext(ctx, query, args...)
+	return err
+}
+
 // ExecOpaque takes the verb itself as a runtime value: the leading fragment is a
 // hole, so there is no constant verb to read. The fold must ABSTAIN and leave the
 // effect opaque (fail closed).
