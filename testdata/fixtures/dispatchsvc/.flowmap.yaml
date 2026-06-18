@@ -1,0 +1,7 @@
+version: 1
+service: dispatchsvc
+
+# The only boundary seam is database/sql; the registry hop under test is a plain
+# func-value indirection, deliberately NOT reflect/unsafe/cgo/linkname.
+classify:
+  db: ["database/sql"]
