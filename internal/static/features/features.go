@@ -182,6 +182,18 @@ func isConcurrentSite(site ssa.CallInstruction) bool {
 // Fallible reports whether fn returns or propagates an error.
 func Fallible(fn *ssa.Function) bool { return fn != nil && returnsError(fn.Signature) }
 
+// IsPackageInit reports whether fn is a package initializer — the synthesized
+// `init` that runs package-level var inits and the explicit init() funcs. SSA
+// names that one exactly "init" with no receiver; user-written init() funcs are
+// renamed init#1, init#2, … and a free function cannot be named init, so this
+// matches only the init-ordering plumbing, never a real init body that performs a
+// boundary call. It is the ONE predicate the static front-end uses to recognize a
+// package initializer (roots seeds it into RTA for registration recovery; graphio
+// and blindspots exclude it from the rendered service graph and its disclosures).
+func IsPackageInit(fn *ssa.Function) bool {
+	return fn != nil && fn.Name() == "init" && fn.Signature != nil && fn.Signature.Recv() == nil
+}
+
 // returnsError reports whether sig has an error result. A result counts when its
 // type IMPLEMENTS error — not only the bare `error` interface but a concrete
 // error type like *pkg.TxError — so fallibility here agrees with the obligations

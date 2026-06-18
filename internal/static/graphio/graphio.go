@@ -492,7 +492,7 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	concurrent := f.Concurrent
 
 	switch {
-	case isPkgInit(callee):
+	case features.IsPackageInit(callee):
 		// A call to a package initializer is init-ordering plumbing: the
 		// synthesized `init` of every package calls the `init` of each package it
 		// imports. It is never a real boundary operation, so it must NOT be
@@ -518,15 +518,6 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	default:
 		return nil // a call into unhinted stdlib/third-party code; not part of the view
 	}
-}
-
-// isPkgInit reports whether fn is a package initializer — the synthesized `init`
-// that runs package-level var inits and the explicit init() funcs. SSA names that
-// one exactly "init" with no receiver; user-written init() funcs are renamed
-// init#1, init#2, … and free functions cannot be named init, so this matches only
-// the init-ordering plumbing, never a real init body that performs a boundary call.
-func isPkgInit(fn *ssa.Function) bool {
-	return fn != nil && fn.Name() == "init" && fn.Signature != nil && fn.Signature.Recv() == nil
 }
 
 // committedEffect reports whether a boundary label is a committed external

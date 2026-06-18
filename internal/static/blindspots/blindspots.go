@@ -181,6 +181,13 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 		if !res.Program.IsFirstParty(fn.Pkg) {
 			continue
 		}
+		// init is an RTA seed (it recovers registration addresses), not rendered
+		// service behavior — graphio excludes it from the graph, so its disclosures
+		// (reflect/fan-out/etc.) must be excluded too, or the manifest would gain a
+		// blind spot for a node that is not in the graph it annotates.
+		if features.IsPackageInit(fn) {
+			continue
+		}
 		site := fn.RelString(nil)
 		perSite := map[ssa.CallInstruction]map[string]bool{}
 		for _, e := range n.Out {

@@ -84,10 +84,29 @@ type Result struct {
 	BlindSpots []BlindSpot
 }
 
+// DiscoveredRootCount is the number of distinct DISCOVERED entry-point functions —
+// mains, HTTP handlers, bus consumers, and library exports. It EXCLUDES package
+// initializers: init runs universally before main and is seeded into RTA only to
+// recover addresses taken during initialization (the registration idiom), so it is
+// an implicit analysis seed, not a discovered service entry point. The call-graph
+// provenance caveat counts these, so the number is the service's real entry surface
+// and stays stable whether or not a package happens to carry an init.
+func (r *Result) DiscoveredRootCount() int {
+	seen := make(map[*ssa.Function]bool, len(r.Roots))
+	for _, rt := range r.Roots {
+		if rt.Kind == KindInit {
+			continue
+		}
+		seen[rt.Func] = true
+	}
+	return len(seen)
+}
+
 // Funcs returns the distinct root functions, in Result.Roots order — the input
 // RTA and the other algorithms expect. Distinct because two routes may share one
 // handler function (each is its own Root), while the graph algorithms root at
-// functions.
+// functions. It INCLUDES init roots: RTA must seed from init to see registration
+// addresses taken there (DiscoveredRootCount is the entry-surface count instead).
 func (r *Result) Funcs() []*ssa.Function {
 	fns := make([]*ssa.Function, 0, len(r.Roots))
 	seen := make(map[*ssa.Function]bool, len(r.Roots))
