@@ -86,9 +86,10 @@ func TestGateImpeachmentOptInOnlyGatesWithBreaches(t *testing.T) {
 }
 
 // stampedAlgoPair mirrors the REAL gating path: a CI-built graph that records its
-// substrate (Algo) so the provenance line renders caveats (an algo-less graph drops
-// them, ProvenanceLine's "unrecorded" early-out). base==branch keeps the static gate
-// clean, isolating the behavioral input as before.
+// substrate (Algo). base==branch keeps the static gate clean, isolating the
+// behavioral input as before. (The disclosure surfaces on an algo-less graph too —
+// ProvenanceLine no longer drops caveats when the substrate is unrecorded; that
+// regression is guarded at the ProvenanceLine level in graph_test.go.)
 func stampedAlgoPair() (*graph.Graph, *graph.Graph) {
 	g := &graph.Graph{Algo: "rta", Nodes: []graph.Node{{FQN: "svc.handler", Sig: "func()"}}}
 	return g, g
