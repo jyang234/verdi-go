@@ -67,7 +67,12 @@ func (a *Admin) PurgeLedger(w http.ResponseWriter, req *http.Request) {
 	if id == "" {
 		id = "ALL"
 	}
+	// Two named DB effects on the one missed route: the ledger and its audit trail.
+	// Both are reached from no discovered entrypoint, so the missed route impeaches
+	// TWO effects from a single capture — the multi-candidate witness sort the
+	// single-effect corpus never exercised.
 	_ = a.loans.Purge(ctx, id)
+	_ = a.loans.PurgeAudit(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

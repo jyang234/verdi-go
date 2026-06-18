@@ -58,6 +58,12 @@
       "fallible": true
     },
     {
+      "fqn": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
+      "sig": "func (*store.Loans).PurgeAudit(ctx context.Context, loanID string) error",
+      "tier": 1,
+      "fallible": true
+    },
+    {
       "fqn": "example.com/impeachsvc.main",
       "sig": "func main.main()",
       "tier": 1
@@ -121,6 +127,11 @@
       "tier": 2
     },
     {
+      "from": "(*example.com/impeachsvc/internal/admin.Admin).PurgeLedger",
+      "to": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
+      "tier": 2
+    },
+    {
       "from": "(*example.com/impeachsvc/internal/handler.App).Create",
       "to": "(*example.com/impeachsvc/internal/handler.App).create",
       "tier": 3
@@ -154,6 +165,17 @@
     },
     {
       "from": "(*example.com/impeachsvc/internal/store.Loans).Purge",
+      "to": "example.com/impeachsvc/internal/store.dbSpan",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
+      "to": "boundary:db DELETE audit_log",
+      "tier": 1,
+      "boundary": "outbound-sync"
+    },
+    {
+      "from": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
       "to": "example.com/impeachsvc/internal/store.dbSpan",
       "tier": 3
     },
@@ -199,6 +221,17 @@
       "kind": "http",
       "name": "POST /loan",
       "fn": "(*example.com/impeachsvc/internal/handler.App).Create"
+    }
+  ],
+  "effect_order": [
+    {
+      "fn": "(*example.com/impeachsvc/internal/admin.Admin).PurgeLedger",
+      "effect": "boundary:db DELETE ledger",
+      "effect_site": "internal/admin/admin.go:74",
+      "callee": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
+      "callee_site": "internal/admin/admin.go:75",
+      "always": true,
+      "via": "(*example.com/impeachsvc/internal/store.Loans).Purge"
     }
   ]
 }

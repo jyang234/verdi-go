@@ -66,6 +66,21 @@ func TestAdminPurgeFlow(t *testing.T) {
 	flow.New("DELETE /admin/ledger").
 		Trigger("DELETE", "/admin/ledger?loan=L1").
 		ExpectExactlyOnce("DB postgres DELETE ledger").
+		ExpectExactlyOnce("DB postgres DELETE audit_log").
+		Quiescence(15*time.Millisecond, 3*time.Second).
+		Run(t, app)
+}
+
+// TestAdminReindexFlow is the effectless-missed-route negative control. Reindex is
+// a missed root too (mounted on the same custom, unhinted router), but reaches NO
+// boundary effect — so its capture must yield ZERO impeachment candidates. The cell
+// fires on a missed route that reaches an effect static lost, NEVER on a missed
+// route merely for being unattributed; this is the real-capture proof of the
+// false-positive direction (tenet 4: a false IMPEACHMENT is the cardinal sin).
+func TestAdminReindexFlow(t *testing.T) {
+	app := harness.NewInProcess(t, wire(), harness.WithService("impeachsvc"))
+	flow.New("POST /admin/reindex").
+		Trigger("POST", "/admin/reindex").
 		Quiescence(15*time.Millisecond, 3*time.Second).
 		Run(t, app)
 }

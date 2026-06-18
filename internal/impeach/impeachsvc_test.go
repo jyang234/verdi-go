@@ -1,6 +1,7 @@
 package impeach
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -49,18 +50,29 @@ func TestImpeachsvcCatchesUndisclosedMissedRoot(t *testing.T) {
 	create := loadTrace(t, impeachTraceLoanCreate)
 	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{purge, create}, Provenance{})
 
-	// Determinism over the real corpus.
-	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, Provenance{}).Digest {
+	// Determinism over the real corpus, now with MORE THAN ONE candidate: the
+	// missed admin route reaches two named DELETEs, so this is the first real corpus
+	// whose witness sort orders multiple findings. The digest is order-independent
+	// AND the candidate SEQUENCE is identical regardless of input-trace order — the
+	// sort resolves on intrinsic data (effect first), never on arrival order.
+	rev := Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, Provenance{})
+	if r.Digest != rev.Digest {
 		t.Error("report not order-independent over the real corpus")
 	}
+	wantOrder := []string{"db DELETE audit_log", "db DELETE ledger"} // lexical by effect (§5 tie-break)
+	if got := effectsOf(r); !slices.Equal(got, wantOrder) {
+		t.Errorf("candidate order = %v, want %v (deterministic sort on intrinsic effect key)", got, wantOrder)
+	}
+	if got := effectsOf(rev); !slices.Equal(got, wantOrder) {
+		t.Errorf("reversed-input candidate order = %v, want %v (order-independent witness sort)", got, wantOrder)
+	}
 
-	if len(r.Candidates) != 1 {
-		t.Fatalf("want exactly 1 impeachment candidate, got %d: %+v", len(r.Candidates), r.Candidates)
+	if len(r.Candidates) != 2 {
+		t.Fatalf("want exactly 2 impeachment candidates (ledger + audit_log), got %d: %+v", len(r.Candidates), r.Candidates)
 	}
-	w := r.Candidates[0]
-	if w.Effect != "db DELETE ledger" {
-		t.Errorf("Effect = %q, want %q", w.Effect, "db DELETE ledger")
-	}
+	// Both missed-route effects are impeached; inspect the ledger one as the witness
+	// detail exemplar (the audit_log candidate is structurally identical bar the table).
+	w := candidateFor(t, r, "db DELETE ledger")
 	if w.Claim.Reachability != ReachUnreachable {
 		t.Errorf("Reachability = %q, want %q (named effect, no discovered route reaches it)", w.Claim.Reachability, ReachUnreachable)
 	}
@@ -69,8 +81,10 @@ func TestImpeachsvcCatchesUndisclosedMissedRoot(t *testing.T) {
 	// caps it at VERSION-SKEW — fail-closed, not promoted to a bare IMPEACHMENT on
 	// a graph it cannot prove the trace ran. The promotion is exercised separately
 	// (TestImpeachsvcLadderPromotesWithProvenance) once the substrate is supplied.
-	if w.Verdict != DowngradeVersionSkew {
-		t.Errorf("Verdict = %q, want %q (real corpus has no code identity)", w.Verdict, DowngradeVersionSkew)
+	for _, c := range r.Candidates {
+		if c.Verdict != DowngradeVersionSkew {
+			t.Errorf("Verdict = %q for %q, want %q (real corpus has no code identity)", c.Verdict, c.Effect, DowngradeVersionSkew)
+		}
 	}
 	// The witness carries the runtime counterexample: the entry it was reached
 	// from (the missed admin route) and the enriched observed op (with DB system).
@@ -138,25 +152,28 @@ func TestImpeachsvcLadderPromotesWithProvenance(t *testing.T) {
 	if r.Digest != Audit("impeachsvc", ix, []*ir.CanonicalTrace{create, purge}, prov).Digest {
 		t.Error("report not order-independent under provenance")
 	}
-	if len(r.Candidates) != 1 {
-		t.Fatalf("want exactly 1 candidate, got %d: %+v", len(r.Candidates), r.Candidates)
-	}
-	w := r.Candidates[0]
-	if w.Verdict != VerdictImpeachment {
-		t.Fatalf("Verdict = %q, want %q; ladder = %+v", w.Verdict, VerdictImpeachment, w.Rungs)
-	}
-	// The ladder is recorded WHOLE and every rung cleared (Passed == benign
-	// explanation ruled out): an IMPEACHMENT is exactly "all five rungs passed".
-	if len(w.Rungs) != 5 {
-		t.Fatalf("want the full 5-rung ladder recorded, got %d: %+v", len(w.Rungs), w.Rungs)
+	// Both missed-route DELETEs promote: the promotion path is exercised over MORE
+	// THAN ONE finding, so "the ladder can reach IMPEACHMENT" is proven for each.
+	if len(r.Candidates) != 2 {
+		t.Fatalf("want exactly 2 candidates (ledger + audit_log), got %d: %+v", len(r.Candidates), r.Candidates)
 	}
 	wantOrder := []string{RungStaticAssertsNoPath, RungCodeIdentity, RungLabel, RungServiceScope, RungCaptureFidelity}
-	for i, rung := range w.Rungs {
-		if rung.Name != wantOrder[i] {
-			t.Errorf("rung %d = %q, want %q (ladder must be in §4 order)", i, rung.Name, wantOrder[i])
+	for _, w := range r.Candidates {
+		if w.Verdict != VerdictImpeachment {
+			t.Fatalf("Verdict = %q for %q, want %q; ladder = %+v", w.Verdict, w.Effect, VerdictImpeachment, w.Rungs)
 		}
-		if !rung.Passed {
-			t.Errorf("rung %q did not pass on the promotion path: %s", rung.Name, rung.Evidence)
+		// The ladder is recorded WHOLE and every rung cleared (Passed == benign
+		// explanation ruled out): an IMPEACHMENT is exactly "all five rungs passed".
+		if len(w.Rungs) != 5 {
+			t.Fatalf("want the full 5-rung ladder recorded for %q, got %d: %+v", w.Effect, len(w.Rungs), w.Rungs)
+		}
+		for i, rung := range w.Rungs {
+			if rung.Name != wantOrder[i] {
+				t.Errorf("rung %d = %q, want %q (ladder must be in §4 order)", i, rung.Name, wantOrder[i])
+			}
+			if !rung.Passed {
+				t.Errorf("rung %q did not pass on the promotion path for %q: %s", rung.Name, w.Effect, rung.Evidence)
+			}
 		}
 	}
 	// Provenance is recorded in the report header (the numerator's identity, §5):
