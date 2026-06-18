@@ -179,11 +179,13 @@ func TestImpeachsvcCatchesBusPublishMissedRoot(t *testing.T) {
 // observed but owned by another service, so it downgrades to CROSS-SERVICE: behavior on
 // a foreign service's span cannot impeach THIS service's static negative (fail-closed).
 //
-// The harness is single-service, so the peer's service is modeled by the span's
-// service.name attribute rather than a second process — but unlike the hand-authored
-// trace this replaces, it drives the actual capture→canon→audit pipeline. A true
-// multi-process OTLP capture, which would also exercise canon's cross-clock-domain
-// merge guard, remains the one §17 cross-service residual.
+// This is the in-process slice (one resource, one clock domain): a fast, focused A/B
+// that the owning service is the sole decider. The OUT-OF-PROCESS path — a real
+// multi-resource OTLP trace through otlpjson → ingest → canon's postHoc
+// cross-clock-domain ordering → CROSS-SERVICE — is now covered end to end by
+// cmd/flowmap's TestCrossServiceImpeachFromOTLP. The only §17 cross-service residual
+// left is two live processes + a real collector merge: capture-stack plumbing outside
+// impeach's trust boundary, whose OTLP bytes are structurally identical to that fixture.
 func TestImpeachsvcCrossServiceDowngrade(t *testing.T) {
 	g, err := graph.LoadFile(impeachsvcGraph)
 	if err != nil {
