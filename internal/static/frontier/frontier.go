@@ -217,6 +217,20 @@ func Classify(in *Input) *Result {
 		if blindspots.Kind(bs.Kind).Ratified() {
 			continue
 		}
+		// UnresolvedCall is the low-level CAUSE (a zero-resolution func-value call)
+		// of seams this classifier already represents structurally: a reclaimable
+		// dispatch seam surfaces as severed-closure/starved-entrypoint (BinB), a
+		// truly-dynamic boundary target as dynamic-bus/-http (BinA). Every
+		// UnresolvedCall site coincides with one of those structural markers (e.g.
+		// each strictsvc wrapper is already a starved-entrypoint at the same FQN), so
+		// emitting it as its own marker would double-count the same frontier and let
+		// the bin ratios drift on a redundant signal. It is excluded here — like a
+		// ratified ImpeachmentSeam, kept in blindSpotBin only for the exhaustiveness
+		// guard. Its load-bearing job (routing must_not_reach to noPathFound) lives
+		// in the graph blind-spot manifest, not in these prioritization markers (R3).
+		if bs.Kind == string(blindspots.UnresolvedCall) {
+			continue
+		}
 		bin, _ := blindSpotBin(bs.Kind)
 		add(Marker{Kind: bs.Kind, Bin: bin, Site: bs.Site})
 	}
@@ -353,7 +367,11 @@ func blindSpotBin(kind string) (Bin, bool) {
 	case string(blindspots.Reflect), string(blindspots.Unsafe),
 		string(blindspots.Cgo), string(blindspots.Linkname),
 		string(blindspots.UnresolvedDispatch), string(blindspots.NonConstantBoundaryArg),
-		string(blindspots.ImpeachmentSeam):
+		string(blindspots.ImpeachmentSeam), string(blindspots.UnresolvedCall):
+		// UnresolvedCall is mapped only to satisfy the exhaustiveness guard; the
+		// marker loop excludes it (it double-counts seams already classified
+		// structurally), so this bin is nominal — A is the conservative default for a
+		// site no structural reclaimer recognized.
 		return BinA, true // runtime/irreducible frontier (a ratified seam is irreducible to static)
 	default:
 		return BinA, false // unrecognized — disclosed as A, but the guard test flags it

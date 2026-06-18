@@ -11,6 +11,7 @@ use (
 	./testdata/fixtures/strictsvc
 	./testdata/fixtures/impeachsvc
 	./testdata/fixtures/dispatchsvc
+	./testdata/fixtures/reflectsvc
 	./testdata/groundwork/blindsvc
 	./testdata/groundwork/layeredsvc
 	./testdata/groundwork/obligsvc

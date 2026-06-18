@@ -81,7 +81,7 @@ func TestDetectEmitsNoDeclaredKind(t *testing.T) {
 
 func TestKindBoundaryClassification(t *testing.T) {
 	gated := []blindspots.Kind{blindspots.NonConstantBoundaryArg, blindspots.UnresolvedDispatch}
-	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname}
+	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall}
 	for _, k := range gated {
 		if !k.Boundary() {
 			t.Errorf("%q should be a gated boundary blind spot", k)
@@ -125,6 +125,58 @@ func TestDetectGraphCompletenessDisclosures(t *testing.T) {
 	// All of them ride the graph subset.
 	if len(blindspots.Graph(bs)) < 3 {
 		t.Errorf("graph subset should hold the disclosures, got %+v", blindspots.Graph(bs))
+	}
+}
+
+// TestDetectUnresolvedFuncValueCall pins the zero-resolution mirror of HighFanOut: a
+// func-value call the algorithm binds to NO callee must surface as a graph-completeness
+// UnresolvedCall, while a func-value call that DOES resolve (via the reachable
+// address-taken set) must NOT. The unresolved site (h.cb of type func(string), a field
+// never assigned a first-party func) is exactly the seam init()-rooting can never
+// recover — so it pins this detector independently of the roots fix.
+func TestDetectUnresolvedFuncValueCall(t *testing.T) {
+	const src = `package main
+
+// step's address is taken (passed to runResolved below), so RTA resolves the
+// func(int) call through it — runResolved.f() must NOT be flagged.
+func step(int) {}
+
+func runResolved(f func(int)) { f(2) }
+
+// handler.cb is a func(string) field; no func(string) has its address taken
+// anywhere reachable, so cb("x") binds to no callee — the seam B discloses.
+type handler struct{ cb func(string) }
+
+func callUnresolved(h handler) { h.cb("x") }
+
+func main() {
+	runResolved(step)
+	callUnresolved(handler{})
+}
+`
+	res := analyzeModule(t, map[string]string{
+		"go.mod":  "module example.com/m\n\ngo 1.24\n",
+		"main.go": src,
+	})
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+
+	var sites []string
+	for _, b := range bs {
+		if b.Kind == blindspots.UnresolvedCall {
+			sites = append(sites, b.Site)
+			if b.Kind.Boundary() {
+				t.Errorf("UnresolvedCall leaked into the gated boundary subset at %q", b.Site)
+			}
+		}
+	}
+	if len(sites) != 1 || !strings.HasSuffix(sites[0], ".callUnresolved") {
+		t.Fatalf("UnresolvedCall sites = %v, want exactly [m.callUnresolved] (runResolved must resolve, not flag)", sites)
+	}
+	// It rides the non-gated graph subset, never the boundary contract.
+	for _, b := range blindspots.Boundary(bs) {
+		if b.Kind == blindspots.UnresolvedCall {
+			t.Errorf("UnresolvedCall must not gate; found in boundary subset: %+v", b)
+		}
 	}
 }
 

@@ -32,6 +32,14 @@ const (
 	NonConstantBoundaryArg Kind = "NonConstantBoundaryArg"
 	// UnresolvedDispatch is a registration whose handler could not be resolved.
 	UnresolvedDispatch Kind = "UnresolvedDispatch"
+	// UnresolvedCall is a func-value call site the algorithm resolved to NO
+	// callee — a func value whose target lies outside the visible address-taken
+	// set (an external callback, a field set elsewhere, a registry populated past
+	// the rooted entry points). Unlike UnresolvedDispatch (a boundary
+	// registration) this is an in-body, graph-completeness gap: the invoked
+	// function and all its downstream edges and effects are absent from the
+	// graph, so a must_not_reach over the site must abstain, not prove absence.
+	UnresolvedCall Kind = "UnresolvedCall"
 	// Reflect is reflective code, invisible to the call graph.
 	Reflect Kind = "reflect"
 	// HighFanOut is a dynamic-dispatch site the algorithm resolved to many
@@ -59,7 +67,7 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
+		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
 	}
 }
 
@@ -219,6 +227,16 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 				})
 			}
 		}
+
+		// Zero-resolution is the mirror of HighFanOut and is INVISIBLE to the edge
+		// loop above: a call site the algorithm resolved to no callee produces no
+		// out-edge, so it can only be found by walking fn's call instructions and
+		// subtracting the sites that DID resolve (perSite). A func-value call always
+		// invokes a real function at runtime, so a site we cannot bind to any target
+		// is a genuine hole — its callee's edges and effects are absent from the
+		// graph. Disclosed so must_not_reach abstains (noPathFound) instead of
+		// laundering the gap into a provenAbsent.
+		out = append(out, unresolvedFuncValueCalls(fn, site, perSite)...)
 	}
 
 	// Package-level disclosures: unsafe, cgo, and go:linkname hide edges from the
@@ -226,6 +244,46 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 	out = append(out, packageDisclosures(res)...)
 
 	return dedupSort(out)
+}
+
+// unresolvedFuncValueCalls flags every func-value call in fn that the algorithm
+// resolved to NO callee — the zero-resolution mirror of HighFanOut. resolved is
+// the per-site callee map the edge loop already built from fn's out-edges; a call
+// instruction absent from it produced no edge.
+//
+// Scope is deliberately func-value calls only. A direct (static) call is an
+// ordinary edge, not a gap. An interface invoke is excluded because RTA resolves
+// invokes soundly against the reachable concrete-type set, so a zero-resolution
+// invoke is a genuinely dead type rather than a hidden edge; only a func value
+// can carry a callee from OUTSIDE the visible address-taken set (an external
+// callback, a struct field assigned elsewhere, a registry populated past the
+// rooted entry points), which is the seam that vanishes silently. Builtins are
+// excluded — they are not call-graph edges.
+func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.CallInstruction]map[string]bool) []BlindSpot {
+	var out []BlindSpot
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			cc := call.Common()
+			if cc.IsInvoke() || cc.StaticCallee() != nil {
+				continue
+			}
+			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+				continue
+			}
+			if len(resolved[call]) == 0 {
+				out = append(out, BlindSpot{
+					Kind:   UnresolvedCall,
+					Site:   site,
+					Detail: "a func-value call resolved to no callee; the invoked function and its downstream edges are invisible to the static call graph",
+				})
+			}
+		}
+	}
+	return out
 }
 
 // packageDisclosures flags first-party packages that use unsafe, cgo, or a
