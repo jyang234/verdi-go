@@ -492,6 +492,19 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	concurrent := f.Concurrent
 
 	switch {
+	case features.IsPackageInit(callee):
+		// A call to a package initializer is init-ordering plumbing: the
+		// synthesized `init` of every package calls the `init` of each package it
+		// imports. It is never a real boundary operation, so it must NOT be
+		// classified by the package-keyed hints — without this guard, rooting
+		// init() turns `store.init -> database/sql.init` into a spurious
+		// "boundary:db init" effect (a false write in the canonical IR). The
+		// internal edge is kept when the callee is first-party so init reachability
+		// still propagates; a crossing into stdlib/third-party renders nothing.
+		if scope[callee] {
+			return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
+		}
+		return nil
 	case hints.IsPublish(callee):
 		return []Edge{{From: from, To: "boundary:bus PUBLISH " + eventLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsConsume(callee):

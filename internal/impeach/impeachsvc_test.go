@@ -17,10 +17,11 @@ import (
 // and the seam this whole fixture exists to manufacture inside a boundary we
 // control independent of the test.
 const (
-	impeachsvcGraph         = "testdata/impeachsvc.graph.json"
-	impeachTraceAdminPurge  = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/delete_admin_ledger.golden.json"
-	impeachTraceLoanCreate  = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/post_loan.golden.json"
-	impeachTraceAdminNotify = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/post_admin_notify.golden.json"
+	impeachsvcGraph           = "testdata/impeachsvc.graph.json"
+	impeachTraceAdminPurge    = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/delete_admin_ledger.golden.json"
+	impeachTraceLoanCreate    = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/post_loan.golden.json"
+	impeachTraceAdminNotify   = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/post_admin_notify.golden.json"
+	impeachTraceAdminFederate = "../../testdata/fixtures/impeachsvc/flows/testdata/flows/post_admin_federate.golden.json"
 )
 
 // TestImpeachsvcCatchesUndisclosedMissedRoot is the end-to-end proof: the real
@@ -171,19 +172,20 @@ func TestImpeachsvcCatchesBusPublishMissedRoot(t *testing.T) {
 }
 
 // TestImpeachsvcCrossServiceDowngrade exercises the service-scope rung (§4 rung 4)
-// over a multi-service span tree, end to end through the full audit+ladder — not the
-// rung-in-isolation unit. An impeachsvc flow whose effect span is owned by a FOREIGN
-// service (a downstream peer's DB write appearing in the same distributed trace) must
-// downgrade to CROSS-SERVICE: behavior on another service's span cannot impeach THIS
-// service's static negative (fail-closed, §4). The discrimination is exact — the SAME
-// effect on impeachsvc's OWN span promotes to a full IMPEACHMENT, so the span's owning
-// service is the only thing that flips the verdict.
+// end to end through the full audit+ladder. The cross-service witness is a REAL harness
+// capture (post_admin_federate): the missed admin route calls a downstream peer whose
+// DB write rides the trace on the PEER's service span (service.name="peersvc" — the
+// attribute a collector folds per service, the same path canon reads). The effect is
+// observed but owned by another service, so it downgrades to CROSS-SERVICE: behavior on
+// a foreign service's span cannot impeach THIS service's static negative (fail-closed).
 //
-// The trace is hand-authored: the in-process harness captures a single service, so a
-// real multi-service OTLP capture is the one cross-service residual the audit deferred
-// (§17). This still drives the whole pipeline — candidate formation from a realistic
-// span tree, the full five-rung ladder, classify — the integration evidence a
-// rung-in-isolation unit test cannot give.
+// This is the in-process slice (one resource, one clock domain): a fast, focused A/B
+// that the owning service is the sole decider. The OUT-OF-PROCESS path — a real
+// multi-resource OTLP trace through otlpjson → ingest → canon's postHoc
+// cross-clock-domain ordering → CROSS-SERVICE — is now covered end to end by
+// cmd/flowmap's TestCrossServiceImpeachFromOTLP. The only §17 cross-service residual
+// left is two live processes + a real collector merge: capture-stack plumbing outside
+// impeach's trust boundary, whose OTLP bytes are structurally identical to that fixture.
 func TestImpeachsvcCrossServiceDowngrade(t *testing.T) {
 	g, err := graph.LoadFile(impeachsvcGraph)
 	if err != nil {
@@ -194,32 +196,19 @@ func TestImpeachsvcCrossServiceDowngrade(t *testing.T) {
 	ix := graph.NewIndex(g)
 	prov := Provenance{TraceIdentity: commit}
 
-	// An impeachsvc flow whose DB effect is observed on effectService's span; the
-	// effect (peer_ledger) is one impeachsvc's graph models no emitter for, so it
-	// forms an ABSENT candidate and the only open question is whose span it is on.
-	xsvc := func(effectService string) *ir.CanonicalTrace {
-		return &ir.CanonicalTrace{
-			Flow: "DELETE /admin/ledger", Service: "impeachsvc", Provenance: "integration",
-			Root: &ir.CanonicalSpan{
-				Op: "HTTP DELETE /admin/ledger", Kind: ir.KindServer, Service: "impeachsvc",
-				Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
-					{Op: "DB postgres DELETE peer_ledger", Kind: ir.KindClient, Service: effectService},
-				}}},
-			},
-		}
-	}
-
-	// Foreign-service effect → CROSS-SERVICE. The verdict IS the first failing rung's
-	// downgrade, so CROSS-SERVICE proves rungs 1-3 cleared and service-scope is the
-	// decider — but assert the rung record explicitly for legibility.
-	foreign := Audit("impeachsvc", ix, []*ir.CanonicalTrace{xsvc("peersvc")}, prov)
-	fw := candidateFor(t, foreign, "db DELETE peer_ledger")
+	// Real capture: the peer's DELETE peer_ledger is owned by "peersvc" and absent from
+	// impeachsvc's graph, so it forms a candidate that fails ONLY the service-scope rung.
+	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{loadTrace(t, impeachTraceAdminFederate)}, prov)
+	fw := candidateFor(t, r, "db DELETE peer_ledger")
 	if fw.Verdict != DowngradeCrossService {
 		t.Errorf("Verdict = %q, want %q (effect on a foreign service's span)", fw.Verdict, DowngradeCrossService)
 	}
 	if fw.Observed.Service != "peersvc" {
 		t.Errorf("Observed.Service = %q, want the foreign owner", fw.Observed.Service)
 	}
+	// CROSS-SERVICE is the FIRST failing rung's downgrade, so this already proves rungs
+	// 1-3 cleared; assert the rung record explicitly (and that service-scope is the one
+	// that failed) so the isolation to rung 4 is legible.
 	cleared := map[string]bool{RungStaticAssertsNoPath: false, RungCodeIdentity: false, RungLabel: false}
 	for _, rung := range fw.Rungs {
 		if rung.Name == RungServiceScope && rung.Passed {
@@ -235,10 +224,20 @@ func TestImpeachsvcCrossServiceDowngrade(t *testing.T) {
 		}
 	}
 
-	// Discrimination: the SAME effect on impeachsvc's OWN span promotes — only the
-	// owning service changed, so the service-scope rung is the sole decider.
-	own := Audit("impeachsvc", ix, []*ir.CanonicalTrace{xsvc("impeachsvc")}, prov)
-	if ow := candidateFor(t, own, "db DELETE peer_ledger"); ow.Verdict != VerdictImpeachment {
+	// Discrimination: the SAME effect on impeachsvc's OWN span promotes to a full
+	// IMPEACHMENT — only the owning service changed, so service-scope is the sole
+	// decider. Constructed in-memory: it is the exact A/B counterpart to the captured
+	// peersvc witness above, which one real single-service capture cannot also hold.
+	own := &ir.CanonicalTrace{
+		Flow: "POST /admin/federate", Service: "impeachsvc", Provenance: "integration",
+		Root: &ir.CanonicalSpan{
+			Op: "HTTP POST /admin/federate", Kind: ir.KindServer, Service: "impeachsvc",
+			Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{
+				{Op: "DB postgres DELETE peer_ledger", Kind: ir.KindClient, Service: "impeachsvc"},
+			}}},
+		},
+	}
+	if ow := candidateFor(t, Audit("impeachsvc", ix, []*ir.CanonicalTrace{own}, prov), "db DELETE peer_ledger"); ow.Verdict != VerdictImpeachment {
 		t.Errorf("Verdict = %q, want %q (same effect on the service's own span)", ow.Verdict, VerdictImpeachment)
 	}
 }

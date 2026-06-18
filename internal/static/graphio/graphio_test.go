@@ -47,6 +47,32 @@ func TestGraphIncludesDBEdges(t *testing.T) {
 	}
 }
 
+// TestPkgInitCallsAreNotBoundaryEffects pins the isPkgInit guard: a package's
+// synthesized init calls the init of every package it imports (Go's init-ordering
+// plumbing). Because the loansvc store imports database/sql — a db-classified
+// package — store.init calls database/sql.init; without the guard that call is
+// mis-rendered as a spurious "boundary:db init" effect (op "init"), a false write
+// in the canonical IR. Now that init() is a call-graph root the plumbing edge is
+// live, so this regression is reachable: assert no boundary effect carries the op
+// "init" (no real db/bus/http API is named init), i.e. no init-ordering call was
+// classified as a boundary operation.
+func TestPkgInitCallsAreNotBoundaryEffects(t *testing.T) {
+	g, err := graphio.Build(analyzeFixture(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range g.Edges {
+		if e.Boundary == "" {
+			continue
+		}
+		// Boundary labels are "boundary:<kind> <op> …"; the op is the second field.
+		fields := strings.Fields(strings.TrimPrefix(e.To, "boundary:"))
+		if len(fields) >= 2 && fields[1] == "init" {
+			t.Errorf("init-ordering call mis-classified as a boundary effect: from %s -> %q", e.From, e.To)
+		}
+	}
+}
+
 func TestGraphHasFirstPartyNodesWithSignatures(t *testing.T) {
 	g, err := graphio.Build(analyzeFixture(t), "")
 	if err != nil {

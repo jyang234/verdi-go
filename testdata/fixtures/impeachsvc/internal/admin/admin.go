@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"example.com/impeachsvc/internal/eventbus"
+	"example.com/impeachsvc/internal/peer"
 	"example.com/impeachsvc/internal/router"
 	"example.com/impeachsvc/internal/store"
 )
@@ -42,6 +43,7 @@ func (a *Admin) table() []route {
 		{"DELETE", base + "/ledger", a.PurgeLedger},
 		{"POST", base + "/reindex", a.Reindex},
 		{"POST", base + "/notify", a.Notify},
+		{"POST", base + "/federate", a.Federate},
 	}
 }
 
@@ -95,5 +97,18 @@ func (a *Admin) Notify(w http.ResponseWriter, req *http.Request) {
 	ctx, span := otel.Tracer("impeachsvc").Start(req.Context(), "admin.notify")
 	defer span.End()
 	_ = a.bus.Publish(ctx, "ledger.purged", nil)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// Federate calls a downstream peer whose DB write rides this flow's trace on the
+// PEER's own service span (service.name="peersvc"). The effect is observed but OWNED
+// by another service, so the impeachment cell must downgrade it to CROSS-SERVICE — it
+// cannot impeach impeachsvc's static absence of an effect that belongs to the peer.
+// This is the cross-service shape captured by the REAL harness (the peer's service is
+// the span's service.name attribute, exactly as a collector folds it per service).
+func (a *Admin) Federate(w http.ResponseWriter, req *http.Request) {
+	ctx, span := otel.Tracer("impeachsvc").Start(req.Context(), "admin.federate")
+	defer span.End()
+	peer.Replicate(ctx, "L1")
 	w.WriteHeader(http.StatusAccepted)
 }

@@ -1,0 +1,48 @@
+{
+  "flow": "POST /admin/federate",
+  "service": "impeachsvc",
+  "provenance": "integration",
+  "schema_version": "flowmap.trace/v1",
+  "root": {
+    "op": "HTTP POST /admin/federate",
+    "kind": "server",
+    "peer": "",
+    "tier": 1,
+    "children": [
+      {
+        "members": [
+          {
+            "op": "admin.federate",
+            "kind": "internal",
+            "peer": "",
+            "tier": 3,
+            "attrs": {
+              "flowmap.fqn": "example.com/impeachsvc/internal/admin.(*Admin).Federate"
+            },
+            "children": [
+              {
+                "members": [
+                  {
+                    "op": "DB postgres DELETE peer_ledger",
+                    "kind": "client",
+                    "peer": "postgres",
+                    "service": "peersvc",
+                    "tier": 1,
+                    "attrs": {
+                      "db.statement": "DELETE FROM peer_ledger WHERE loan_id = ?",
+                      "flowmap.fqn": "example.com/impeachsvc/internal/peer.Replicate"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "discards": {
+    "ids": "dropped",
+    "timing": "dropped"
+  }
+}

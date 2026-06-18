@@ -213,8 +213,28 @@ func Classify(in *Input) *Result {
 	// the bin ratios — a metric drifting on governance actions, not on code
 	// dynamism. Its kind is still mapped by blindSpotBin (kept whole for the
 	// exhaustiveness guard); it just does not enter the marker set.
+	// Sites already represented by a structural or effect marker. An UnresolvedCall
+	// is the low-level CAUSE (a zero-resolution func-value call) of a seam, and when
+	// it sits at a dispatch seam this classifier already counted — a strictsvc wrapper
+	// is a starved-entrypoint at the SAME FQN — re-emitting it would double-count and
+	// drift the bin ratios. So it is deduped against, but ONLY against, a coinciding
+	// marker; an UnresolvedCall at a site with no structural marker (a func-value call
+	// outside any recognized dispatch seam) is a standalone blind frontier and IS
+	// emitted, so the section stays complete. (Built from the markers added above —
+	// structural and effect — which are all that precede this loop.)
+	markedSites := map[string]bool{}
+	for _, m := range markers {
+		markedSites[m.Site] = true
+	}
 	for _, bs := range in.BlindSpots {
 		if blindspots.Kind(bs.Kind).Ratified() {
+			continue
+		}
+		// A ratified ImpeachmentSeam never reaches here (skipped above). An
+		// UnresolvedCall that coincides with a structural marker is redundant — drop
+		// it; otherwise it is disclosed in its own right (blindSpotBin → BinA: a
+		// func-value call no structural reclaimer recognized is irreducible).
+		if bs.Kind == string(blindspots.UnresolvedCall) && markedSites[bs.Site] {
 			continue
 		}
 		bin, _ := blindSpotBin(bs.Kind)
@@ -353,7 +373,11 @@ func blindSpotBin(kind string) (Bin, bool) {
 	case string(blindspots.Reflect), string(blindspots.Unsafe),
 		string(blindspots.Cgo), string(blindspots.Linkname),
 		string(blindspots.UnresolvedDispatch), string(blindspots.NonConstantBoundaryArg),
-		string(blindspots.ImpeachmentSeam):
+		string(blindspots.ImpeachmentSeam), string(blindspots.UnresolvedCall):
+		// UnresolvedCall lands in A whenever the marker loop emits it (a func-value
+		// call at a site no structural marker covers — irreducible to static, like
+		// reflect); at a site a structural seam already covers, the loop dedups it
+		// instead, so this bin applies only to the standalone case.
 		return BinA, true // runtime/irreducible frontier (a ratified seam is irreducible to static)
 	default:
 		return BinA, false // unrecognized — disclosed as A, but the guard test flags it

@@ -82,11 +82,11 @@ func Build(prog *ssabuild.Program, rs *roots.Result, opt Options) (*Graph, error
 	switch algo {
 	case AlgoRTA:
 		x = rta.Analyze(rootFns, true).CallGraph
-		caveats = append(caveats, fmt.Sprintf("rta from %d discovered root(s)", len(rootFns)))
+		caveats = append(caveats, fmt.Sprintf("rta from %d discovered root(s)", rs.DiscoveredRootCount()))
 	case AlgoVTA:
 		seed := rta.Analyze(rootFns, true).CallGraph
 		x = vta.CallGraph(reachableSet(seed), seed)
-		caveats = append(caveats, fmt.Sprintf("vta refined over rta from %d discovered root(s)", len(rootFns)))
+		caveats = append(caveats, fmt.Sprintf("vta refined over rta from %d discovered root(s)", rs.DiscoveredRootCount()))
 	case AlgoCHA:
 		x = cha.CallGraph(prog.Prog)
 		caveats = append(caveats, "cha over whole program; dynamic dispatch over-approximated")

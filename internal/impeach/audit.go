@@ -319,7 +319,7 @@ func staticEffectSets(ix *graph.Index) (named, reachable, blind map[string]bool,
 		if be.Op != graph.BusPublish {
 			continue
 		}
-		add(graph.BusPublish+" "+be.Event, be.From) // "PUBLISH loan.approved"
+		add(BusEffectKey(be.Event), be.From) // "PUBLISH loan.approved" (single-sourced; parity with observedKey)
 	}
 	dbEffs, dbUnreadable := ix.DBEffects()
 	for _, de := range dbEffs {
@@ -468,7 +468,14 @@ func observedKey(s *ir.CanonicalSpan) (string, bool) {
 		return DBEffectKey(op, table), true
 	}
 	if s.Kind == ir.KindProducer {
-		return s.Op, true // "PUBLISH <event>"
+		// Single-source the key through BusEffectKey (parity with the static side,
+		// TestBusEffectKeyParity): strip canon's PUBLISH prefix and re-key. A producer
+		// op always carries the prefix (canon invariant); if one ever does not, key it
+		// raw so it fails to match rather than minting a double-prefixed phantom.
+		if event, found := strings.CutPrefix(s.Op, opkey.PublishPrefix); found {
+			return BusEffectKey(event), true
+		}
+		return s.Op, true
 	}
 	return "", false
 }
@@ -498,22 +505,31 @@ func isDBKey(k string) bool { return strings.HasPrefix(k, "db ") }
 // carries the FQN tags pathSig folds in (Observation.CausalPath drops them), so the
 // tie-break is over the full path identity.
 func lessWitness(a, b Witness) bool {
-	if a.Effect != b.Effect {
-		return a.Effect < b.Effect
+	ka, kb := witnessSortKey(a), witnessSortKey(b)
+	for i := range ka {
+		if ka[i] != kb[i] {
+			return ka[i] < kb[i]
+		}
 	}
-	if a.Observed.Flow != b.Observed.Flow {
-		return a.Observed.Flow < b.Observed.Flow
+	return false
+}
+
+// witnessSortKey is the ONE definition of a witness's intrinsic sort identity (§5):
+// effect, then the observation's flow/service/entry/op, then the causal-path
+// signature (which folds the FQN tags, so two paths to one effect order distinctly).
+// lessWitness compares it element-wise and the determinism fuzz mirrors it through
+// THIS helper, so the comparator and its property test cannot drift on which fields
+// constitute identity (CLAUDE.md one-source). Equal keys ⇒ equal witness for the sort;
+// the dedup (audit.go observedEffects) guarantees no two candidates share one.
+func witnessSortKey(w Witness) [6]string {
+	return [6]string{
+		w.Effect,
+		w.Observed.Flow,
+		w.Observed.Service,
+		w.Observed.Entry,
+		w.Observed.Op,
+		pathSig(w.chain),
 	}
-	if a.Observed.Service != b.Observed.Service {
-		return a.Observed.Service < b.Observed.Service
-	}
-	if a.Observed.Entry != b.Observed.Entry {
-		return a.Observed.Entry < b.Observed.Entry
-	}
-	if a.Observed.Op != b.Observed.Op {
-		return a.Observed.Op < b.Observed.Op
-	}
-	return pathSig(a.chain) < pathSig(b.chain)
 }
 
 func lessObserved(a, b observedEffect) bool {
