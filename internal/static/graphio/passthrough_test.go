@@ -130,6 +130,32 @@ func TestPassthroughReattributesPerCaller(t *testing.T) {
 	}
 }
 
+// Per-caller fail closed (§19): a caller that invokes the helper indirectly (its arg
+// slot is unmappable) re-homes only its OWN effect as opaque, and must not collapse
+// re-attribution for the directly-resolved callers. Under the old whole-helper abort
+// this indirect call left every sibling's verb unrecovered.
+func TestPassthroughPerCallerFailClosed(t *testing.T) {
+	g, err := graphio.Build(passthroughFixture(t), "", graphio.WithSQLFold())
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := dbEdges(g)
+	// The indirect caller's effect is preserved opaque, homed at the caller.
+	if !hasEdge(edges, "IndirectCaller", "ExecContext", "sql-passthrough") {
+		t.Errorf("indirect caller must re-home opaque at itself; got %+v", edges)
+	}
+	// A direct sibling is still classified despite the indirect caller existing.
+	if !hasEdge(edges, "DeleteEventType", "DELETE event_types", "sql-passthrough") {
+		t.Errorf("a direct caller must stay classified despite an unmappable sibling; got %+v", edges)
+	}
+	// And the helper edge is still fully re-attributed away (no out-of-scope caller).
+	for _, e := range edges {
+		if contains(e.from, "execByID") {
+			t.Errorf("helper sink edge must be re-attributed away; got %+v", e)
+		}
+	}
+}
+
 // Determinism: the re-attributed build is a pure function of the SSA — byte-identical
 // across repeated builds (CLAUDE.md determinism-test rule for a new label path).
 func TestPassthroughDeterministic(t *testing.T) {

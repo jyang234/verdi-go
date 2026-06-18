@@ -8,6 +8,7 @@ package graphio
 
 import (
 	"fmt"
+	"go/types"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -650,37 +651,57 @@ func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bo
 	opaque := sinkMethodName(sink)
 	seen := map[[2]string]bool{}
 	var out []Edge
+	// Carry the sink's concurrency onto every re-attributed edge so a concurrency
+	// check cannot weaken just because the effect moved to the caller. (Known blind
+	// spot: a pass-through helper itself dispatched with `go helper(...)` seeds a
+	// forward cone that no longer includes the caller where the effect now lives, so
+	// checkNoConcurrentReach can miss it. Spawning the CALLER — the common shape — is
+	// unaffected. Disclosed in docs/design/sql-constfold-reclaim-plan.md §6.1.)
+	emit := func(from, label string) {
+		key := [2]string{from, label}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: concurrent, Via: viaPassthrough})
+	}
+	keepHelper := false
 	for _, site := range sites {
-		// A statically-resolved direct call aligns Args with the callee's Params
-		// (Args[0] is the receiver for a method, matching Params[0]); an invoke or
-		// indirect call does not, so the parameter slot cannot be mapped soundly.
-		if site.Common().StaticCallee() != helper {
-			return nil, false
-		}
-		args := site.Common().Args
-		if paramIdx >= len(args) {
-			return nil, false
-		}
 		callerFn := site.Parent()
 		if callerFn == nil || !scope[callerFn] {
-			return nil, false // an out-of-scope caller would hide the effect
-		}
-		labels, ok := recoverDBLabelsFromValue(args[paramIdx])
-		if !ok {
-			labels = []string{opaque} // re-home the opaque label; never drop the effect
+			// An out-of-scope caller is not a graph node, so its effect cannot be homed
+			// at it; preserve the surface by keeping the helper's own opaque edge rather
+			// than dropping a reachable effect.
+			keepHelper = true
+			continue
 		}
 		from := callerFn.RelString(nil)
-		for _, label := range labels {
-			key := [2]string{from, label}
-			if seen[key] {
-				continue
+		// Sound arg mapping needs a statically-resolved DIRECT call whose Args align
+		// with the callee's Params (Args[0] is the receiver for a method, matching
+		// Params[0]) AND whose slot type matches the parameter — the type check rejects
+		// a misaligned generic/thunk arity that would otherwise read an unrelated arg.
+		if site.Common().StaticCallee() == helper {
+			args := site.Common().Args
+			if paramIdx < len(args) && types.Identical(args[paramIdx].Type(), param.Type()) {
+				if labels, _, ok := recoverDBLabelsFromValue(args[paramIdx], true); ok {
+					for _, l := range labels {
+						emit(from, l)
+					}
+					continue
+				}
 			}
-			seen[key] = true
-			// Carry the sink's concurrency onto the re-attributed edge so a concurrency
-			// check cannot weaken just because the effect moved to the caller (the
-			// helper edge carried it before; re-attribution must not drop it).
-			out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: concurrent, Via: viaPassthrough})
 		}
+		// Mapped-but-unrecoverable (dynamic SQL) OR unmappable (invoke / misaligned):
+		// re-home the opaque label at the caller — the effect is preserved and
+		// disclosed as unclassified, just not classified. This is per-caller fail
+		// closed: one such caller does not collapse re-attribution for its siblings.
+		emit(from, opaque)
+	}
+	if keepHelper {
+		emit(helper.RelString(nil), opaque)
+	}
+	if len(out) == 0 {
+		return nil, false
 	}
 	return out, true
 }

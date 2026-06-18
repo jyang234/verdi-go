@@ -101,6 +101,32 @@ func (s *Store) ExecRaw(ctx context.Context, verb, table string) error {
 	return execByID(ctx, s.db, query, args, "raw")
 }
 
+// execByIDAlt is a second pass-through helper of the same signature; its only purpose
+// is to make IndirectCaller's forwarding call a genuine indirect dispatch (a func-value
+// Phi the SSA cannot fold to a single static callee).
+func execByIDAlt(ctx context.Context, db *sql.DB, query string, args []any, opName string) error {
+	_, err := db.ExecContext(ctx, query, args...)
+	_ = opName
+	return err
+}
+
+// IndirectCaller forwards a constant DELETE but calls the helper INDIRECTLY (through a
+// runtime-selected function value), so the sink-side call is not statically resolved to
+// a single callee and its arg slot cannot be mapped soundly. Its effect must re-home
+// opaque at THIS caller — and, crucially, must NOT collapse re-attribution for the
+// direct callers (per-caller fail closed). Under the old whole-helper abort, this one
+// indirect call would have left every sibling's verb unrecovered.
+func (s *Store) IndirectCaller(ctx context.Context, id string, alt bool) error {
+	w := newSQLWriter()
+	w.Write("DELETE FROM event_types WHERE id = ").Arg(id)
+	query, args := w.Build()
+	fn := execByID
+	if alt {
+		fn = execByIDAlt
+	}
+	return fn(ctx, s.db, query, args, "indirect")
+}
+
 // participantStore is the per-table store: the table name is a struct field set to
 // one of a finite set of string CONSTANTS at construction. Its DeleteParticipant
 // routes through the SAME pass-through helper — so naming the table needs the

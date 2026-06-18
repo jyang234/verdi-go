@@ -137,6 +137,26 @@ func TestFoldAbstainsWhenEscapePrecedesVerb(t *testing.T) {
 	}
 }
 
+// Tier A soundness guard (loops): a builder whose terminal sits in a cyclic block
+// with a closure-captured escape cannot use dominance as happens-before — a prior
+// iteration's unseen append can precede a later read. The fold must abstain.
+func TestFoldAbstainsOnCyclicBuilderWithEscape(t *testing.T) {
+	s := foldFixture(t)["LoopAccumulate"]
+	if s.ok {
+		t.Errorf("LoopAccumulate: a cyclic builder with an escape must abstain, got %+v", s)
+	}
+}
+
+// Tier A soundness guard (reassignment): a cell written by two different builders is
+// ambiguous — merging their appends would attribute one builder's verb to the
+// other's terminal. The single-store gate must make the fold abstain.
+func TestFoldAbstainsOnReassignedCell(t *testing.T) {
+	s := foldFixture(t)["ReassignedBuilder"]
+	if s.ok {
+		t.Errorf("ReassignedBuilder: a reassigned builder cell must abstain, got %+v", s)
+	}
+}
+
 // Phase 2: the per-table store's table is a struct field set to one of a finite
 // set of string constants. The fold resolves the whole set and names both targets.
 func TestFoldResolvesFiniteConstantTableSet(t *testing.T) {

@@ -379,6 +379,35 @@ key on verb + target table, not columns), so it is left unrecovered by design. T
 `sqlpassthroughsvc` fixture and `TestPassthroughDeterministic` extend the determinism
 and breadth gates to the re-attribution path.
 
+**Known blind spots of Tier B re-attribution (self-honesty, tenet 3).** Moving an
+effect from the helper sink to its callers is the right call for the write-surface
+budget, but it shifts the effect's *position* in two graph consumers, so two
+deliberate, disclosed gaps remain rather than being papered over:
+
+- **Concurrency cone.** `checkNoConcurrentReach` seeds a forward cone from each
+  `go`/`defer` spawn site and collects effects keyed by a FROM inside that cone. When
+  the pass-through helper *itself* is spawned (`go execByID(...)`), the cone is the
+  helper's forward reach, which no longer contains the caller where the effect now
+  lives — so a concurrent DB write can go unseen. Spawning the *caller*
+  (`go DeleteEventType(...)`, the common shape) is unaffected, because the caller is
+  the seed and is in the cone. Closing this fully would either trade away Tier B's
+  per-caller precision (re-home all verbs at the helper) or thread a "forwarded-origin"
+  edge flag through `fitness` so the budget skips it while reachability/concurrency
+  keep it — deferred as a larger change; disclosed here meanwhile.
+- **Effect-order / always-effect channel.** A re-attributed mutation rides `g.Edges`
+  for the write-surface budget but is NOT recorded as a committed `directEffect`: the
+  derivation orders effects by the call *site*'s position *within a function*, and the
+  site lives in the helper while the effect is homed at the caller, so feeding it into
+  the caller's `OrderFacts` would fabricate an ordering. The result is a conservative
+  under-disclosure (a fault card that would fire for a directly-built write does not
+  fire for the pass-through-built one) — never a wrong claim. The `From != fn` guard in
+  `graphio.Build` keeps it out of the channel deliberately.
+
+Per-caller fail-closed is genuine: one unmappable caller (an interface invoke, a
+misaligned arg slot) re-homes only *that* caller's effect as opaque (or, for an
+out-of-scope caller that has no node, keeps the helper's opaque edge), without
+collapsing re-attribution for its recoverable siblings.
+
 ---
 
 ## 7. Determinism risk register

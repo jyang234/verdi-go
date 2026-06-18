@@ -27,6 +27,9 @@ func main() {
 	http.HandleFunc("POST /raw", func(w http.ResponseWriter, r *http.Request) {
 		_ = s.ExecRaw(ctx, r.URL.Query().Get("verb"), r.URL.Query().Get("table"))
 	})
+	http.HandleFunc("DELETE /eventTypesIndirect", func(w http.ResponseWriter, r *http.Request) {
+		_ = s.IndirectCaller(ctx, r.URL.Query().Get("id"), r.URL.Query().Get("alt") == "1")
+	})
 
 	pubs := store.NewPublisherStore(nil)
 	subs := store.NewSubscriberStore(nil)
