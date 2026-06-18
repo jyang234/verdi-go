@@ -124,6 +124,35 @@ func TestImpeachsvcDiscoveredRouteAloneIsClean(t *testing.T) {
 	}
 }
 
+// TestImpeachsvcCorpusHasUniqueEffectPerCandidate pins the precondition the candidateFor
+// test helper relies on across the suite: over the impeachsvc corpus no two candidates
+// share an Effect string, so selecting a witness by effect is unambiguous. lessWitness
+// (audit.go) notes two distinct PATHS to one effect become DISTINCT witnesses with the
+// SAME Effect — so if a future graph grows a second path to an impeached effect, this
+// fails HERE with a clear message rather than as an opaque candidateFor "want exactly
+// one" Fatalf scattered across every by-effect test. The non-empty guard keeps the
+// uniqueness check from passing vacuously.
+func TestImpeachsvcCorpusHasUniqueEffectPerCandidate(t *testing.T) {
+	ix := loadIndex(t, impeachsvcGraph)
+	r := Audit("impeachsvc", ix, []*ir.CanonicalTrace{
+		loadTrace(t, impeachTraceAdminPurge),
+		loadTrace(t, impeachTraceLoanCreate),
+		loadTrace(t, impeachTraceAdminNotify),
+	}, Provenance{})
+	if len(r.Candidates) == 0 {
+		t.Fatal("no candidates over the impeachsvc corpus — the uniqueness check would be vacuous")
+	}
+	seen := map[string]int{}
+	for _, w := range r.Candidates {
+		seen[w.Effect]++
+	}
+	for effect, n := range seen {
+		if n != 1 {
+			t.Errorf("effect %q has %d candidates; candidateFor's by-effect selection assumes one witness per effect", effect, n)
+		}
+	}
+}
+
 // TestImpeachsvcCatchesBusPublishMissedRoot is the bus-vocabulary axis: the missed
 // admin route reaches a constant-named bus PUBLISH (not a DB effect), so this proves
 // the cell impeaches over the PUBLISH label vocabulary too — the label rung is not
