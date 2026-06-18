@@ -6,7 +6,49 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/canon/opkey"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/sqlverb"
+	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// TestBusEffectKeyParity is the bus analogue of TestDBEffectKeyParity: the static
+// PUBLISH effect (graph.BusEffect, event carried separately) and the behavioral
+// producer op (canon's opkey.PublishPrefix + event) must reduce to the SAME join key
+// through the one helper, BusEffectKey. Before BusEffectKey the two sides built the
+// key from two independent constants (graph.BusPublish vs opkey.PublishPrefix) with no
+// parity test — agreeing only by coincidence; a drift would silently miss every bus
+// impeachment or mint spurious ones (the failure effectkey.go warns of for DB).
+func TestBusEffectKeyParity(t *testing.T) {
+	for _, event := range []string{"loan.approved", "ledger.purged", "disbursement.initiated"} {
+		t.Run(event, func(t *testing.T) {
+			want := "PUBLISH " + event
+
+			// Static: the graph's bus effect renders through BusEffectKey.
+			if sk := BusEffectKey(event); sk != want {
+				t.Errorf("static key = %q, want %q", sk, want)
+			}
+
+			// Behavioral: a producer span whose op is canon's "PUBLISH <event>"
+			// reduces through observedKey to the same key.
+			bk, ok := observedKey(&ir.CanonicalSpan{Op: opkey.PublishPrefix + event, Kind: ir.KindProducer})
+			if !ok {
+				t.Fatalf("behavioral decoder produced no effect for %q", event)
+			}
+			if bk != want {
+				t.Errorf("behavioral key = %q, want %q", bk, want)
+			}
+			if BusEffectKey(event) != bk {
+				t.Errorf("parity broken: static %q != behavioral %q", BusEffectKey(event), bk)
+			}
+		})
+	}
+
+	// The two underlying tokens the join rests on must still compose identically: the
+	// static vocabulary (graph.BusPublish) plus a space IS canon's producer prefix
+	// (opkey.PublishPrefix). This is the coincidence the join silently depended on
+	// before BusEffectKey — now an explicit, named invariant.
+	if graph.BusPublish+" " != opkey.PublishPrefix {
+		t.Errorf("bus token drift: graph.BusPublish+space = %q != opkey.PublishPrefix %q", graph.BusPublish+" ", opkey.PublishPrefix)
+	}
+}
 
 // staticDBKey decodes a "boundary:db <OP> <table>" label through the REAL static
 // decoder (graph.DBEffects, the schema owner) and renders the canonical join key.

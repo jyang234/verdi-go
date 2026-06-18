@@ -319,7 +319,7 @@ func staticEffectSets(ix *graph.Index) (named, reachable, blind map[string]bool,
 		if be.Op != graph.BusPublish {
 			continue
 		}
-		add(graph.BusPublish+" "+be.Event, be.From) // "PUBLISH loan.approved"
+		add(BusEffectKey(be.Event), be.From) // "PUBLISH loan.approved" (single-sourced; parity with observedKey)
 	}
 	dbEffs, dbUnreadable := ix.DBEffects()
 	for _, de := range dbEffs {
@@ -468,7 +468,14 @@ func observedKey(s *ir.CanonicalSpan) (string, bool) {
 		return DBEffectKey(op, table), true
 	}
 	if s.Kind == ir.KindProducer {
-		return s.Op, true // "PUBLISH <event>"
+		// Single-source the key through BusEffectKey (parity with the static side,
+		// TestBusEffectKeyParity): strip canon's PUBLISH prefix and re-key. A producer
+		// op always carries the prefix (canon invariant); if one ever does not, key it
+		// raw so it fails to match rather than minting a double-prefixed phantom.
+		if event, found := strings.CutPrefix(s.Op, opkey.PublishPrefix); found {
+			return BusEffectKey(event), true
+		}
+		return s.Op, true
 	}
 	return "", false
 }

@@ -12,7 +12,11 @@
 // audit) or invents spurious ones — both failures the parity test guards against.
 package impeach
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+)
 
 // DBEffectKey is the canonical, system-agnostic join key for a database boundary
 // effect: "db <OP> <table>". It is the single point where the STATIC boundary
@@ -33,4 +37,20 @@ import "strings"
 // is kept verbatim — table identity is the consumer's, not ours to fold.
 func DBEffectKey(op, table string) string {
 	return "db " + strings.ToUpper(op) + " " + table
+}
+
+// BusEffectKey is the canonical join key for a bus PUBLISH boundary effect:
+// "PUBLISH <event>". It is the bus analogue of DBEffectKey — the SINGLE point where
+// the STATIC bus effect (graph.BusEffect, whose Event the graph carries separately)
+// and the BEHAVIORAL producer op (canon's opkey.PublishPrefix + event) reduce to one
+// string, so the observed×unreachable join compares like with like (the ladder's
+// `label` rung, §4). The PUBLISH verb is the static graph's vocabulary
+// (graph.BusPublish, the schema owner) — never re-typed here, so the static side and
+// this key cannot drift. Before this helper the two sides built the key from two
+// independent constants (graph.BusPublish vs opkey.PublishPrefix) that agreed only by
+// coincidence and were guarded by no parity test; TestBusEffectKeyParity now pins both
+// sides (and that the two underlying tokens still compose identically), the same
+// discipline DBEffectKey + TestDBEffectKeyParity give the DB join.
+func BusEffectKey(event string) string {
+	return graph.BusPublish + " " + event
 }
