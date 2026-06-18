@@ -416,17 +416,30 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 		}
 	}
 
+	// The forward-ratchet targets: the canonical write-effect labels plus bus
+	// PUBLISH. If NONE of them bind anywhere in the graph (the service has zero
+	// CLASSIFIED writes — typically because every write is non-constant SQL labeled
+	// "db call"), the rule would bind nothing and fitness would correctly flag it
+	// "to binds nothing — vacuous". Proposing it anyway would make init caution its
+	// own baseline and frame a deliberate forward-ratchet as a user typo, so the
+	// rule is DEFERRED with an honest disclosure instead (R-series self-clean: init
+	// must not emit a baseline its own gate flags).
+	to := append(dbWriteTargets(), "boundary:bus PUBLISH")
 	switch {
-	case len(readOnly) > 0:
+	case len(readOnly) > 0 && bindsAnyTarget(ix, to):
 		p.MustNotReach = []policy.ReachRule{{
 			Name: "read-routes-stay-read-only",
 			From: readOnly,
-			To:   append(dbWriteTargets(), "boundary:bus PUBLISH"),
+			To:   to,
 		}}
 		g.section("Read-only routes (must_not_reach): proposed",
 			fmt.Sprintf("%d entrypoint(s) currently reach no external write: %s. Ratcheted — a future change that makes a read route write fails the gate instead of shipping silently.\n\n"+
 				"**Tighten by**: `\"require_proof\": true` on any of these that are unauthenticated.\n"+
 				"**Delete entries** that are EXPECTED to start writing soon.", len(readOnly), shortList(readOnly)))
+	case len(readOnly) > 0:
+		g.section("Read-only routes (must_not_reach): not proposed (no write target to forbid yet)",
+			fmt.Sprintf("%d entrypoint(s) currently reach no external write, but the graph contains NO classified write target (no `boundary:db <verb>`, no `boundary:bus PUBLISH`) for a read-only ratchet to forbid — most often because every write is non-constant SQL the labeler reads as `db call`. A `read-routes-stay-read-only` rule would bind nothing and fitness would flag it vacuous, so it is deferred rather than shipped as a self-cautioning baseline.\n\n"+
+				"**Unblock by**: making the write SQL constant (or building the graph with `flowmap graph --reclaim-sql`, which recovers the verb of constant-fragment SQL builders) so a real write target appears, then re-running init. Revisit also when the service starts writing.", len(readOnly)))
 	case len(unproven) > 0:
 		g.section("Read-only routes (must_not_reach): not proposed",
 			"No entrypoint is PROVABLY read-only: every route that reaches no classified write also reaches a DB effect built from non-constant SQL the labeler cannot read as a write (see the caution below). Ratcheting any of them would assert a read-only claim the substrate cannot support.")
@@ -522,6 +535,15 @@ func proposeConcurrent(ix *graph.Index, p *policy.Policy, g *guide) {
 		labels := setutil.SortedKeys(unclass)
 		g.section("Concurrency (no_concurrent_reach): not proposed",
 			"A concurrent (goroutine/defer-spawned) path reaches "+dbCallPhrase(labels)+" — it MIGHT be an unsupervised concurrent write. \"No concurrent path reaches a DB write\" is therefore UNPROVEN on this substrate, so no `no-concurrent-db-writes` rule was ratcheted: it would assert a claim the graph cannot support and would fire the day the SQL is made constant (a strict analyzability improvement). Make the SQL constant to expose the verb, or confirm by hand that no goroutine/defer path mutates.")
+		return
+	}
+	// Like proposeReadOnly: if the graph has zero classified write targets, the
+	// no-concurrent-db-writes rule binds nothing and fitness flags it vacuous (now
+	// that no_concurrent_reach has the same to-binds-nothing check as must_not_reach).
+	// Defer it rather than ship a baseline init's own gate would caution.
+	if !bindsAnyTarget(ix, dbWriteTargets()) {
+		g.section("Concurrency (no_concurrent_reach): not proposed (no write target to forbid yet)",
+			"The graph contains no classified DB write target (`boundary:db <verb>`) for a `no-concurrent-db-writes` rule to forbid — most often because every write is non-constant SQL the labeler reads as `db call`. The rule would bind nothing and fitness would flag it vacuous, so it is deferred. Make the SQL constant (or build with `flowmap graph --reclaim-sql`) so a real write target appears, then re-run init; or revisit when the service writes.")
 		return
 	}
 	p.NoConcurrentReach = []policy.ConcurrentRule{{
