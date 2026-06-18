@@ -5,6 +5,11 @@
   ],
   "nodes": [
     {
+      "fqn": "(*example.com/impeachsvc/internal/admin.Admin).Federate",
+      "sig": "func (*admin.Admin).Federate(w http.ResponseWriter, req *http.Request)",
+      "tier": 3
+    },
+    {
       "fqn": "(*example.com/impeachsvc/internal/admin.Admin).Mount",
       "sig": "func (*admin.Admin).Mount(r *router.Router)",
       "tier": 3
@@ -106,6 +111,11 @@
       "tier": 3
     },
     {
+      "fqn": "example.com/impeachsvc/internal/peer.Replicate",
+      "sig": "func peer.Replicate(ctx context.Context, loanID string)",
+      "tier": 3
+    },
+    {
       "fqn": "example.com/impeachsvc/internal/router.New",
       "sig": "func router.New() *router.Router",
       "tier": 3
@@ -132,6 +142,11 @@
     }
   ],
   "edges": [
+    {
+      "from": "(*example.com/impeachsvc/internal/admin.Admin).Federate",
+      "to": "example.com/impeachsvc/internal/peer.Replicate",
+      "tier": 3
+    },
     {
       "from": "(*example.com/impeachsvc/internal/admin.Admin).Mount",
       "to": "(*example.com/impeachsvc/internal/admin.Admin).table",
@@ -264,9 +279,9 @@
     {
       "fn": "(*example.com/impeachsvc/internal/admin.Admin).PurgeLedger",
       "effect": "boundary:db DELETE ledger",
-      "effect_site": "internal/admin/admin.go:77",
+      "effect_site": "internal/admin/admin.go:79",
       "callee": "(*example.com/impeachsvc/internal/store.Loans).PurgeAudit",
-      "callee_site": "internal/admin/admin.go:78",
+      "callee_site": "internal/admin/admin.go:80",
       "always": true,
       "via": "(*example.com/impeachsvc/internal/store.Loans).Purge"
     }

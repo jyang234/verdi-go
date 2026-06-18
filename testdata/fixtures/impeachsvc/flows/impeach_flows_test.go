@@ -99,6 +99,23 @@ func TestAdminNotifyFlow(t *testing.T) {
 		Run(t, app)
 }
 
+// TestAdminFederateFlow captures the cross-service shape with a REAL harness capture:
+// the missed admin route calls a downstream peer whose DB write rides the trace on the
+// PEER's service span (service.name="peersvc"). The effect is observed but owned by
+// another service, so the audit must downgrade it to CROSS-SERVICE rather than impeach
+// impeachsvc's own absence of it. The in-process harness is single-service, so the
+// peer's service is the span's service.name attribute — the exact attribute a
+// collector folds per service, the same path canon reads — so this drives the
+// service-scope rung end to end, not via a hand-authored trace.
+func TestAdminFederateFlow(t *testing.T) {
+	app := harness.NewInProcess(t, wire(), harness.WithService("impeachsvc"))
+	flow.New("POST /admin/federate").
+		Trigger("POST", "/admin/federate").
+		ExpectExactlyOnce("DB postgres DELETE peer_ledger").
+		Quiescence(15*time.Millisecond, 3*time.Second).
+		Run(t, app)
+}
+
 // --- hermetic double: a fake database/sql driver with a touch of latency -------
 
 type fakeDriver struct{}
