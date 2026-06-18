@@ -483,6 +483,42 @@ func TestProposeClosingUnionsConcurrentOpaqueWrites(t *testing.T) {
 	}
 }
 
+// Issue 2: when groundwork sees an UN-reclaimed oapi strict-server seam
+// (UnresolvedCall blind spots at ServerInterfaceWrapper route entries), init's
+// guide must recommend `flowmap graph --reclaim` — the existing reclaimer that
+// un-blinds route-anchored invariants. A graph already carrying reclaim provenance
+// must stay quiet.
+func TestProposeRecommendsReclaimForStrictServerSeam(t *testing.T) {
+	const (
+		wrapper = "(*example.com/svc/internal/api.ServerInterfaceWrapper).GetEventType"
+		closure = "(*example.com/svc/internal/api.ServerInterfaceWrapper).GetEventType$1"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: wrapper, Sig: "func()", Tier: 1},
+			{FQN: closure, Sig: "func()", Tier: 1},
+		},
+		Edges: []graph.Edge{
+			{From: closure, To: "boundary:db SELECT event_types", Tier: 1, Boundary: "outbound-sync"},
+		},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "UnresolvedCall", Site: wrapper, Detail: "func-value call resolved to no callees"},
+		},
+	}
+	_, guide := Propose(graph.NewIndex(g), "svc")
+	if !strings.Contains(guide, "flowmap graph --reclaim") || !strings.Contains(guide, "strict-server") {
+		t.Errorf("init must recommend --reclaim on an un-reclaimed strict-server seam; guide:\n%s", guide)
+	}
+
+	// A graph already reclaimed (carries the wrapper→closure edge tagged
+	// via=strict-server) must NOT repeat the recommendation.
+	g.Edges = append(g.Edges, graph.Edge{From: wrapper, To: closure, Tier: 2, Via: "strict-server"})
+	_, guide = Propose(graph.NewIndex(g), "svc")
+	if strings.Contains(guide, "Un-reclaimed strict-server dispatch") {
+		t.Errorf("a reclaimed graph must not be told to reclaim again; guide:\n%s", guide)
+	}
+}
+
 // R7: an oapi-codegen STRICT-SERVER topology. The generated
 // `(*ServerInterfaceWrapper).Handler` method is a graph root whose static
 // out-edges stop at the chi router BEFORE its own per-handler `$1` closure (the
