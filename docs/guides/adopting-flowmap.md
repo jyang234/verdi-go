@@ -47,7 +47,14 @@ flowmap boundary --check .  # CI runs this: fails if the committed copy is stale
 Commit `.flowmap/boundary-contract.json` alongside the code. A new
 published/consumed event or external dependency changes it and routes to review.
 The non-gated full call graph is available via `flowmap graph .` (add
-`--algo vta` to refine interface-dense dispatch; the default is `rta`).
+`--algo vta` to refine interface-dense dispatch; the default is `rta`). For a
+human-readable view, `flowmap graph . --mermaid` renders it as a Mermaid
+flowchart — typed boundary effects (DB / bus / external) as shaped leaf nodes,
+and the blind spots and frontier markers as explicit terminal nodes so a
+reviewer sees where the analysis stops. Scope it to one handler with
+`--root "POST /loans"`, or color a base→branch delta with
+`--diff base.graph.json`. Like the JSON graph, the flowchart is a view, never a
+gate.
 
 ## 3. Write a flow test
 
