@@ -158,6 +158,17 @@ type Annotation struct {
 	Kind string `yaml:"kind,omitempty"`
 	Note string `yaml:"note"`
 	By   string `yaml:"by,omitempty"`
+	// Claim is an OPTIONAL structured assertion of the boundary effect behind the
+	// seam, written as the canonical corpus effect key ("PUBLISH email.sent",
+	// "db DELETE ledger"). It is a falsifiable, machine-checkable form of the note:
+	// the impeach lens grades it CONFIRMED when the corpus observed that exact effect
+	// severed at the site, UNCONFIRMED when the corpus witnessed the seam but not this
+	// effect (a sample's silence is never proof of absence — never "false"), and
+	// UNWITNESSED when no corpus reaches the site. It stays disclosure-only: even a
+	// CONFIRMED claim never closes the blind spot or feeds a verdict. No format
+	// validation here — an unmatched claim simply reads UNCONFIRMED (fail-closed
+	// disclosure), and config stays decoupled from the impeach key space.
+	Claim string `yaml:"claim,omitempty"`
 }
 
 // ResolveAnnotationKind binds one annotation to a single blind-spot kind given the

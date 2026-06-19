@@ -226,10 +226,11 @@ func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config
 // Annotation is human/AI context on a blind spot, keyed by (Site, Kind) to the
 // graph's blind-spot manifest. Disclosure only — no consumer verdict reads it.
 type Annotation struct {
-	Site string `json:"site"`
-	Kind string `json:"kind"`
-	Note string `json:"note"`
-	By   string `json:"by,omitempty"`
+	Site  string `json:"site"`
+	Kind  string `json:"kind"`
+	Note  string `json:"note"`
+	By    string `json:"by,omitempty"`
+	Claim string `json:"claim,omitempty"`
 }
 
 // mergeAnnotations matches each config annotation to a blind spot already in the
@@ -260,7 +261,7 @@ func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]An
 		}
 		// Collapse duplicate (site, kind) annotations to the lexically-smallest note
 		// — an intrinsic tie-break, never arrival order (CLAUDE.md determinism).
-		cand := Annotation{Site: a.Site, Kind: kind, Note: a.Note, By: a.By}
+		cand := Annotation{Site: a.Site, Kind: kind, Note: a.Note, By: a.By, Claim: a.Claim}
 		key := [2]string{a.Site, kind}
 		if cur, ok := byKey[key]; !ok || cand.Note < cur.Note {
 			byKey[key] = cand

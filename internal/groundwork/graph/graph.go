@@ -89,12 +89,15 @@ type Graph struct {
 }
 
 // Annotation is operator/agent context on a blind spot, keyed by (Site, Kind).
-// Disclosure only: no verdict, count, or reachability computation reads it.
+// Disclosure only: no verdict, count, or reachability computation reads it. Claim,
+// when set, is the canonical effect key the note asserts is behind the seam — a
+// falsifiable form the impeach lens grades against the corpus (still disclosure).
 type Annotation struct {
-	Site string `json:"site"`
-	Kind string `json:"kind"`
-	Note string `json:"note"`
-	By   string `json:"by,omitempty"`
+	Site  string `json:"site"`
+	Kind  string `json:"kind"`
+	Note  string `json:"note"`
+	By    string `json:"by,omitempty"`
+	Claim string `json:"claim,omitempty"`
 }
 
 // MatchAnnotations returns the annotations in anns whose (Site, Kind) identify the
@@ -115,6 +118,9 @@ func MatchAnnotations(anns []Annotation, site, kind string) []Annotation {
 // Shared so the context reads identically on every card.
 func AnnotationLine(a Annotation) string {
 	line := "    🗒 " + a.Note
+	if a.Claim != "" {
+		line += " [claims: " + a.Claim + "]"
+	}
 	if a.By != "" {
 		line += " — " + a.By
 	}

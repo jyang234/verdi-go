@@ -820,9 +820,16 @@ The lens also grades **blind-spot annotations** against the corpus. An annotatio
 site — the same localization (`Severance.Site`) it uses for candidates — and
 **UNWITNESSED** otherwise. The corpus corroborates the *seam* (a real effect is
 hidden there), never the note's prose (the machine cannot read it), and the
-observed effect is disclosed alongside so a human judges the note against it. Like
-everything in this lens it is disclosure-only: a witnessed annotation is a stronger
-*disclosure*, never a proof and never a gate.
+observed effect is disclosed alongside so a human judges the note against it.
+
+An annotation may also carry a structured **`claim`** — the canonical effect key it
+asserts is behind the seam (`PUBLISH email.sent`, `db DELETE ledger`). The lens then
+grades the claim itself: **CONFIRMED** when the corpus observed that exact effect
+severed at the site, and **UNCONFIRMED** when the seam is witnessed but the claimed
+effect was not observed. UNCONFIRMED is deliberately asymmetric — a sample's silence
+is never proof of absence, so it reads "look", never "false". Like everything in
+this lens it is disclosure-only: even a CONFIRMED claim is a stronger *disclosure*,
+never a proof, and never closes the blind spot or feeds a verdict.
 
 The corpus is a **load-once startup input** (like `--policy`): only the graph is
 staleness-tracked and reloadable, because the graph is the one input CI rewrites

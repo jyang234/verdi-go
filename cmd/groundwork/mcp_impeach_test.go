@@ -123,12 +123,25 @@ func TestMCPImpeachWitnessesAnnotation(t *testing.T) {
 		t.Errorf("witnessed annotation should disclose the observed effect %q:\n%s", effect, text)
 	}
 
+	regrade := func(a graph.Annotation) string {
+		g.Annotations = []graph.Annotation{a}
+		srv.ix = graph.NewIndex(g)
+		srv.computeImpeach()
+		out, _ := resultText(t, srv.call("impeach", toolArgs{}))
+		return out
+	}
+
+	// A structured claim matching the observed effect is CONFIRMED.
+	if out := regrade(graph.Annotation{Site: site, Kind: "ExternalBoundaryCall", Note: "n", Claim: effect}); !strings.Contains(out, "CONFIRMED") {
+		t.Errorf("claim matching the observed effect %q should be CONFIRMED:\n%s", effect, out)
+	}
+	// A claim the witnessed site did not observe is UNCONFIRMED (never "false").
+	if out := regrade(graph.Annotation{Site: site, Kind: "ExternalBoundaryCall", Note: "n", Claim: "PUBLISH never.happens"}); !strings.Contains(out, "UNCONFIRMED") {
+		t.Errorf("claim not among observed effects should be UNCONFIRMED:\n%s", out)
+	}
 	// An annotation at an unrelated site has no corpus corroboration → UNWITNESSED.
-	g.Annotations = []graph.Annotation{{Site: "example.com/impeachsvc/internal/nope.Ghost", Kind: "reflect", Note: "stray"}}
-	srv.ix = graph.NewIndex(g)
-	srv.computeImpeach()
-	if text2, _ := resultText(t, srv.call("impeach", toolArgs{})); !strings.Contains(text2, "UNWITNESSED") {
-		t.Errorf("annotation with no corpus effect at its site should be UNWITNESSED:\n%s", text2)
+	if out := regrade(graph.Annotation{Site: "example.com/impeachsvc/internal/nope.Ghost", Kind: "reflect", Note: "stray"}); !strings.Contains(out, "UNWITNESSED") {
+		t.Errorf("annotation with no corpus effect at its site should be UNWITNESSED:\n%s", out)
 	}
 }
 

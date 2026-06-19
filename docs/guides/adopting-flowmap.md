@@ -225,7 +225,16 @@ static:
       kind: ExternalBoundaryCall   # omit when the site has exactly one blind spot
       note: "the CustomerIO SDK behind this seam sends an outbound HTTPS POST to api.customer.io"
       by: "jane@example.com"       # or an agent id/model, for audit
+      claim: "PUBLISH email.sent"  # optional: a canonical effect key the seam hides
 ```
+
+The optional `claim` is a falsifiable, machine-checkable form of the note — the
+canonical effect key (`PUBLISH <event>`, `db <OP> <table>`) you assert is behind the
+seam. With a behavioral corpus, `groundwork`'s `impeach` lens grades it **CONFIRMED**
+when that exact effect is observed severed at the site, or **UNCONFIRMED** when the
+seam is witnessed but the claimed effect was not seen (a sample's silence is not
+proof of absence, so never "false"). It stays disclosure-only: a confirmed claim is
+stronger evidence, never a proof, and never closes the blind spot or moves a verdict.
 
 Annotations are **disclosure-only**: an annotation never closes a blind spot,
 changes a count, or moves a verdict — it rides the render's blind channel and the
