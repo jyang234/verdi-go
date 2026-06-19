@@ -79,6 +79,44 @@ func TestMermaidRootedFailsClosedOnUnknownRoot(t *testing.T) {
 	}
 }
 
+// TestMermaidRootedDeterministic pins byte-identical output across repeated runs —
+// the determinism guard CLAUDE.md requires for a new ordering path (the forwardReach
+// BFS and the reach-based pruning), beyond the single-shot golden.
+func TestMermaidRootedDeterministic(t *testing.T) {
+	g := rootedSampleGraph()
+	first, ok := g.MermaidRootedAt("POST /create", MermaidOptions{MaxTier: 2})
+	if !ok {
+		t.Fatal("POST /create should resolve")
+	}
+	for i := 0; i < 8; i++ {
+		got, _ := g.MermaidRootedAt("POST /create", MermaidOptions{MaxTier: 2})
+		if got != first {
+			t.Fatalf("MermaidRootedAt not deterministic on run %d", i)
+		}
+	}
+}
+
+// TestMermaidRootedAmbiguousRouteFailsClosed pins the fix for the suffix-match bug:
+// a route prefix that matches two distinct handlers must abstain, not resolve to
+// whichever entry sorts first.
+func TestMermaidRootedAmbiguousRouteFailsClosed(t *testing.T) {
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: "a.H1", Tier: 1}, {FQN: "a.H2", Tier: 1}},
+		Entrypoints: []Entrypoint{
+			{Kind: "http", Name: "GET /v1/loans", Fn: "a.H1"},
+			{Kind: "http", Name: "GET /v2/loans", Fn: "a.H2"},
+		},
+	}
+	if _, ok := g.MermaidRootedAt("GET /loans", MermaidOptions{MaxTier: 2}); ok {
+		t.Error("'/loans' matches both /v1/loans and /v2/loans; an ambiguous root must fail closed")
+	}
+	// An exact, unambiguous route still resolves.
+	if _, ok := g.MermaidRootedAt("GET /v2/loans", MermaidOptions{MaxTier: 2}); !ok {
+		t.Error("an exact route must still resolve")
+	}
+}
+
 func TestRouteMatchesSegmentwise(t *testing.T) {
 	cases := []struct {
 		name, query string

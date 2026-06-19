@@ -9,7 +9,7 @@ flowchart LR
     notify_Notifier_Emit["notify.Notifier.Emit ⚠"]:::fallible
     blindsvc_main["blindsvc.main"]
     bus_bus_PUBLISH_user_created{{"bus PUBLISH user.created"}}:::bus
-    bus_bus_PUBLISH__dynamic_{{"bus PUBLISH <dynamic>"}}:::bus
+    bus_bus_PUBLISH__dynamic_{{"bus PUBLISH &lt;dynamic&gt;"}}:::bus
     blind_reflect(["⊥ reflect<br/>blind spot"]):::blind
     blind_unsafe(["⊥ unsafe<br/>blind spot"]):::blind
     frontier_dynamic_bus(["⌖ dynamic-bus<br/>frontier A"]):::blind

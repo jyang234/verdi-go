@@ -95,6 +95,23 @@ func TestMermaidDiffAddedEffect(t *testing.T) {
 	}
 }
 
+// TestMermaidDiffProvenanceCaveat pins the fix for substrate-mismatch phantom
+// deltas: diffing across a different --algo must DISCLOSE the substrate difference so
+// a reviewer does not read precision differences as code changes.
+func TestMermaidDiffProvenanceCaveat(t *testing.T) {
+	base := &Graph{Algo: "rta", Nodes: []Node{{FQN: "a.F", Tier: 1}}}
+	branch := &Graph{Algo: "vta", Nodes: []Node{{FQN: "a.F", Tier: 1}}}
+	out := MermaidDiff(base, branch, MermaidOptions{MaxTier: 2})
+	if !strings.Contains(out, "algo differs (base rta vs branch vta)") {
+		t.Errorf("a cross-algo diff must disclose the substrate mismatch:\n%s", out)
+	}
+	// Same algo (and tool-stripped goldens) emit no caveat, keeping goldens stable.
+	same := MermaidDiff(base, base, MermaidOptions{MaxTier: 2})
+	if strings.Contains(same, "algo differs") {
+		t.Errorf("same-substrate diff must not emit a caveat:\n%s", same)
+	}
+}
+
 func TestMermaidDiffDeterministic(t *testing.T) {
 	base := loadGraph(t, "../../../testdata/groundwork/goldens/layeredsvc.branch-good.graph.json")
 	branch := loadGraph(t, "../../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json")

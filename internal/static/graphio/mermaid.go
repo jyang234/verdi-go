@@ -15,7 +15,13 @@ package graphio
 // instead of mistaking an incomplete graph for a complete one (CLAUDE.md fail
 // closed / self-honesty about blind spots).
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/jyang234/golang-code-graph/internal/render"
+	"github.com/jyang234/golang-code-graph/internal/static/frontier"
+)
 
 // MermaidOptions tunes the flowchart render.
 type MermaidOptions struct {
@@ -44,45 +50,33 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	ids := &idAlloc{used: map[string]bool{}}
 
 	// A node that emits a boundary effect is load-bearing: hiding it would drop the
-	// effect from the diagram, which the trust model forbids. Collect those first so
-	// the tier filter can never reach them.
-	emitsEffect := map[string]bool{}
-	for _, e := range g.Edges {
-		if isBoundary(e.To) {
-			emitsEffect[e.From] = true
-		}
-	}
+	// effect from the diagram, which the trust model forbids (keepNode enforces this).
+	emitsEffect := collectEmitsEffect(g.Edges)
 
 	// Pass A: assign ids to the first-party nodes we will show.
 	nodeID := make(map[string]string, len(g.Nodes))
 	shown := make(map[string]bool, len(g.Nodes))
 	hidden := 0
 	for _, n := range g.Nodes {
-		if opts.MaxTier > 0 && n.Tier > opts.MaxTier && !emitsEffect[n.FQN] {
+		if !keepNode(n, opts.MaxTier, emitsEffect, nil) {
 			hidden++
 			continue
 		}
-		nodeID[n.FQN] = ids.get(shortName(n.FQN))
+		nodeID[n.FQN] = ids.get(frontier.ShortName(n.FQN))
 		shown[n.FQN] = true
 	}
 
-	// Boundary effect nodes, created once per distinct label, in edge order (sorted
-	// by Build) and only when their source is shown.
+	// Boundary effect nodes, created once per distinct label, in canonical edge order
+	// and only when their source is shown.
 	type bnode struct {
 		id, label, class string
 	}
 	bIDs := map[string]string{}
 	var bnodes []bnode
-	for _, e := range g.Edges {
-		if !isBoundary(e.To) || !shown[e.From] {
-			continue
-		}
-		if _, ok := bIDs[e.To]; ok {
-			continue
-		}
-		label, class := boundaryShape(e.To)
+	for _, to := range orderedBoundaryTargets(g.Edges, shown) {
+		label, class := boundaryShape(to)
 		id := ids.get(class + "_" + label)
-		bIDs[e.To] = id
+		bIDs[to] = id
 		bnodes = append(bnodes, bnode{id: id, label: label, class: class})
 	}
 
@@ -96,12 +90,12 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	var discs []disc
 	for _, b := range g.BlindSpots {
 		id := ids.get("blind_" + string(b.Kind))
-		discs = append(discs, disc{id: id, label: "⊥ " + string(b.Kind) + "<br/>blind spot", from: nodeID[b.Site]})
+		discs = append(discs, disc{id: id, label: "⊥ " + mermaidText(string(b.Kind)) + "<br/>blind spot", from: nodeID[b.Site]})
 	}
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
 			id := ids.get("frontier_" + m.Kind)
-			label := "⌖ " + m.Kind + "<br/>frontier " + string(m.Bin)
+			label := "⌖ " + mermaidText(m.Kind) + "<br/>frontier " + mermaidText(string(m.Bin))
 			discs = append(discs, disc{id: id, label: label, from: nodeID[m.Owner]})
 		}
 	}
@@ -115,7 +109,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	b.WriteString("    %% static call graph — scope: " + comment(scope) + "; algo: " + comment(g.Algo) + "\n")
 	if hidden > 0 {
 		b.WriteString("    %% " + plural(hidden, "first-party node") +
-			" above tier " + itoa(opts.MaxTier) + " hidden as plumbing; pass --show-plumbing to include\n")
+			" above tier " + strconv.Itoa(opts.MaxTier) + " hidden as plumbing; pass --show-plumbing to include\n")
 	}
 	for _, n := range notes {
 		b.WriteString("    %% " + comment(n) + "\n")
@@ -127,7 +121,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 		if !ok {
 			continue
 		}
-		label := shortName(n.FQN)
+		label := mermaidText(frontier.ShortName(n.FQN))
 		if n.Fallible {
 			label += " ⚠"
 		}
@@ -139,7 +133,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	}
 	for _, bn := range bnodes {
 		open, close := boundaryDelims(bn.class)
-		b.WriteString("    " + bn.id + open + `"` + bn.label + `"` + close + ":::" + bn.class + "\n")
+		b.WriteString("    " + bn.id + open + `"` + mermaidText(bn.label) + `"` + close + ":::" + bn.class + "\n")
 	}
 	for _, d := range discs {
 		b.WriteString("    " + d.id + `(["` + d.label + `"]):::blind` + "\n")
@@ -182,6 +176,67 @@ const classDefs = "    classDef fallible stroke:#c44,stroke-width:2px\n" +
 	"    classDef external fill:#fef6e8,stroke:#c93\n" +
 	"    classDef blind fill:#fde,stroke:#c33,stroke-dasharray:3 3\n"
 
+// mermaidText escapes DATA-derived label text for Mermaid's HTML-label mode. Mermaid
+// renders the text between a node's quotes as HTML — we rely on that for the literal
+// <br/> the disclosure labels inject — so a '<' or '>' coming from the data (the
+// "<dynamic>" effect marker, a generic type parameter) would be parsed as a (dropped)
+// HTML tag, silently blanking part of the label: a confidently-wrong, silent render of
+// exactly the dynamic-publish blind spot the honesty channel exists to surface. Escape
+// the five HTML-significant characters so data stays literal while our own <br/> stays
+// markup. Applied to data text only, never to the markup we compose around it.
+func mermaidText(s string) string {
+	return htmlEscaper.Replace(s)
+}
+
+var htmlEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&#39;",
+)
+
+// collectEmitsEffect returns the set of first-party FQNs that emit at least one
+// boundary effect. Such a node is load-bearing — hiding it would drop the effect —
+// so keepNode never collapses it. The single source of this rule for both the base
+// renderer and the diff renderer (CLAUDE.md: one source of truth).
+func collectEmitsEffect(edges []Edge) map[string]bool {
+	m := map[string]bool{}
+	for _, e := range edges {
+		if isBoundary(e.To) {
+			m[e.From] = true
+		}
+	}
+	return m
+}
+
+// keepNode reports whether node n is shown under the tier filter: a node is hidden
+// only when it is plumbing above maxTier AND emits no boundary effect AND is not
+// force-shown (force carries the diff's changed endpoints). force may be nil. This is
+// the one tier-hide predicate both renderers share, so the soundness rule "an effect
+// emitter is never hidden" cannot drift between them.
+func keepNode(n Node, maxTier int, emitsEffect, force map[string]bool) bool {
+	if maxTier <= 0 || n.Tier <= maxTier {
+		return true
+	}
+	return emitsEffect[n.FQN] || force[n.FQN]
+}
+
+// orderedBoundaryTargets returns the distinct boundary "to" labels reached from a
+// shown source, in canonical edge order so id assignment is deterministic. Shared by
+// both renderers, so the "once per label, source must be shown" invariant lives once.
+func orderedBoundaryTargets(edges []Edge, shown map[string]bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range edges {
+		if isBoundary(e.To) && shown[e.From] && !seen[e.To] {
+			seen[e.To] = true
+			out = append(out, e.To)
+		}
+	}
+	return out
+}
+
 // isBoundary reports whether a To label is a typed boundary effect node rather
 // than a first-party callee. Build emits these with the "boundary:" prefix.
 func isBoundary(to string) bool { return strings.HasPrefix(to, "boundary:") }
@@ -214,12 +269,11 @@ func boundaryDelims(class string) (open, close string) {
 	}
 }
 
-// edgeLine renders one edge. Concurrent (`go`) and outbound-async hops are dashed
-// to set them apart from synchronous calls (the flowchart analogue of the sequence
-// renderer's `--)` async arrow); a reclaimed edge carries its `via` provenance as
-// the link label so a reviewer can see which seam-reclaimer recovered it.
-func edgeLine(from, to string, e Edge) string {
-	dashed := e.Concurrent || e.Boundary == "outbound-async"
+// edgeDecoration is the non-diff annotation an edge carries: go/async for a
+// concurrent or asynchronous hop, and the reclaimer `via` provenance. It is the one
+// source of edge-annotation text for both edgeLine and the diff renderer, so a new
+// annotation cannot appear on one and not the other (CLAUDE.md: one source of truth).
+func edgeDecoration(e Edge) string {
 	var text string
 	switch {
 	case e.Concurrent:
@@ -233,6 +287,16 @@ func edgeLine(from, to string, e Edge) string {
 		}
 		text += "via " + e.Via
 	}
+	return text
+}
+
+// edgeLine renders one edge. Concurrent (`go`) and outbound-async hops are dashed
+// to set them apart from synchronous calls (the flowchart analogue of the sequence
+// renderer's `--)` async arrow); a reclaimed edge carries its `via` provenance as
+// the link label so a reviewer can see which seam-reclaimer recovered it.
+func edgeLine(from, to string, e Edge) string {
+	dashed := e.Concurrent || e.Boundary == "outbound-async"
+	text := edgeDecoration(e)
 	if dashed {
 		if text == "" {
 			return from + " -.-> " + to
@@ -245,20 +309,6 @@ func edgeLine(from, to string, e Edge) string {
 	return from + " -->|" + text + "| " + to
 }
 
-// shortName trims a fully-qualified name to a readable label: the package leaf,
-// the receiver type, and the method/function — dropping the module-path prefix and
-// the SSA pointer/paren noise. It is lossy by design (two functions of the same
-// name in different deep packages could collide), but the id allocator keeps the
-// Mermaid ids distinct, so only the human-facing label collapses.
-func shortName(fqn string) string {
-	s := strings.TrimPrefix(fqn, "(*")
-	s = strings.TrimPrefix(s, "(")
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		s = s[i+1:]
-	}
-	return strings.ReplaceAll(s, ")", "")
-}
-
 // comment sanitizes a string for use inside a Mermaid %% comment: newlines would
 // terminate the comment line and corrupt the diagram, so they are folded to spaces.
 func comment(s string) string {
@@ -266,63 +316,17 @@ func comment(s string) string {
 }
 
 // idAlloc hands out Mermaid-safe, collision-free node ids from human seeds,
-// deterministically: the same sequence of seeds always yields the same ids.
+// deterministically, through render's shared id grammar (render.SanitizeID /
+// render.UniqueID) — the one Mermaid-id convention every view in the codebase uses,
+// rather than a per-package copy that could drift (CLAUDE.md: one source of truth).
 type idAlloc struct{ used map[string]bool }
 
 func (a *idAlloc) get(seed string) string {
-	base := sanitizeID(seed)
-	id := base
-	for i := 2; a.used[id]; i++ {
-		id = base + "_" + itoa(i)
-	}
-	a.used[id] = true
-	return id
-}
-
-func sanitizeID(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	id := b.String()
-	if id == "" {
-		id = "n"
-	}
-	if id[0] >= '0' && id[0] <= '9' {
-		id = "n" + id
-	}
-	return id
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return render.UniqueID(render.SanitizeID(seed), a.used)
 }
 
 func plural(n int, noun string) string {
-	s := itoa(n) + " " + noun
+	s := strconv.Itoa(n) + " " + noun
 	if n != 1 {
 		s += "s"
 	}

@@ -23,7 +23,7 @@ func Render(name, algo string, r *Report) string {
 	if len(r.UnconfirmedRoutes) > 0 {
 		fmt.Fprintf(&b, "  unconfirmed (reach no effect, cause unverified): %d\n", len(r.UnconfirmedRoutes))
 		for _, fn := range r.UnconfirmedRoutes {
-			fmt.Fprintf(&b, "    - %s\n", short(fn))
+			fmt.Fprintf(&b, "    - %s\n", ShortName(fn))
 		}
 		b.WriteString("    (no-ops, or seams this classifier does not recognize — attribution_loss is a lower bound)\n")
 	}
@@ -51,7 +51,7 @@ func Render(name, algo string, r *Report) string {
 	if len(seams) > 0 {
 		b.WriteString("  reclaimable seams:\n")
 		for _, m := range seams {
-			fmt.Fprintf(&b, "    - %-20s %s\n", m.Kind, short(m.Site))
+			fmt.Fprintf(&b, "    - %-20s %s\n", m.Kind, ShortName(m.Site))
 			if m.ReclaimerHint != "" {
 				fmt.Fprintf(&b, "        reclaim: %s\n", m.ReclaimerHint)
 			}

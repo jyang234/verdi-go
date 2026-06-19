@@ -14,12 +14,12 @@ flowchart LR
     bus_bus_PUBLISH_disbursement_initiated{{"bus PUBLISH disbursement.initiated"}}:::bus
     bus_bus_PUBLISH_loan_approved{{"bus PUBLISH loan.approved"}}:::bus
     bus_bus_PUBLISH_loan_declined{{"bus PUBLISH loan.declined"}}:::bus
-    bus_bus_PUBLISH__dynamic_{{"bus PUBLISH <dynamic>"}}:::bus
+    bus_bus_PUBLISH__dynamic_{{"bus PUBLISH &lt;dynamic&gt;"}}:::bus
     db_db_INSERT_audit_log[("db INSERT audit_log")]:::db
     db_db_INSERT_ledger[("db INSERT ledger")]:::db
     frontier_dynamic_bus(["⌖ dynamic-bus<br/>frontier A"]):::blind
     frontier_severed_closure(["⌖ severed-closure<br/>frontier B"]):::blind
-    frontier_severed_closure_2(["⌖ severed-closure<br/>frontier B"]):::blind
+    frontier_severed_closure1(["⌖ severed-closure<br/>frontier B"]):::blind
     client_Gateway_Charge --> external_payment_gw_POST__charge__id_
     handler_App_Create --> origination_Evaluator_Evaluate
     origination_Evaluator_Evaluate --> client_Gateway_Charge
@@ -36,7 +36,7 @@ flowchart LR
     store_Loans_InsertLedger --> db_db_INSERT_ledger
     origination_Evaluator_notify -. blind .-> frontier_dynamic_bus
     origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure
-    origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure_2
+    origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure1
     classDef fallible stroke:#c44,stroke-width:2px
     classDef db fill:#eef,stroke:#66a
     classDef bus fill:#efe,stroke:#5a5

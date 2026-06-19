@@ -50,9 +50,10 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 	}
 
 	// Blind spots are attributed to a first-party site FQN; keep those whose site is
-	// in reach. A package-level site (reflect/unsafe, no owning function) cannot be
-	// attributed to one handler's reach, so it is pruned here and disclosed — it
-	// still rides the whole-graph view.
+	// in reach. One whose site is not reachable from this handler — a package-level
+	// site (reflect/unsafe, no owning function), or an FQN in another handler's
+	// subtree — is pruned here and DISCLOSED, so the per-handler view never silently
+	// omits a blind spot the whole-graph view shows.
 	droppedBlind := 0
 	for _, b := range g.BlindSpots {
 		if reach[b.Site] {
@@ -63,13 +64,18 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 	}
 
 	// Frontier markers are attributed to an owning function (Owner) or a site FQN.
-	// Keep a marker when either falls in reach; a marker keyed only on an effect
-	// label (e.g. "bus PUBLISH <dynamic>") with no reachable owner is pruned.
+	// Keep a marker when either falls in reach; one with no reachable owner/site (a
+	// marker keyed on an effect label, or owned by a function outside this handler's
+	// reach) is pruned and DISCLOSED in parallel with the blind spots above, so the
+	// rooted view is symmetrically honest about both disclosure channels.
+	droppedFrontier := 0
 	var markers []frontier.Marker
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
 			if reach[m.Owner] || reach[m.Site] {
 				markers = append(markers, m)
+			} else {
+				droppedFrontier++
 			}
 		}
 		if len(markers) > 0 {
@@ -79,8 +85,12 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 
 	var notes []string
 	if droppedBlind > 0 {
-		notes = append(notes, plural(droppedBlind, "package-level blind spot")+
-			" not attributable to this handler's reach shown only in the whole-graph view")
+		notes = append(notes, plural(droppedBlind, "blind spot")+
+			" outside this handler's reach shown only in the whole-graph view")
+	}
+	if droppedFrontier > 0 {
+		notes = append(notes, plural(droppedFrontier, "frontier marker")+
+			" outside this handler's reach shown only in the whole-graph view")
 	}
 	return sub.mermaid(opts, notes), true
 }
@@ -91,6 +101,7 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 // mounted under a prefix, the same loose match triage uses). The first hit wins;
 // determinism holds because Entrypoints and Nodes are canonically sorted.
 func (g *Graph) resolveRoot(root string) (string, bool) {
+	// Exact matches are authoritative and tried first.
 	for _, e := range g.Entrypoints {
 		if e.Name == root {
 			return e.Fn, true
@@ -106,19 +117,30 @@ func (g *Graph) resolveRoot(root string) (string, bool) {
 			return e.Fn, true
 		}
 	}
+	// Segment-wise route match for a router-prefixed leaf pattern. Collect ALL
+	// matches and fail closed when more than one DISTINCT handler matches, rather
+	// than silently rooting at whichever entry happened to sort first — a wrong-but-
+	// plausible root must abstain, not resolve arbitrarily (CLAUDE.md: fail closed).
+	matched := map[string]bool{}
 	for _, e := range g.Entrypoints {
 		if routeMatches(e.Name, root) {
-			return e.Fn, true
+			matched[e.Fn] = true
+		}
+	}
+	if len(matched) == 1 {
+		for fn := range matched {
+			return fn, true
 		}
 	}
 	return "", false
 }
 
 // routeMatches reports whether a query route names the same endpoint as an
-// entry-point Name, comparing method (if present) and path segment-wise so a
-// leaf-pattern entry ("/{id}/status") matches a fuller query and vice versa. It is
+// entry-point Name, comparing method (if present) and path SEGMENT-WISE so a
+// leaf-pattern entry ("/{id}/status") matches a fuller query and vice versa, but a
+// non-segment-aligned suffix ("/loans" vs "/v2/loans-archive") never collides. It is
 // deliberately permissive — a per-handler VIEW, never a gate — but anchored on the
-// method and the final segments so unrelated routes do not collide.
+// method and whole path segments; ambiguity is resolved by the caller failing closed.
 func routeMatches(name, query string) bool {
 	nm, np := splitRoute(name)
 	qm, qp := splitRoute(query)
@@ -128,7 +150,39 @@ func routeMatches(name, query string) bool {
 	if np == qp {
 		return true
 	}
-	return strings.HasSuffix(np, qp) || strings.HasSuffix(qp, np)
+	ns, qs := pathSegments(np), pathSegments(qp)
+	if len(ns) == 0 || len(qs) == 0 {
+		return false // an empty path is never a wildcard
+	}
+	return segmentSuffix(ns, qs) || segmentSuffix(qs, ns)
+}
+
+// pathSegments splits a route path on '/' and drops empty segments, so "/v2/loans"
+// and "v2/loans" both yield [v2 loans] and a trailing slash adds no phantom segment.
+func pathSegments(path string) []string {
+	var segs []string
+	for _, s := range strings.Split(path, "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return segs
+}
+
+// segmentSuffix reports whether short is a whole-segment suffix of long (every
+// segment of short equals the corresponding trailing segment of long). Empty short
+// is not a suffix — an empty query must not match every route.
+func segmentSuffix(long, short []string) bool {
+	if len(short) == 0 || len(short) > len(long) {
+		return false
+	}
+	off := len(long) - len(short)
+	for i := range short {
+		if long[off+i] != short[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // splitRoute separates an optional leading HTTP method from the path of a route

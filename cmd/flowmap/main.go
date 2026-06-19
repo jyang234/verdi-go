@@ -161,6 +161,9 @@ func cmdGraph(args []string) error {
 			maxTier = 0
 		}
 		opts := graphio.MermaidOptions{MaxTier: maxTier}
+		if *rootAt != "" && *diffBase != "" {
+			return fmt.Errorf("graph --root and --diff are mutually exclusive: --root renders one handler's reach, --diff renders a base→branch delta; a rooted diff is not supported")
+		}
 		if *rootAt != "" {
 			// Render-time scoping needs the UNSCOPED graph so the frontier section is
 			// present; --entry would have scoped it at build time and dropped frontier.
@@ -169,7 +172,7 @@ func cmdGraph(args []string) error {
 			}
 			out, ok := g.MermaidRootedAt(*rootAt, opts)
 			if !ok {
-				return fmt.Errorf("graph --root %q: no entry point or function matches in this graph", *rootAt)
+				return fmt.Errorf("graph --root %q: no unique entry point or function matches in this graph (no match, or an ambiguous route prefix)", *rootAt)
 			}
 			_, err = os.Stdout.WriteString(render.Fence(out))
 			return err
@@ -178,6 +181,9 @@ func cmdGraph(args []string) error {
 			base, err := loadGraphJSON(*diffBase)
 			if err != nil {
 				return fmt.Errorf("--diff base graph: %w", err)
+			}
+			if len(base.Nodes) == 0 && len(base.Edges) == 0 {
+				return fmt.Errorf("--diff base graph %s decoded to an empty graph (no nodes or edges) — wrong file, or a non-graph JSON? refusing to render an all-added diff", *diffBase)
 			}
 			_, err = os.Stdout.WriteString(render.Fence(graphio.MermaidDiff(base, g, opts)))
 			return err

@@ -197,7 +197,7 @@ func Classify(in *Input) *Result {
 		}
 		severedParent[parent] = true
 		add(Marker{Kind: "severed-closure", Bin: BinB, Site: fqn, Owner: parent,
-			ReclaimerHint: "connect " + short(parent) + " to this closure across the dispatch seam"})
+			ReclaimerHint: "connect " + ShortName(parent) + " to this closure across the dispatch seam"})
 	}
 
 	// Attribution: a named entrypoint reaching no boundary effect is one of two
@@ -282,9 +282,9 @@ func Classify(in *Input) *Result {
 // sub-class (B2a) for free, leaving only the residue to hoist to a const.
 func opaqueDBHint(folded bool, owner string) string {
 	if folded {
-		return "B2b genuine residue: --reclaim-sql could not recover a verb (dynamic verb, or a runtime identifier spliced into the SQL text) — make the statement a constant (" + short(owner) + ")"
+		return "B2b genuine residue: --reclaim-sql could not recover a verb (dynamic verb, or a runtime identifier spliced into the SQL text) — make the statement a constant (" + ShortName(owner) + ")"
 	}
-	return "opaque SQL built at runtime — run --reclaim-sql to fold the constant-fragment-builder sub-class (B2a); make any residue a constant (" + short(owner) + ")"
+	return "opaque SQL built at runtime — run --reclaim-sql to fold the constant-fragment-builder sub-class (B2a); make any residue a constant (" + ShortName(owner) + ")"
 }
 
 // Summarize rolls a Result up into the report ratios. entrypoints is the total
@@ -423,8 +423,13 @@ func allDigits(s string) bool {
 	return s != ""
 }
 
-// short renders an FQN compactly for hints (drops the module path prefix).
-func short(fqn string) string {
+// ShortName renders an FQN compactly (drops the module path prefix and SSA
+// pointer/paren noise). It is the one FQN-shortener the producer-side views share —
+// this package's frontier hints/render and the call-graph flowchart in graphio — so
+// the human-facing label convention is not copied per package (CLAUDE.md: one
+// source of truth). Lossy by design; the labels it feeds are backed by collision-
+// free ids, so distinct deep-package functions of the same name collapsing is fine.
+func ShortName(fqn string) string {
 	s := strings.TrimPrefix(fqn, "(")
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
 		s = s[i+1:]

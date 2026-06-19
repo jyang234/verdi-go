@@ -13,10 +13,17 @@ package graphio
 // it; only a node that is GONE on the branch turns red. Every changed element is
 // triple-cued: fill color, border style, and a +/− label prefix (so the diff
 // survives greyscale printing and colorblindness).
+//
+// It shares the base renderer's invariants through the same helpers (collectEmitsEffect,
+// keepNode, edgeDecoration, the boundary/id/label helpers) so the two renderers cannot
+// drift on "an effect emitter is never hidden", boundary shaping, or edge annotation.
 
 import (
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 )
 
 type diffState int
@@ -38,8 +45,9 @@ func stateOf(inBase, inBranch bool) diffState {
 	}
 }
 
-// classFor maps a node/boundary state to its CSS class. Kept nodes keep no diff
-// class (callers apply the kind class instead); only changed nodes are recolored.
+// classFor maps a node/boundary state to its CSS class. A kept element gets the
+// neutral grey, so the delta owns the whole color budget and a kept node can never
+// be mistaken for a changed one.
 func classFor(s diffState) string {
 	switch s {
 	case stAdded:
@@ -102,27 +110,19 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		return stateOf(b, br)
 	}
 
-	// A first-party node that emits a boundary effect, on either side, is never
-	// hidden — the diff must not drop an effect (the same soundness rule Mermaid
-	// keeps). Likewise, any endpoint of a CHANGED edge is force-shown so the delta
-	// is never collapsed away.
-	emitsEffect := map[string]bool{}
-	for _, e := range base.Edges {
-		if isBoundary(e.To) {
-			emitsEffect[e.From] = true
-		}
-	}
-	for _, e := range branch.Edges {
-		if isBoundary(e.To) {
-			emitsEffect[e.From] = true
-		}
+	// A node that emits a boundary effect on EITHER side is never hidden (shared rule
+	// with the base renderer); any endpoint of a CHANGED edge is force-shown so the
+	// delta is never collapsed away.
+	emitsEffect := collectEmitsEffect(base.Edges)
+	for fqn := range collectEmitsEffect(branch.Edges) {
+		emitsEffect[fqn] = true
 	}
 	allEdges := unionEdgeKeys(baseE, branchE)
 	changedEndpoint := map[string]bool{}
 	for _, k := range allEdges {
-		_, b := baseE[k]
-		_, br := branchE[k]
-		if stateOf(b, br) == stKept {
+		_, inB := baseE[k]
+		_, inBr := branchE[k]
+		if stateOf(inB, inBr) == stKept {
 			continue
 		}
 		changedEndpoint[k.from] = true
@@ -130,84 +130,77 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 			changedEndpoint[k.to] = true
 		}
 	}
+	// Boundary-target state, precomputed in two single passes (O(E)) rather than a
+	// per-target rescan of both edge maps (the old O(boundary×edges)).
+	boundaryState := boundaryTargetStates(baseE, branchE)
 
 	ids := &idAlloc{used: map[string]bool{}}
 	reserveLegendIDs(ids)
 
-	// Pass A: choose which first-party nodes to show, and assign ids in a stable
-	// union order.
+	nodeKeys := unionNodeKeys(baseN, branchN) // computed once, ranged twice below
+
+	// Pass A: choose which first-party nodes to show, and assign ids in union order.
+	// Only KEPT nodes are eligible for tier-hiding; an added/removed node is always
+	// shown.
 	nodeID := map[string]string{}
 	shown := map[string]bool{}
 	hidden := 0
-	for _, fqn := range unionNodeKeys(baseN, branchN) {
+	for _, fqn := range nodeKeys {
 		st := nodeStateOf(fqn)
-		if st == stKept && opts.MaxTier > 0 && pick(fqn).Tier > opts.MaxTier &&
-			!emitsEffect[fqn] && !changedEndpoint[fqn] {
+		if st == stKept && !keepNode(pick(fqn), opts.MaxTier, emitsEffect, changedEndpoint) {
 			hidden++
 			continue
 		}
-		nodeID[fqn] = ids.get(shortName(fqn))
+		nodeID[fqn] = ids.get(frontier.ShortName(fqn))
 		shown[fqn] = true
 	}
 
-	// Boundary effect nodes, once per label, with their own added/removed/kept
-	// state taken from which side's edges reach them.
+	// Boundary effect nodes, once per label, in canonical edge order, with their diff
+	// state from the precomputed map.
 	type bnode struct {
 		id, label, class string
 		state            diffState
 	}
 	bIDs := map[string]string{}
 	var bnodes []bnode
-	boundaryState := func(to string) diffState {
-		inB, inBr := false, false
-		for k := range baseE {
-			if k.to == to {
-				inB = true
-				break
-			}
-		}
-		for k := range branchE {
-			if k.to == to {
-				inBr = true
-				break
-			}
-		}
-		return stateOf(inB, inBr)
-	}
+	seenBoundary := map[string]bool{}
 	for _, k := range allEdges {
-		if !isBoundary(k.to) || !shown[k.from] {
+		if !isBoundary(k.to) || !shown[k.from] || seenBoundary[k.to] {
 			continue
 		}
-		if _, ok := bIDs[k.to]; ok {
-			continue
-		}
+		seenBoundary[k.to] = true
 		label, class := boundaryShape(k.to)
 		id := ids.get(class + "_" + label)
 		bIDs[k.to] = id
-		bnodes = append(bnodes, bnode{id: id, label: label, class: class, state: boundaryState(k.to)})
+		bnodes = append(bnodes, bnode{id: id, label: label, class: class, state: boundaryState[k.to]})
 	}
 
 	var b strings.Builder
 	b.WriteString("flowchart LR\n")
 	b.WriteString("    %% call-graph diff — base → branch (a view, never a gate)\n")
+	// Provenance caveats: a substrate mismatch (algo/tool) makes precision differences
+	// look like code changes; disclose it so the delta is not read as confidently-wrong.
+	for _, c := range provenanceCaveats(base, branch) {
+		b.WriteString("    %% ⚠ " + comment(c) + "\n")
+	}
 	if hidden > 0 {
 		b.WriteString("    %% " + plural(hidden, "unchanged node") +
-			" above tier " + itoa(opts.MaxTier) + " hidden; changed nodes are always shown\n")
+			" above tier " + strconv.Itoa(opts.MaxTier) + " hidden; changed nodes are always shown\n")
 	}
 	writeLegend(&b)
 
 	// First-party node declarations, in union order.
-	for _, fqn := range unionNodeKeys(baseN, branchN) {
+	for _, fqn := range nodeKeys {
 		id, ok := nodeID[fqn]
 		if !ok {
 			continue
 		}
 		st := nodeStateOf(fqn)
-		label := prefixFor(st) + shortName(fqn)
+		label := prefixFor(st) + mermaidText(frontier.ShortName(fqn))
 		if pick(fqn).Fallible {
 			label += " ⚠"
 		}
-		b.WriteString("    " + id + `["` + label + `"]:::` + nodeClass(st) + "\n")
+		b.WriteString("    " + id + `["` + label + `"]:::` + classFor(st) + "\n")
 	}
 	for _, bn := range bnodes {
 		open, close := boundaryDelims(bn.class)
@@ -215,7 +208,7 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		if bn.state != stKept {
 			cls = classFor(bn.state) // a changed effect node recolors; shape stays
 		}
-		b.WriteString("    " + bn.id + open + `"` + prefixFor(bn.state) + bn.label + `"` + close + ":::" + cls + "\n")
+		b.WriteString("    " + bn.id + open + `"` + prefixFor(bn.state) + mermaidText(bn.label) + `"` + close + ":::" + cls + "\n")
 	}
 
 	// Edges, in union order; collect link indices per state for linkStyle coloring.
@@ -240,11 +233,13 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		if !ok {
 			continue
 		}
-		e := branchE[k]
-		if _, in := branchE[k]; !in {
-			e = baseE[k]
+		eBr, inBr := branchE[k]
+		eBase, inBase := baseE[k]
+		e := eBr
+		if !inBr {
+			e = eBase
 		}
-		st := stateOf(hasKey(baseE, k), hasKey(branchE, k))
+		st := stateOf(inBase, inBr)
 		b.WriteString("    " + diffEdgeLine(fromID, toID, e, st) + "\n")
 		switch st {
 		case stAdded:
@@ -264,23 +259,59 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 	return b.String()
 }
 
-// nodeClass picks the class for a first-party node: a changed node uses its diff
-// class (added/removed); an unchanged node is always the neutral kept grey, so the
-// delta owns the whole color budget and a kept node can never be mistaken for a
-// changed one. Fallibility is still flagged on kept nodes by a ⚠ glyph in the
-// label — a quiet cue that does not compete with the red/green of the diff.
-func nodeClass(s diffState) string {
-	if s != stKept {
-		return classFor(s)
+// provenanceCaveats warns when base and branch were not built on the same substrate,
+// so a reviewer never reads a substrate difference as a code change. groundwork's
+// JSON comparison gates on this (review/provenance.go); the visual view must at least
+// DISCLOSE it — a substrate mismatch silently painted as added/removed edges would be
+// exactly the confidently-wrong delta the prime directive forbids. Empty Algo/Tool on
+// either side (a committed, tool-stripped golden) is treated as "unrecorded", not a
+// mismatch, so a golden-vs-golden diff stays caveat-free and byte-stable.
+func provenanceCaveats(base, branch *Graph) []string {
+	var out []string
+	if base.Algo != "" && branch.Algo != "" && base.Algo != branch.Algo {
+		out = append(out, "algo differs (base "+base.Algo+" vs branch "+branch.Algo+
+			"): edges differing only by analysis precision show as added/removed, not code changes")
 	}
-	return "kept"
+	if base.Tool != "" && branch.Tool != "" && base.Tool != branch.Tool {
+		out = append(out, "producer tool differs (base "+base.Tool+" vs branch "+branch.Tool+
+			"): 'same code → same graph' holds only within one tool version")
+	}
+	return out
+}
+
+// boundaryTargetStates precomputes the diff state of every boundary target in two
+// single passes over the edge maps, so the per-target lookup is O(1) instead of a
+// rescan of both maps per boundary node. Iteration order is irrelevant: it only fills
+// a membership map keyed by the target label.
+func boundaryTargetStates(baseE, branchE map[ekey]Edge) map[string]diffState {
+	inBase, inBranch := map[string]bool{}, map[string]bool{}
+	for k := range baseE {
+		if isBoundary(k.to) {
+			inBase[k.to] = true
+		}
+	}
+	for k := range branchE {
+		if isBoundary(k.to) {
+			inBranch[k.to] = true
+		}
+	}
+	out := make(map[string]diffState, len(inBase)+len(inBranch))
+	for to := range inBase {
+		out[to] = stateOf(true, inBranch[to])
+	}
+	for to := range inBranch {
+		if _, ok := out[to]; !ok {
+			out[to] = stateOf(false, true)
+		}
+	}
+	return out
 }
 
 // diffEdgeLine styles an edge by its delta state: added is a thick arrow, removed a
 // dotted arrow with a "removed" label, kept a plain thin arrow. The arrow SHAPE
 // differs per state so the delta survives with no color (the linkStyle colors are
 // an enhancement, not the only signal). Concurrency/async/via decorations from the
-// underlying edge are preserved on kept and added edges.
+// underlying edge are preserved on kept and added edges via the shared edgeDecoration.
 func diffEdgeLine(from, to string, e Edge, s diffState) string {
 	switch s {
 	case stAdded:
@@ -298,27 +329,6 @@ func diffEdgeLine(from, to string, e Edge, s diffState) string {
 		return from + " --> " + to
 	}
 }
-
-// edgeDecoration is the non-diff annotation an edge carries: go/async for a
-// concurrent or asynchronous hop, and the reclaimer `via` provenance.
-func edgeDecoration(e Edge) string {
-	var text string
-	switch {
-	case e.Concurrent:
-		text = "go"
-	case e.Boundary == "outbound-async":
-		text = "async"
-	}
-	if e.Via != "" {
-		if text != "" {
-			text += "; "
-		}
-		text += "via " + e.Via
-	}
-	return text
-}
-
-func hasKey(m map[ekey]Edge, k ekey) bool { _, ok := m[k]; return ok }
 
 func unionNodeKeys(a, b map[string]Node) []string {
 	seen := map[string]bool{}
@@ -369,7 +379,7 @@ func writeLinkStyle(b *strings.Builder, idx []int, style string) {
 	}
 	parts := make([]string, len(idx))
 	for i, n := range idx {
-		parts[i] = itoa(n)
+		parts[i] = strconv.Itoa(n)
 	}
 	b.WriteString("    linkStyle " + strings.Join(parts, ",") + " " + style + "\n")
 }
@@ -377,17 +387,21 @@ func writeLinkStyle(b *strings.Builder, idx []int, style string) {
 // reserveLegendIDs claims the fixed legend ids so the node allocator can never
 // collide with them.
 func reserveLegendIDs(a *idAlloc) {
-	for _, id := range []string{"lg_kept", "lg_added", "lg_removed"} {
+	for _, id := range legendIDs {
 		a.used[id] = true
 	}
 }
 
+// legendIDs is the single source for the legend node ids: reserveLegendIDs claims
+// them and writeLegend emits them, so the two cannot drift into a collision.
+var legendIDs = []string{"lg_kept", "lg_added", "lg_removed"}
+
 func writeLegend(b *strings.Builder) {
 	b.WriteString("    subgraph legend[\"legend — base → branch\"]\n")
 	b.WriteString("        direction LR\n")
-	b.WriteString("        lg_kept[\"unchanged\"]:::kept\n")
-	b.WriteString("        lg_added[\"＋ added\"]:::added\n")
-	b.WriteString("        lg_removed[\"− removed\"]:::removed\n")
+	b.WriteString("        " + legendIDs[0] + "[\"unchanged\"]:::kept\n")
+	b.WriteString("        " + legendIDs[1] + "[\"＋ added\"]:::added\n")
+	b.WriteString("        " + legendIDs[2] + "[\"− removed\"]:::removed\n")
 	b.WriteString("    end\n")
 }
 

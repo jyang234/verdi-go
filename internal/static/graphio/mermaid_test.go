@@ -77,6 +77,25 @@ func TestMermaidStructure(t *testing.T) {
 	}
 }
 
+// TestMermaidEscapesAngleBrackets pins the fix for HTML-label corruption: a data
+// label containing '<'/'>' (the "<dynamic>" effect marker) must be escaped, or
+// Mermaid's HTML-label mode parses it as a dropped tag and blanks the label — the
+// dynamic-publish disclosure rendering as nothing.
+func TestMermaidEscapesAngleBrackets(t *testing.T) {
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: "example.com/s/n.Emit", Tier: 1}},
+		Edges: []Edge{{From: "example.com/s/n.Emit", To: "boundary:bus PUBLISH <dynamic>", Tier: 1, Boundary: "outbound-async"}},
+	}
+	out := g.Mermaid(MermaidOptions{MaxTier: 2})
+	if strings.Contains(out, "<dynamic>") {
+		t.Errorf("raw <dynamic> would be eaten by Mermaid's HTML labels; must be escaped:\n%s", out)
+	}
+	if !strings.Contains(out, "bus PUBLISH &lt;dynamic&gt;") {
+		t.Errorf("expected escaped label bus PUBLISH &lt;dynamic&gt;:\n%s", out)
+	}
+}
+
 func TestMermaidCollapsesPlumbingByDefault(t *testing.T) {
 	g := sampleGraph()
 
