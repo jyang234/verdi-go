@@ -20,6 +20,20 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
+// Fence wraps a rendered Mermaid diagram in a fenced ```mermaid code block so a
+// committed .md view displays as a rendered diagram in Markdown viewers (GitHub,
+// the docs site, an IDE preview) instead of as a raw text dump. The diagram body
+// is emitted verbatim between the fences; a trailing newline is ensured so the
+// closing fence always sits on its own line. It is the single place the fence
+// convention lives, so every generated .md view — sequence diagrams and the
+// call-graph flowchart alike — fences identically.
+func Fence(diagram string) string {
+	if !strings.HasSuffix(diagram, "\n") {
+		diagram += "\n"
+	}
+	return "```mermaid\n" + diagram + "```\n"
+}
+
 // SystemGraph renders a deduplicated system-context graph (services + the
 // infrastructure they touch) as a Mermaid flowchart. Solid edges were exercised
 // by a captured flow; dashed edges come only from the static contract overlay
@@ -851,3 +865,15 @@ func uniqueID(base string, used map[string]bool) string {
 	used[id] = true
 	return id
 }
+
+// SanitizeID and UniqueID expose this package's Mermaid-id grammar so every Mermaid
+// view in the codebase — these sequence diagrams and the static call-graph flowchart
+// in internal/static/graphio — allocates ids through ONE convention rather than a
+// per-package copy that can silently drift (CLAUDE.md: one source of truth). The
+// grammar: non-alphanumerics collapse to '_', a leading non-letter is prefixed 'L',
+// and collisions get the smallest integer suffix.
+func SanitizeID(name string) string { return sanitize(name) }
+
+// UniqueID returns base, or base with the smallest integer suffix not yet in used,
+// recording the choice. See SanitizeID.
+func UniqueID(base string, used map[string]bool) string { return uniqueID(base, used) }

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -115,7 +116,8 @@ func cmdBoundary(args []string) error {
 }
 
 // cmdGraph prints the non-gated call-graph view, optionally scoped to one entry
-// point with --entry.
+// point with --entry. Default output is canonical JSON; --mermaid renders the same
+// graph as a human-readable flowchart (a view, never gated) for review.
 func cmdGraph(args []string) error {
 	fs := flag.NewFlagSet("graph", flag.ContinueOnError)
 	entry := fs.String("entry", "", `scope to the subgraph reachable from this entry point (e.g. "POST /loan-application")`)
@@ -123,6 +125,11 @@ func cmdGraph(args []string) error {
 	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta" (refines interface-dense dispatch — fewer spurious callees), "cha" (rootless fallback)`)
 	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers (opt-in; adds provenance-tagged edges that close the strict-server seam)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
+	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
+	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
+	diffBase := fs.String("diff", "", "with --mermaid, render the delta from this BASE graph JSON to the analyzed branch (added/removed nodes and edges colored); a view, never a gate")
+	rootAt := fs.String("root", "", `with --mermaid, scope to one entry point at RENDER time (e.g. "POST /loan-application") — unlike --entry this keeps the frontier markers in the per-handler view`)
+	maxNodes := fs.Int("max-nodes", 300, "with --mermaid, cap how many nodes a diagram draws; above the cap it renders an index of entry points to --root at instead of an illegible hairball (0 = uncapped)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -146,6 +153,47 @@ func cmdGraph(args []string) error {
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
 	}
+	if *asMermaid {
+		// The Mermaid flowchart is a deterministic view of the graph, so it carries
+		// no stamp/tool provenance (those gate-adjacent fields ride the JSON only).
+		// Collapse tier-3 plumbing by default; --show-plumbing renders the full graph.
+		maxTier := 2
+		if *showPlumbing {
+			maxTier = 0
+		}
+		opts := graphio.MermaidOptions{MaxTier: maxTier, MaxNodes: *maxNodes}
+		if *rootAt != "" && *diffBase != "" {
+			return fmt.Errorf("graph --root and --diff are mutually exclusive: --root renders one handler's reach, --diff renders a base→branch delta; a rooted diff is not supported")
+		}
+		if *rootAt != "" {
+			// Render-time scoping needs the UNSCOPED graph so the frontier section is
+			// present; --entry would have scoped it at build time and dropped frontier.
+			if *entry != "" {
+				return fmt.Errorf("graph --root and --entry are mutually exclusive: --root scopes at render time over the full graph (keeping frontier markers), --entry scopes the build (dropping them)")
+			}
+			out, ok := g.MermaidRootedAt(*rootAt, opts)
+			if !ok {
+				return fmt.Errorf("graph --root %q: no unique entry point or function matches in this graph (no match, or an ambiguous route prefix)", *rootAt)
+			}
+			_, err = os.Stdout.WriteString(render.Fence(out))
+			return err
+		}
+		if *diffBase != "" {
+			base, err := loadGraphJSON(*diffBase)
+			if err != nil {
+				return fmt.Errorf("--diff base graph: %w", err)
+			}
+			// An empty base is NOT refused: a new service (or one absent from the base
+			// branch) legitimately has an empty base graph, and an all-added diff is the
+			// correct answer. MermaidDiff discloses the empty base in a caveat so the
+			// "everything added" reading is unambiguous (new service vs wrong --diff base).
+			// A truly malformed base is already rejected by loadGraphJSON's strict decode.
+			_, err = os.Stdout.WriteString(render.Fence(graphio.MermaidDiff(base, g, opts)))
+			return err
+		}
+		_, err = os.Stdout.WriteString(render.Fence(g.Mermaid(opts)))
+		return err
+	}
 	// The stamp is caller-supplied, never derived: deriving it (from git HEAD,
 	// a timestamp) would make the graph a function of more than the code and
 	// break byte-identical regeneration. Unstamped output is byte-identical to
@@ -165,6 +213,29 @@ func cmdGraph(args []string) error {
 	}
 	_, err = os.Stdout.Write(b)
 	return err
+}
+
+// loadGraphJSON decodes a committed graph JSON (a `flowmap graph` artifact) into a
+// graphio.Graph for the --diff base side. It decodes STRICTLY (DisallowUnknownFields)
+// so a base produced by a NEWER flowmap — carrying a field this build does not model —
+// is REJECTED rather than silently decoded with that field dropped, which would
+// produce a confidently-wrong delta. (The reverse skew, an older base missing a field,
+// is surfaced by the diff's tool-mismatch caveat when both sides are stamped.) The
+// full trust-boundary validation still lives in groundwork's own loader; this is the
+// view path's forward-compatibility guard.
+func loadGraphJSON(path string) (*graphio.Graph, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	var g graphio.Graph
+	if err := dec.Decode(&g); err != nil {
+		return nil, fmt.Errorf("decode %s (a base from a newer flowmap, or not a graph JSON?): %w", path, err)
+	}
+	return &g, nil
 }
 
 // cmdFrontier classifies a service's static frontier (docs/design/frontier-
@@ -522,7 +593,7 @@ func updateEffectGoldens(dir string, frags []ingestFragment) error {
 		if err := os.WriteFile(stem+".effects.json", b, 0o644); err != nil {
 			return err
 		}
-		if err := os.WriteFile(stem+".flow.md", []byte(render.Mermaid(fr.trace)), 0o644); err != nil {
+		if err := os.WriteFile(stem+".flow.md", []byte(render.Fence(render.Mermaid(fr.trace))), 0o644); err != nil {
 			return err
 		}
 		fmt.Printf("wrote %s.effects.json (+ .flow.md)\n", stem)
@@ -695,7 +766,7 @@ func writeSystemDiagrams(dir string, flows []wholeFlow, rootSvc string) error {
 			md = out
 			stem = filepath.Join(dir, golden.Slug(wf.slug)+"."+golden.Slug(rootSvc)+".system")
 		}
-		if err := os.WriteFile(stem+".flow.md", []byte(md), 0o644); err != nil {
+		if err := os.WriteFile(stem+".flow.md", []byte(render.Fence(md)), 0o644); err != nil {
 			return err
 		}
 		note := ""
@@ -744,7 +815,7 @@ func writeSystemContext(dir string, flows []wholeFlow, contractDirs string, chor
 
 	g := syscontext.Build(traces, statics, syscontext.Options{Choreography: choreography})
 	path := filepath.Join(dir, "system.context.md")
-	if err := os.WriteFile(path, []byte(render.SystemGraph(g)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(render.Fence(render.SystemGraph(g))), 0o644); err != nil {
 		return err
 	}
 	overlay := ""

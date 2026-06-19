@@ -47,7 +47,59 @@ flowmap boundary --check .  # CI runs this: fails if the committed copy is stale
 Commit `.flowmap/boundary-contract.json` alongside the code. A new
 published/consumed event or external dependency changes it and routes to review.
 The non-gated full call graph is available via `flowmap graph .` (add
-`--algo vta` to refine interface-dense dispatch; the default is `rta`).
+`--algo vta` to refine interface-dense dispatch; the default is `rta`). For a
+human-readable view, `flowmap graph . --mermaid` renders it as a Mermaid
+flowchart — typed boundary effects (DB / bus / external) as shaped leaf nodes,
+and the blind spots and frontier markers as explicit terminal nodes so a
+reviewer sees where the analysis stops. Scope it to one handler with
+`--root "POST /loans"`, or color a base→branch delta with
+`--diff base.graph.json`. A whole-service render is illegible, so above
+`--max-nodes` (default 300) it emits an index of entry points to `--root` at
+instead — `--root` is the reviewable unit. Like the JSON graph, the flowchart is
+a view, never a gate.
+
+**Mermaid compatibility.** The flowchart uses a deliberately conservative Mermaid
+dialect — `flowchart`, `subgraph`, `classDef` + `:::` class assignment, the
+`[(…)]` / `{{…}}` / `([…])` node shapes, `==>` / `-.->` edges, and `<br/>` in
+labels — supported by mermaid ≥ 8.8 with HTML labels enabled (the default). That
+covers GitHub's native rendering and GitLab ≥ 13.3; on older self-hosted GitLab,
+upgrade mermaid or browse the `.md` as a build artifact. Data in labels is
+HTML-escaped, both so it renders correctly and as a guard against markup
+injection into a reviewer's rendered view. A test-suite "dialect floor" fails CI
+if a less-portable construct is ever introduced.
+
+**Output stability.** `--mermaid`, `--root`, `--diff`, `--show-plumbing`, and
+`--max-nodes` are the committed CLI surface; treat the rendered Markdown as a
+view (diff-reviewable, never gated), and pin a flowmap version in CI so the diff
+sides share one renderer.
+
+**Tuning the view for your codebase.** The renderer's *logic* is codebase-agnostic
+and hardened against arbitrary input, but a few *defaults* are opinionated toward
+small, HTTP-shaped services and may want revisiting:
+
+- **`--max-nodes 300`** is a legibility guess, not a tuned value. Lower it if your
+  Mermaid host caps nodes more aggressively (some self-hosted GitLab configs do),
+  or raise it (or `0` to disable) for a reference render. Above the cap you get an
+  index of entry points, not a hairball — `--root <entry>` is the reviewable unit
+  on any non-trivial service, so reach for it early.
+- **Tier-3 plumbing is collapsed by default** (telemetry, compute-only closures).
+  `--show-plumbing` shows everything. A node that emits a boundary effect is never
+  collapsed, so effects are never hidden — but if your salience tiers carry
+  meaning the default hides, prefer `--show-plumbing`.
+- **Effect shapes** key off the boundary vocabulary the analyzer emits (`db` →
+  cylinder, `bus` → hexagon); anything else renders as an `external` stadium. That
+  is graceful, not wrong, but a cache/queue/RPC peer will read as "external".
+- **`--root` route matching** is shaped for HTTP routes and bus topics
+  (`POST /loans`, `payment.settled`). For other entry-point conventions it still
+  resolves by exact name or by function FQN — pass the handler's FQN directly if a
+  route-style name does not match.
+- **An empty `--diff` base renders the whole branch as added** (correct for a new
+  service) with a disclosing caveat, rather than refusing — so a first-PR / new-
+  service diff works out of the box.
+
+These are sensible defaults with escape hatches, not invariants; the one thing to
+validate on a genuinely large or generics/reflection-heavy codebase is *legibility*
+(the logic holds, but the aesthetics are tuned to small clean graphs).
 
 ## 3. Write a flow test
 
