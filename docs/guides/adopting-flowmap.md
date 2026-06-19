@@ -73,6 +73,34 @@ if a less-portable construct is ever introduced.
 view (diff-reviewable, never gated), and pin a flowmap version in CI so the diff
 sides share one renderer.
 
+**Tuning the view for your codebase.** The renderer's *logic* is codebase-agnostic
+and hardened against arbitrary input, but a few *defaults* are opinionated toward
+small, HTTP-shaped services and may want revisiting:
+
+- **`--max-nodes 300`** is a legibility guess, not a tuned value. Lower it if your
+  Mermaid host caps nodes more aggressively (some self-hosted GitLab configs do),
+  or raise it (or `0` to disable) for a reference render. Above the cap you get an
+  index of entry points, not a hairball — `--root <entry>` is the reviewable unit
+  on any non-trivial service, so reach for it early.
+- **Tier-3 plumbing is collapsed by default** (telemetry, compute-only closures).
+  `--show-plumbing` shows everything. A node that emits a boundary effect is never
+  collapsed, so effects are never hidden — but if your salience tiers carry
+  meaning the default hides, prefer `--show-plumbing`.
+- **Effect shapes** key off the boundary vocabulary the analyzer emits (`db` →
+  cylinder, `bus` → hexagon); anything else renders as an `external` stadium. That
+  is graceful, not wrong, but a cache/queue/RPC peer will read as "external".
+- **`--root` route matching** is shaped for HTTP routes and bus topics
+  (`POST /loans`, `payment.settled`). For other entry-point conventions it still
+  resolves by exact name or by function FQN — pass the handler's FQN directly if a
+  route-style name does not match.
+- **An empty `--diff` base renders the whole branch as added** (correct for a new
+  service) with a disclosing caveat, rather than refusing — so a first-PR / new-
+  service diff works out of the box.
+
+These are sensible defaults with escape hatches, not invariants; the one thing to
+validate on a genuinely large or generics/reflection-heavy codebase is *legibility*
+(the logic holds, but the aesthetics are tuned to small clean graphs).
+
 ## 3. Write a flow test
 
 Flow tests live in a `flows/` package and use only the public `harness` and
