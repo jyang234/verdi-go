@@ -814,6 +814,16 @@ and is reconciled against the grade the corpus self-describes — it requires
 `--corpus`, and a contradiction fails closed (the candidate caps below
 IMPEACHMENT) rather than laundering a test corpus into a trusted one.
 
+The lens also grades **blind-spot annotations** against the corpus. An annotation
+(`static.annotations`) attaches human/AI context to a blind spot; the lens marks it
+**WITNESSED** when the corpus shows an observed effect severed at the annotation's
+site — the same localization (`Severance.Site`) it uses for candidates — and
+**UNWITNESSED** otherwise. The corpus corroborates the *seam* (a real effect is
+hidden there), never the note's prose (the machine cannot read it), and the
+observed effect is disclosed alongside so a human judges the note against it. Like
+everything in this lens it is disclosure-only: a witnessed annotation is a stronger
+*disclosure*, never a proof and never a gate.
+
 The corpus is a **load-once startup input** (like `--policy`): only the graph is
 staleness-tracked and reloadable, because the graph is the one input CI rewrites
 under a running server (on redeploy), whereas a committed corpus changes only on a

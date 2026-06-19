@@ -589,7 +589,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "impeach",
-			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
+			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. Also grades blind-spot annotations against the corpus: WITNESSED when an observed effect is severed at the annotation's site (the corpus corroborates the SEAM, not the note's prose), UNWITNESSED otherwise. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
@@ -1035,6 +1035,24 @@ func (s *mcpServer) computeImpeach() {
 	}
 	if len(res.Caveats) > 0 {
 		b.WriteString("\n")
+	}
+	// Blind-spot annotations vs the corpus: grade each annotation by whether the
+	// corpus independently witnesses an effect severed at its site. The corpus
+	// witnesses the SEAM, never the note's prose — so a witnessed annotation is a
+	// stronger DISCLOSURE (the gap it explains is behaviorally real), never a proof
+	// and never a gate. Audit-only, like the rest of this lens.
+	if anns := s.ix.Annotations(); len(anns) > 0 {
+		witnessed, unwitnessed := impeach.WitnessAnnotations(res.Candidates, anns)
+		b.WriteString("\nblind-spot annotations vs corpus (the corpus witnesses the SEAM, not the note):\n")
+		for _, aw := range witnessed {
+			fmt.Fprintf(&b, "  ✓ WITNESSED   %s at %s\n      note: %s\n", aw.Annotation.Kind, aw.Annotation.Site, aw.Annotation.Note)
+			for _, e := range aw.Effects {
+				fmt.Fprintf(&b, "      corpus observed an effect severed here (%s): %s [flow %q]\n", e.Verdict, e.Effect, e.Flow)
+			}
+		}
+		for _, a := range unwitnessed {
+			fmt.Fprintf(&b, "  ? UNWITNESSED %s at %s — no corpus effect severed at this site; the note stands but is unverified\n", a.Kind, a.Site)
+		}
 	}
 	// Disclose the load-once contract so corpus freshness is legible, not silent
 	// (the graph alone is staleness-tracked; a committed corpus is a startup input).

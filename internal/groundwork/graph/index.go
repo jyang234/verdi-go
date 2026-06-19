@@ -347,6 +347,9 @@ func (ix *Index) AnnotationsAt(site, kind string) []Annotation {
 	return ix.annot[[2]string{site, kind}]
 }
 
+// Annotations returns the graph's whole annotation manifest (disclosure only).
+func (ix *Index) Annotations() []Annotation { return ix.g.Annotations }
+
 // BlindSpots returns the whole graph-completeness blind-spot manifest.
 func (ix *Index) BlindSpots() []BlindSpot { return ix.g.BlindSpots }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/impeach"
 )
 
 // resultText extracts a tool result's text and whether it is an error result —
@@ -78,6 +79,56 @@ func TestMCPImpeachDisclosesWitnessNeverGates(t *testing.T) {
 	// the source dir, the golden count, and the restart-to-refresh boundary.
 	if !strings.Contains(text, corpusDir) || !strings.Contains(text, "loaded at startup") || !strings.Contains(text, "restart to refresh") {
 		t.Errorf("impeach did not disclose the load-once corpus contract (dir + restart-to-refresh):\n%s", text)
+	}
+}
+
+// TestMCPImpeachWitnessesAnnotation pins Phase 3 end-to-end through the lens: an
+// annotation at a site where the corpus witnesses a severed effect is graded
+// WITNESSED and discloses the observed effect; one at a site with no corpus
+// activity is UNWITNESSED. The corpus corroborates the SEAM, never the note —
+// and never gates (the lens runs at OriginLive).
+func TestMCPImpeachWitnessesAnnotation(t *testing.T) {
+	srv := impeachServer(t)
+	// Find a localized candidate from the SAME audit the lens runs (mirroring
+	// computeImpeach's provenance), so the witnessed site is the real one.
+	prov := impeach.Provenance{TraceIdentity: srv.ix.Stamp(), Capture: srv.capture}
+	r := impeach.Audit(srv.p.Service, srv.ix, srv.corpus, prov)
+	var site, effect string
+	for _, w := range r.Candidates {
+		if w.Severance != nil && w.Severance.Site != "" {
+			site, effect = w.Severance.Site, w.Effect
+			break
+		}
+	}
+	if site == "" {
+		t.Skip("fixture produced no localized candidate to witness against")
+	}
+
+	// Attach an annotation at that site (consumer-side; the producer orphan-check is
+	// covered by the graphio tests). Adding it cannot change the candidates —
+	// annotations are disclosure-only — so the severance site stays the same.
+	g, err := graph.LoadFile(srv.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Annotations = []graph.Annotation{{Site: site, Kind: "ExternalBoundaryCall", Note: "the SDK behind this seam issues the call", By: "agent:claude"}}
+	srv.ix = graph.NewIndex(g)
+	srv.computeImpeach()
+
+	text, _ := resultText(t, srv.call("impeach", toolArgs{}))
+	if !strings.Contains(text, "WITNESSED") || !strings.Contains(text, "the SDK behind this seam issues the call") {
+		t.Errorf("annotation at a witnessed severance site should be graded WITNESSED with its note:\n%s", text)
+	}
+	if !strings.Contains(text, effect) {
+		t.Errorf("witnessed annotation should disclose the observed effect %q:\n%s", effect, text)
+	}
+
+	// An annotation at an unrelated site has no corpus corroboration → UNWITNESSED.
+	g.Annotations = []graph.Annotation{{Site: "example.com/impeachsvc/internal/nope.Ghost", Kind: "reflect", Note: "stray"}}
+	srv.ix = graph.NewIndex(g)
+	srv.computeImpeach()
+	if text2, _ := resultText(t, srv.call("impeach", toolArgs{})); !strings.Contains(text2, "UNWITNESSED") {
+		t.Errorf("annotation with no corpus effect at its site should be UNWITNESSED:\n%s", text2)
 	}
 }
 
