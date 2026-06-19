@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -126,6 +127,7 @@ func cmdGraph(args []string) error {
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
+	diffBase := fs.String("diff", "", "with --mermaid, render the delta from this BASE graph JSON to the analyzed branch (added/removed nodes and edges colored); a view, never a gate")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -157,7 +159,16 @@ func cmdGraph(args []string) error {
 		if *showPlumbing {
 			maxTier = 0
 		}
-		_, err = os.Stdout.WriteString(render.Fence(g.Mermaid(graphio.MermaidOptions{MaxTier: maxTier})))
+		opts := graphio.MermaidOptions{MaxTier: maxTier}
+		if *diffBase != "" {
+			base, err := loadGraphJSON(*diffBase)
+			if err != nil {
+				return fmt.Errorf("--diff base graph: %w", err)
+			}
+			_, err = os.Stdout.WriteString(render.Fence(graphio.MermaidDiff(base, g, opts)))
+			return err
+		}
+		_, err = os.Stdout.WriteString(render.Fence(g.Mermaid(opts)))
 		return err
 	}
 	// The stamp is caller-supplied, never derived: deriving it (from git HEAD,
@@ -179,6 +190,22 @@ func cmdGraph(args []string) error {
 	}
 	_, err = os.Stdout.Write(b)
 	return err
+}
+
+// loadGraphJSON decodes a committed graph JSON (a `flowmap graph` artifact) into a
+// graphio.Graph for the --diff base side. It is a permissive decode of the public
+// fields the flowchart renders (nodes, edges, blind spots, frontier); the strict,
+// trust-boundary validation lives in groundwork's own loader, not on a view path.
+func loadGraphJSON(path string) (*graphio.Graph, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var g graphio.Graph
+	if err := json.Unmarshal(raw, &g); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	return &g, nil
 }
 
 // cmdFrontier classifies a service's static frontier (docs/design/frontier-
