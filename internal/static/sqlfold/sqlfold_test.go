@@ -114,6 +114,49 @@ func TestFoldPromotesWriteUnderBranchedTail(t *testing.T) {
 	}
 }
 
+// Tier A (§19): the conditional SET-list is appended through a closure that
+// captures the builder, forcing it into a memory cell (the register def-use chain
+// breaks). The verb+table prefix is written unconditionally before the closure
+// exists, so the const-prefix fold must still recover UPDATE event_types — and must
+// NOT read the invisible closure-appended tail as part of the statement.
+func TestFoldRecoversPrefixThroughClosureCapturedBuilder(t *testing.T) {
+	s := foldFixture(t)["UpdateViaClosure"]
+	if !s.ok || s.op != "UPDATE" || oneTable(s) != "event_types" {
+		t.Errorf("UpdateViaClosure: want UPDATE event_types (ok), got %+v", s)
+	}
+}
+
+// Tier A soundness guard: when the builder is captured by a closure created BEFORE
+// the constant verb is written, an unseen append could prepend text that changes
+// the leading verb. The verb write does not dominate the escape, so the fold must
+// abstain rather than assert a verb it cannot prove is leading.
+func TestFoldAbstainsWhenEscapePrecedesVerb(t *testing.T) {
+	s := foldFixture(t)["UpdateClosurePrepend"]
+	if s.ok {
+		t.Errorf("UpdateClosurePrepend: escape before the verb must abstain, got %+v", s)
+	}
+}
+
+// Tier A soundness guard (loops): a builder whose terminal sits in a cyclic block
+// with a closure-captured escape cannot use dominance as happens-before — a prior
+// iteration's unseen append can precede a later read. The fold must abstain.
+func TestFoldAbstainsOnCyclicBuilderWithEscape(t *testing.T) {
+	s := foldFixture(t)["LoopAccumulate"]
+	if s.ok {
+		t.Errorf("LoopAccumulate: a cyclic builder with an escape must abstain, got %+v", s)
+	}
+}
+
+// Tier A soundness guard (reassignment): a cell written by two different builders is
+// ambiguous — merging their appends would attribute one builder's verb to the
+// other's terminal. The single-store gate must make the fold abstain.
+func TestFoldAbstainsOnReassignedCell(t *testing.T) {
+	s := foldFixture(t)["ReassignedBuilder"]
+	if s.ok {
+		t.Errorf("ReassignedBuilder: a reassigned builder cell must abstain, got %+v", s)
+	}
+}
+
 // Phase 2: the per-table store's table is a struct field set to one of a finite
 // set of string constants. The fold resolves the whole set and names both targets.
 func TestFoldResolvesFiniteConstantTableSet(t *testing.T) {

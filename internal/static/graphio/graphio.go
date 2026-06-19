@@ -8,6 +8,7 @@ package graphio
 
 import (
 	"fmt"
+	"go/types"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -248,6 +249,14 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		scope = reachableFirstParty(res, root)
 	}
 
+	// The reverse call-graph index, only under --reclaim-sql: the Tier-B/C
+	// re-attribution enumerates a pass-through helper's callers from it. Nil
+	// otherwise, so the default build pays nothing.
+	var callers map[*ssa.Function][]ssa.CallInstruction
+	if o.foldSQL {
+		callers = callerIndex(res)
+	}
+
 	g := &Graph{
 		Entrypoint: entry,
 		Algo:       string(res.Graph.Algo),
@@ -323,7 +332,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
 		for _, e := range n.Out {
-			edges := edgeOf(ext, hints, e, scope, o.foldSQL)
+			edges := edgeOf(ext, hints, e, scope, o.foldSQL, callers)
 			nodeEdges = append(nodeEdges, edges...)
 			// Record a committed effect only when the site yields exactly ONE — the
 			// unambiguous case. A fold-resolved finite-table write fans the site out
@@ -333,7 +342,11 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 			// proof-only effect-order/fault-card derivation (below) cite a target the
 			// execution never wrote. The fan-out still rides g.Edges for the
 			// write-surface budget; it just must not enter the always-effect channel.
-			if entry == "" && e.Site != nil && len(edges) == 1 && committedEffect(edges[0].To) {
+			// edges[0].From == fn excludes a §19-re-attributed effect, whose From is a
+			// CALLER, not the helper node fn being processed: its committed-effect /
+			// always-effect derivation belongs to the caller (where the statement is
+			// built), not to the helper sink, so it must not enter fn's effect channel.
+			if entry == "" && e.Site != nil && len(edges) == 1 && edges[0].From == fn.RelString(nil) && committedEffect(edges[0].To) {
 				directEffects[fn] = append(directEffects[fn], obligations.EffectSite{Label: edges[0].To, Site: e.Site})
 				if labelSites[edges[0].To] == nil {
 					labelSites[edges[0].To] = map[ssa.Instruction]bool{}
@@ -523,7 +536,7 @@ func (e *EntryNotFoundError) Error() string { return "no entry point named " + e
 // edgeOf renders zero or one graph edges for an SSA call edge: a typed boundary
 // edge for publish/HTTP/DB calls, an internal edge for first-party→first-party
 // calls, and nothing for calls into unhinted stdlib/third-party code.
-func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL bool) []Edge {
+func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL bool, callers map[*ssa.Function][]ssa.CallInstruction) []Edge {
 	from := e.Caller.Func.RelString(nil)
 	callee := e.Callee.Func
 	f := ext.Edge(e.Caller.Func, callee, e.Site)
@@ -551,6 +564,16 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	case hints.IsHTTP(callee):
 		return []Edge{{From: from, To: "boundary:" + httpLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsDB(callee):
+		// §19 Tier-B/C: when the sink forwards a bare query PARAMETER, the verb is
+		// invisible here — it lives one call-hop up at each caller — so re-attribute
+		// the effect to the callers (classified where the caller's SQL is recoverable,
+		// else the opaque label re-homed). Sound-or-abstain: it fails closed to the
+		// normal opaque helper edge unless every caller is accounted for.
+		if foldSQL {
+			if redges, ok := passthroughReattribute(ext, e, tier, string(f.Boundary), concurrent, scope, callers); ok {
+				return redges
+			}
+		}
 		labels, via := dbLabel(e.Site, foldSQL)
 		edges := make([]Edge, 0, len(labels))
 		for _, label := range labels {
@@ -562,6 +585,133 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	default:
 		return nil // a call into unhinted stdlib/third-party code; not part of the view
 	}
+}
+
+// callerIndex maps each function to the call instructions that invoke it, over the
+// whole call graph (an over-approximation: it includes every real caller, so
+// enumerating callers from it can never MISS one — the soundness precondition for
+// re-attributing a callee's effect to its callers). Built only under --reclaim-sql.
+func callerIndex(res *analyze.Result) map[*ssa.Function][]ssa.CallInstruction {
+	idx := map[*ssa.Function][]ssa.CallInstruction{}
+	for _, n := range res.Graph.Nodes {
+		for _, e := range n.Out {
+			if e.Site != nil && e.Callee != nil && e.Callee.Func != nil {
+				idx[e.Callee.Func] = append(idx[e.Callee.Func], e.Site)
+			}
+		}
+	}
+	return idx
+}
+
+// passthroughReattribute implements the §19 Tier-B/C reclaimer. When a DB sink's
+// query argument is a bare PARAMETER of the enclosing helper, the helper forwards
+// the statement unmodified, so its verb is invisible at the sink — it lives one
+// call-hop up, at each caller that built the statement. This re-attributes the
+// effect to those callers: for each it recovers the SQL passed (a call-site
+// constant or the const-accumulation fold, which also resolves a finite-constant
+// table set — Tier C) and emits a boundary edge from the CALLER, classified when
+// recoverable, else the sink's opaque method-name label re-homed at the caller. The
+// helper's own (necessarily opaque) sink edge is dropped, since every caller now
+// carries the effect — the effect surface is preserved, never hidden.
+//
+// It returns ok=false (so edgeOf emits the normal opaque helper edge) unless it can
+// soundly account for EVERY caller: each must be an in-scope, statically resolved
+// call whose argument list reaches the parameter slot. A single unaccountable caller
+// (an interface invoke, an out-of-scope caller, a truncated arg list) means
+// re-attribution could hide the helper's effect, so it fails closed — the
+// prime-directive choice (a disclosed opaque effect beats a silently dropped write).
+func passthroughReattribute(ext *features.Extractor, e *cg.Edge, tier int, boundary string, concurrent bool, scope map[*ssa.Function]bool, callers map[*ssa.Function][]ssa.CallInstruction) ([]Edge, bool) {
+	helper := e.Caller.Func
+	sink := e.Site
+	if sink == nil {
+		return nil, false
+	}
+	qargs := features.StringArgs(sink)
+	if len(qargs) == 0 {
+		return nil, false
+	}
+	param, ok := qargs[0].(*ssa.Parameter)
+	if !ok || param.Parent() != helper {
+		return nil, false // the sink's query is not a bare forwarded parameter
+	}
+	paramIdx := -1
+	for i, p := range helper.Params {
+		if p == param {
+			paramIdx = i
+			break
+		}
+	}
+	if paramIdx < 0 {
+		return nil, false
+	}
+	sites := callers[helper]
+	if len(sites) == 0 {
+		return nil, false // nobody to attribute to → keep the opaque helper edge
+	}
+	opaque := sinkMethodName(sink)
+	seen := map[[2]string]int{}
+	var out []Edge
+	// A re-attributed effect is concurrent if EITHER the helper→sink call is
+	// concurrent OR the caller dispatches the helper concurrently (`go helper(...)`).
+	// Inheriting the caller→helper dispatch concurrency is what closes the §19
+	// cone gap: when the leaf helper itself is spawned, the effect now lives at the
+	// caller (upstream of the spawned cone), so checkNoConcurrentReach's cone path
+	// cannot see it — but the edge's own Concurrent flag (its direct-boundary path)
+	// now does. emit OR-s concurrency across duplicate (from,label) edges so a
+	// racy path is never masked by a synchronous one.
+	emit := func(from, label string, conc bool) {
+		key := [2]string{from, label}
+		if i, ok := seen[key]; ok {
+			if conc {
+				out[i].Concurrent = true
+			}
+			return
+		}
+		seen[key] = len(out)
+		out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: conc, Via: viaPassthrough})
+	}
+	keepHelper := false
+	for _, site := range sites {
+		callerFn := site.Parent()
+		if callerFn == nil || !scope[callerFn] {
+			// An out-of-scope caller is not a graph node, so its effect cannot be homed
+			// at it; preserve the surface by keeping the helper's own opaque edge rather
+			// than dropping a reachable effect.
+			keepHelper = true
+			continue
+		}
+		from := callerFn.RelString(nil)
+		// concurrent OR the dispatch's own concurrency, taken from the SAME extractor
+		// the rest of the graph uses (one definition of "concurrent", no drift).
+		conc := concurrent || ext.Edge(callerFn, helper, site).Concurrent
+		// Sound arg mapping needs a statically-resolved DIRECT call whose Args align
+		// with the callee's Params (Args[0] is the receiver for a method, matching
+		// Params[0]) AND whose slot type matches the parameter — the type check rejects
+		// a misaligned generic/thunk arity that would otherwise read an unrelated arg.
+		if site.Common().StaticCallee() == helper {
+			args := site.Common().Args
+			if paramIdx < len(args) && types.Identical(args[paramIdx].Type(), param.Type()) {
+				if labels, _, ok := recoverDBLabelsFromValue(args[paramIdx], true); ok {
+					for _, l := range labels {
+						emit(from, l, conc)
+					}
+					continue
+				}
+			}
+		}
+		// Mapped-but-unrecoverable (dynamic SQL) OR unmappable (invoke / misaligned):
+		// re-home the opaque label at the caller — the effect is preserved and
+		// disclosed as unclassified, just not classified. This is per-caller fail
+		// closed: one such caller does not collapse re-attribution for its siblings.
+		emit(from, opaque, conc)
+	}
+	if keepHelper {
+		emit(helper.RelString(nil), opaque, concurrent)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // committedEffect reports whether a boundary label is a committed external

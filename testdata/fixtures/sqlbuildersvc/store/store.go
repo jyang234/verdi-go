@@ -125,6 +125,78 @@ func (s *Store) ReadDynamicFilter(ctx context.Context, col, val string) error {
 	return err
 }
 
+// UpdateViaClosure builds the conditional SET-list through a closure that captures
+// the builder (the §19 Tier-A shape: (*PostgresStore).UpdateEventType). Capturing
+// the builder forces it into a memory cell, so the register def-use chain breaks —
+// yet the verb+table fragment ("UPDATE event_types SET ") is written unconditionally
+// BEFORE the closure exists, so the const-prefix fold recovers it as a WRITE to
+// event_types and abstains on the invisible (closure-appended) tail.
+func (s *Store) UpdateViaClosure(ctx context.Context, id, name string) error {
+	w := newSQLWriter()
+	w.Write("UPDATE event_types SET ")
+	writeSet := func(col string, val *string) {
+		if val != nil {
+			w.Write(col + " = ").Arg(*val)
+		}
+	}
+	writeSet("name", &name)
+	w.Write(" WHERE id = ").Arg(id)
+	query, args := w.Build()
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// UpdateClosurePrepend is the Tier-A soundness guard: the builder is captured by a
+// closure that is created BEFORE any constant verb is written, so an unseen append
+// (the closure) could prepend text ("WITH … (DELETE …)") that changes the leading
+// verb. The fold must NOT prove "UPDATE" leading here — the verb write does not
+// dominate the escape — so it abstains rather than assert a verb it cannot place.
+func (s *Store) UpdateClosurePrepend(ctx context.Context, id, name string) error {
+	w := newSQLWriter()
+	prepend := func() { w.Write("WITH t AS (SELECT 1) ") }
+	prepend()
+	w.Write("UPDATE event_types SET name = ").Arg(name)
+	w.Write(" WHERE id = ").Arg(id)
+	query, args := w.Build()
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// LoopAccumulate builds a SELECT inside a loop, then (still inside the loop, AFTER
+// Build) creates a closure that captures the builder and appends a mutating tail.
+// Intra-iteration the terminal dominates that escape, so relevantEscapes would drop
+// it and the read direction would fire — but on the back-edge the prior iteration's
+// closure append precedes this iteration's Build, smuggling a "; DELETE …" into what
+// the fold would call a wholly-constant SELECT. The cycle guard (the escape's block
+// is on a loop) must make the fold abstain — a false read is the cardinal sin.
+func (s *Store) LoopAccumulate(ctx context.Context, ids []string) error {
+	w := newSQLWriter()
+	for _, id := range ids {
+		w.Write("SELECT id FROM accounts WHERE id = ").Arg(id)
+		q, args := w.Build()
+		_, _ = s.db.QueryContext(ctx, q, args...)
+		mutate := func() { w.Write("; DELETE FROM accounts") } // escape after Build, in the loop
+		_ = mutate
+	}
+	return nil
+}
+
+// ReassignedBuilder reuses one captured cell for two different builders (two stores
+// to the cell). A later load cannot be soundly attributed to one builder's append
+// set, so merging them would mint a phantom statement (builder A's DELETE verb on
+// builder B's SELECT terminal). The single-store gate must make the fold abstain.
+func (s *Store) ReassignedBuilder(ctx context.Context, id string) error {
+	w := newSQLWriter()
+	keep := func() *sqlWriter { return w } // capture forces w into a memory cell
+	_ = keep
+	w.Write("DELETE FROM accounts WHERE id = ").Arg(id)
+	w = newSQLWriter()
+	w.Write("SELECT id FROM accounts WHERE id = ").Arg(id)
+	q, args := w.Build()
+	_, _ = s.db.QueryContext(ctx, q, args...)
+	return nil
+}
+
 // participantStore is the fleet's per-table store (§18 residue): the table name is
 // a struct field set to one of a finite set of string CONSTANTS at construction,
 // then interpolated into the statement text. The verb is constant (a write); the

@@ -328,6 +328,85 @@ Each phase ships with a determinism test and a `canon/sql` fuzz-corpus extension
 shapes so the fold's prevalence gate (D4, breadth) is met by a *class* of services,
 not one bespoke builder.
 
+### 6.1 The §19 residue extensions — closure-prefix, pass-through, value-set ∘ pass-through
+
+Field report §19 measured the post-phase-2 `event-bus` residue and showed all of it
+is reachable by sound static analysis, in three absence-capable extensions (assert
+only when proven; abstain otherwise — the same discipline as the fold itself). All
+three are **shipped, opt-in under `--reclaim-sql`**:
+
+- **Tier A — const-*prefix* fold through a memory-cell builder. ✅ DONE.** A partial
+  `UPDATE … SET` whose conditional column list is appended through a **closure that
+  captures the builder** forces the builder into an `*ssa.Alloc` cell, so each method
+  call loads the pointer afresh and the register def-use chain breaks — the fold saw
+  only the terminal and abstained. `assembleBuilder` now finds the builder whether it
+  lives in a register or a cell (`gatherBuilderCalls` → `cellCalls`/`chainCalls`), and
+  truncates the leading prefix at the first point the builder ESCAPES to an unseen
+  append (a closure capture, a pass-by-reference): an append is part of the trusted
+  prefix only if it dominates every such escape, so the recovered verb+table are
+  provably leading. The invisible (closure-appended) tail stays unrecovered — which is
+  all the write classification needs. `TestFoldRecoversPrefixThroughClosureCapturedBuilder`
+  pins the recovery; `TestFoldAbstainsWhenEscapePrecedesVerb` pins the soundness guard
+  (an escape created before the verb-write blocks the claim — an unseen prepend could
+  change the leading verb).
+- **Tier B — pass-through-sink re-attribution (interprocedural). ✅ DONE.** A helper
+  that forwards a `query` PARAMETER unmodified to a `database/sql` sink carries no
+  recoverable verb of its own; the statement lives one call-hop up, at each caller.
+  `passthroughReattribute` (`graphio`) detects the bare-parameter sink, enumerates the
+  helper's callers from the reverse call-graph index (`callerIndex` — an
+  over-approximation, so no real caller is missed), recovers each caller's SQL
+  (`recoverDBLabelsFromValue`, the same const/fold disciplines as `dbLabel`), and emits
+  a boundary edge from the **caller**, tagged `sql-passthrough`. The helper's opaque
+  sink edge is dropped, since every caller now carries the effect — so the effect
+  surface is preserved, never hidden. It is per-caller (one helper, different verbs
+  from different callers — `execExpectOne`'s INSERT+UPDATE), and **fails closed**:
+  unless every caller is an in-scope, statically-resolved call whose argument list
+  reaches the parameter slot, it leaves the normal opaque helper edge. An unrecoverable
+  caller (a dynamic verb) re-homes the opaque label at the caller — disclosed, not
+  dropped.
+- **Tier C — finite-value-set ∘ Tier B. ✅ DONE (falls out of B).** The participant
+  store reuses the pass-through helper with a `s.table`-interpolated DELETE. Phase-2's
+  finite-constant table resolution could not see through the helper's `query`
+  parameter; re-attributing at the caller (Tier B) runs `Recover` where the table field
+  IS visible, so the existing resolution composes for free — the caller's edge fans out
+  into `DELETE publishers` + `DELETE subscribers`. No new resolution logic; Tier C is a
+  fixture (`sqlpassthroughsvc`) proving the composition, asserted alongside B in
+  `TestPassthroughReattributesPerCaller`.
+
+The genuinely non-static residue — the *exact column set* in a conditional `UPDATE` —
+is the one thing no ratchet consumes (`io_budget`/`effect_ratchet`/`must_not_reach`
+key on verb + target table, not columns), so it is left unrecovered by design. The new
+`sqlpassthroughsvc` fixture and `TestPassthroughDeterministic` extend the determinism
+and breadth gates to the re-attribution path.
+
+**Concurrency cone — CLOSED.** Moving an effect from the helper sink to its callers
+shifts its *position* in `checkNoConcurrentReach`, which seeds a forward cone from
+each spawn site and collects effects keyed by a FROM in that cone. When the
+pass-through helper *itself* is spawned (`go execByID(...)`), the effect now lives at
+the caller, upstream of the cone — so the cone path cannot see it. The fix is precise,
+not a precision trade: the re-attributed edge inherits the concurrency of the
+*caller→helper dispatch* (a `go` site), taken from the same `features` extractor the
+rest of the graph uses, so the gate's **direct-boundary path** catches it via the
+edge's own `Concurrent` flag. Spawning the *caller* (`go DeleteEventType(...)`, the
+common shape) was already covered by the cone path. Pinned by
+`TestPassthroughInheritsDispatchConcurrency` (verified red without the inheritance).
+
+**Remaining, deliberately deferred (self-honesty, tenet 3):**
+
+- **Effect-order / always-effect channel.** A re-attributed mutation rides `g.Edges`
+  for the write-surface budget but is NOT recorded as a committed `directEffect`: the
+  derivation orders effects by the call *site*'s position *within a function*, and the
+  site lives in the helper while the effect is homed at the caller, so feeding it into
+  the caller's `OrderFacts` would fabricate an ordering. The result is a conservative
+  under-disclosure (a fault card that would fire for a directly-built write does not
+  fire for the pass-through-built one) — never a wrong claim. The `From != fn` guard in
+  `graphio.Build` keeps it out of the channel deliberately.
+
+Per-caller fail-closed is genuine: one unmappable caller (an interface invoke, a
+misaligned arg slot) re-homes only *that* caller's effect as opaque (or, for an
+out-of-scope caller that has no node, keeps the helper's opaque edge), without
+collapsing re-attribution for its recoverable siblings.
+
 ---
 
 ## 7. Determinism risk register

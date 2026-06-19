@@ -1,0 +1,4 @@
+service: sqlpassthroughsvc
+classify:
+  db:
+    - "database/sql"

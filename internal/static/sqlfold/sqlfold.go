@@ -197,11 +197,50 @@ func builderTerminal(call *ssa.Call, idx int) (inst ssa.Value, term *ssa.Call, o
 
 // assembleBuilder walks the builder instance's method calls in program order and
 // concatenates their fragment contributions, stopping at the first call that does
-// not dominate the terminal (a conditional append) or the first hole. The leading
-// run it returns is what every execution path produces before any variability.
+// not dominate the terminal (a conditional append), the first hole, or the first
+// call that does not dominate every point where the builder ESCAPES to an unseen
+// append (a closure capture, a non-receiver argument). The leading run it returns
+// is what every execution path produces before any variability OR any append we
+// cannot see — so its head tokens (the verb, often the table) are sound even when
+// a later fragment is invisible (Tier A: the const-prefix fold).
+//
+// The builder is found whether it lives in an SSA register (the fluent-chain case)
+// or in a memory cell (an `&w`/closure-captured builder, where each method call
+// loads the pointer afresh and the register def-use chain is broken). See
+// gatherBuilderCalls.
 func assembleBuilder(inst ssa.Value, term *ssa.Call, seen map[ssa.Value]bool) ([]frag, bool) {
 	termBlock := term.Block()
-	calls, escaped := instanceCalls(inst)
+	// A builder loaded through a pointer we cannot resolve to a concrete local cell
+	// (a copy/Phi of the address, a struct field) means we cannot enumerate every
+	// load — a sibling load could carry appends we never see — so fail closed rather
+	// than trust a partial view that could launder an unseen mutating tail into a read.
+	if u, ok := inst.(*ssa.UnOp); ok && u.Op == token.MUL && cellOf(inst) == nil {
+		return nil, false
+	}
+	calls, escapes := gatherBuilderCalls(inst)
+	// The dominance reasoning below assumes ACYCLIC flow: it treats "c dominates the
+	// escape" as "c happens before the escape", which a loop back-edge breaks — a
+	// prior iteration's unseen append can precede this iteration's append/terminal.
+	// So when the builder has any escape AND its terminal or an escape sits in a
+	// cycle, fail closed; the const-prefix and read-completeness arguments do not
+	// hold across iterations. (A no-escape looped builder cannot smuggle hidden text,
+	// so it does not need this guard.) Mirrors writerTemplate's entry-block-only rule.
+	if len(escapes) > 0 {
+		if blockInCycle(termBlock) {
+			return nil, false
+		}
+		for _, e := range escapes {
+			if blockInCycle(e.Block()) {
+				return nil, false
+			}
+		}
+	}
+	// Only escapes that can run BEFORE the terminal reads the string matter: an
+	// append after the read cannot change the read value. relevantEscapes drops the
+	// rest, so a builder reused after Build (a harmless later escape) does not block
+	// a clean read of the value Build produced. Sound here because the cycle guard
+	// above has already ruled out a back-edge re-entry.
+	rel := relevantEscapes(escapes, term)
 	sort.Slice(calls, func(i, j int) bool {
 		bi, ii := position(calls[i])
 		bj, ij := position(calls[j])
@@ -218,6 +257,13 @@ func assembleBuilder(inst ssa.Value, term *ssa.Call, seen map[ssa.Value]bool) ([
 		if c.Block() == nil || termBlock == nil || !c.Block().Dominates(termBlock) {
 			return out, false // a conditional append — the prefix ends here
 		}
+		// Soundness of the leading run under an escape: an append is part of the
+		// trustworthy prefix only if it provably executes BEFORE every unseen-append
+		// point (it dominates each). Otherwise an invisible write could precede it on
+		// some path, so it (and everything after) is no longer guaranteed leading.
+		if !dominatesAll(c, rel) {
+			return out, false
+		}
 		cf, cc := contribution(c, seen)
 		out = append(out, cf...)
 		if !cc {
@@ -225,22 +271,101 @@ func assembleBuilder(inst ssa.Value, term *ssa.Call, seen map[ssa.Value]bool) ([
 		}
 	}
 	// `complete` must mean we provably saw EVERY write to this builder: if the
-	// instance escaped to somewhere we cannot model (a helper that might append
-	// more), an unseen write could change the statement, so the read direction —
-	// which trusts a wholly-constant statement — must not fire. Write promotion is
+	// instance escaped to somewhere we cannot model (a helper or closure that might
+	// append more), an unseen write could change the statement, so the read direction
+	// — which trusts a wholly-constant statement — must not fire. Write promotion is
 	// unaffected: an append can never un-write the leading verb, only follow it.
-	return out, !escaped
+	return out, len(rel) == 0
 }
 
-// instanceCalls returns every concrete method call whose receiver is the builder
-// instance — following the fluent chain, since each append method returns the
+// gatherBuilderCalls returns every concrete method call applied to the builder
+// instance, plus every instruction at which the builder escapes to a context that
+// could append text out of view. It handles two SSA shapes:
+//
+//   - register builder (the fluent chain): `inst` is the builder value itself and
+//     every append is a method call on it or on a chain result. chainCalls follows
+//     the def-use chain.
+//   - memory-cell builder: `inst` is a load of an `*ssa.Alloc` cell (the builder's
+//     address was taken — captured by a closure or passed by reference), so each
+//     append loads the pointer afresh and the register chain is broken. cellCalls
+//     gathers the appends across every load of the cell and treats the cell's
+//     non-load uses (a closure capture, a pass-by-reference) as escapes.
+func gatherBuilderCalls(inst ssa.Value) (calls []*ssa.Call, escapes []ssa.Instruction) {
+	if cell := cellOf(inst); cell != nil {
+		return cellCalls(cell)
+	}
+	return chainCalls(inst)
+}
+
+// cellOf returns the local cell a memory-resident builder lives in — the
+// `*ssa.Alloc` behind a `*p` load — or nil when inst is an ordinary register
+// builder. Only a direct load of an Alloc qualifies; anything else stays on the
+// register path.
+func cellOf(inst ssa.Value) *ssa.Alloc {
+	u, ok := inst.(*ssa.UnOp)
+	if !ok || u.Op != token.MUL {
+		return nil
+	}
+	a, _ := u.X.(*ssa.Alloc)
+	return a
+}
+
+// cellCalls gathers the builder appends across every load of a memory cell, and
+// the points where the cell escapes. A load (`*cell`) is a use of the builder, so
+// its method calls are appends (chainCalls). The cell's other referrers are: the
+// single constructor store of the builder pointer (ignored), a closure capture, or
+// a pass-by-reference — each non-load, non-constructor use an escape past which an
+// unseen append could occur.
+//
+// A cell written more than once (or never) is ambiguous: different loads can see
+// different builders, and merging their append sets would mint a phantom statement
+// (e.g. builder A's DELETE verb attributed to builder B's terminal). So a cell
+// without EXACTLY ONE store abstains — empty calls, which fails the fold closed —
+// rather than guess which builder a load belongs to.
+func cellCalls(cell *ssa.Alloc) (calls []*ssa.Call, escapes []ssa.Instruction) {
+	if cell.Referrers() == nil {
+		return nil, nil
+	}
+	stores := 0
+	for _, ref := range *cell.Referrers() {
+		if st, ok := ref.(*ssa.Store); ok && st.Addr == ssa.Value(cell) {
+			stores++
+		}
+	}
+	if stores != 1 {
+		return nil, nil // reassigned or uninitialized cell — too ambiguous to fold
+	}
+	for _, ref := range *cell.Referrers() {
+		switch r := ref.(type) {
+		case *ssa.UnOp:
+			if r.Op == token.MUL {
+				cc, ce := chainCalls(r)
+				calls = append(calls, cc...)
+				escapes = append(escapes, ce...)
+				continue
+			}
+			escapes = append(escapes, r)
+		case *ssa.Store:
+			if r.Addr == ssa.Value(cell) {
+				continue // the single constructor store of the builder pointer
+			}
+			escapes = append(escapes, r) // the cell's address stored elsewhere
+		default:
+			escapes = append(escapes, ref)
+		}
+	}
+	return calls, escapes
+}
+
+// chainCalls returns every concrete method call whose receiver is the builder
+// value root — following the fluent chain, since each append method returns the
 // receiver, so `w.Write(a).Arg(b)` and a later `w.Build()` all act on one builder.
-// escaped reports whether the instance (or a chain result) flows anywhere OTHER
-// than as a method receiver — a non-receiver argument, a store, a return — meaning
-// a write could happen out of view, so the caller cannot claim a complete read.
-func instanceCalls(inst ssa.Value) (calls []*ssa.Call, escaped bool) {
+// Any referrer that uses a chain value as something OTHER than a method receiver
+// (a non-receiver argument, a store, a return, a closure capture) is an escape: a
+// write could happen out of view through it.
+func chainCalls(root ssa.Value) (calls []*ssa.Call, escapes []ssa.Instruction) {
 	seen := map[ssa.Value]bool{}
-	work := []ssa.Value{inst}
+	work := []ssa.Value{root}
 	for len(work) > 0 {
 		v := work[len(work)-1]
 		work = work[:len(work)-1]
@@ -251,7 +376,7 @@ func instanceCalls(inst ssa.Value) (calls []*ssa.Call, escaped bool) {
 		for _, ref := range *v.Referrers() {
 			call, ok := ref.(*ssa.Call)
 			if !ok || call.Common().IsInvoke() || len(call.Common().Args) == 0 || call.Common().Args[0] != v {
-				escaped = true // v is used as something other than a method receiver
+				escapes = append(escapes, ref) // v is used as something other than a method receiver
 				continue
 			}
 			calls = append(calls, call)
@@ -259,12 +384,65 @@ func instanceCalls(inst ssa.Value) (calls []*ssa.Call, escaped bool) {
 			// with types.Identical, not ==: distinct *types.Pointer instances for the
 			// same *T are not pointer-equal, and == would silently drop the rest of a
 			// fluent chain (an UNSOUND under-read — the dynamic tail goes unseen).
-			if types.Identical(call.Type(), inst.Type()) {
+			if types.Identical(call.Type(), root.Type()) {
 				work = append(work, call)
 			}
 		}
 	}
-	return calls, escaped
+	return calls, escapes
+}
+
+// blockInCycle reports whether b lies on a cycle — it can reach itself by
+// following successor edges (a loop back-edge). The dominance-as-happens-before
+// reasoning in assembleBuilder is only valid for blocks NOT on a cycle, so this is
+// the guard that keeps a back-edge from defeating the const-prefix/read soundness
+// argument. Bounded by a visited set.
+func blockInCycle(b *ssa.BasicBlock) bool {
+	if b == nil {
+		return false
+	}
+	seen := map[*ssa.BasicBlock]bool{}
+	stack := append([]*ssa.BasicBlock{}, b.Succs...)
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n == b {
+			return true
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		stack = append(stack, n.Succs...)
+	}
+	return false
+}
+
+// relevantEscapes drops escapes that provably run only AFTER the terminal (the
+// terminal dominates them), since an append there cannot inject text into the
+// value the terminal reads. What remains is every point where an unseen append
+// could execute before the statement is read. Sound only for acyclic flow; the
+// caller (assembleBuilder) fails closed on cycles before relying on it.
+func relevantEscapes(escapes []ssa.Instruction, term *ssa.Call) []ssa.Instruction {
+	var out []ssa.Instruction
+	for _, e := range escapes {
+		if instrDominates(term, e) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// dominatesAll reports whether instruction c dominates every escape point — i.e.,
+// c provably executes before any of them, so no unseen append can precede c.
+func dominatesAll(c ssa.Instruction, escapes []ssa.Instruction) bool {
+	for _, e := range escapes {
+		if !instrDominates(c, e) {
+			return false
+		}
+	}
+	return true
 }
 
 // contribution returns the fragments a single builder-method call appends, and

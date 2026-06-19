@@ -53,21 +53,52 @@ func httpLabel(site ssa.CallInstruction) string {
 func dbLabel(site ssa.CallInstruction, foldSQL bool) (labels []string, via string) {
 	args := features.StringArgs(site)
 	if len(args) >= 1 {
-		if stmt, ok := features.ConstString(args[0]); ok {
-			if op, table := sqlOpTable(stmt); op != "" {
-				return []string{joinOpTable(op, table)}, ""
-			}
-		}
-		if foldSQL {
-			if op, tables, ok := sqlfold.Recover(args[0]); ok {
-				return dbFoldLabels(op, tables), sqlfold.Via
-			}
+		if labels, via, ok := recoverDBLabelsFromValue(args[0], foldSQL); ok {
+			return labels, via
 		}
 	}
+	return []string{sinkMethodName(site)}, ""
+}
+
+// viaPassthrough tags a boundary edge whose DB effect was re-attributed from a
+// pass-through helper to one of its callers (the §19 Tier-B/C reclaimer): the verb
+// lives one call-hop above the database/sql sink, at the caller that built the
+// statement, so the recovered effect is homed there. Distinct from sqlfold.Via (a
+// sink-local fold) so the cross-boundary re-attribution is auditable on its own.
+const viaPassthrough = "sql-passthrough"
+
+// recoverDBLabelsFromValue is the ONE source of truth for turning a SQL statement
+// VALUE into "op table" label(s): a compile-time constant read through the canonical
+// normalizer (canon/sql), else — when useFold is set — the const-accumulation fold
+// (which also fans a finite-constant table set into one label per target, Tier C).
+// via is sqlfold.Via when the fold fired, "" for a plain constant; ok=false when
+// neither proves a verb. Both the sink labeler (dbLabel, q = the sink's statement
+// arg) and the §19 pass-through re-attribution (q = a caller's forwarded arg) derive
+// labels by calling HERE — one helper, so a sink-attributed and a caller-attributed
+// label for the same statement cannot drift (CLAUDE.md "one source of truth").
+func recoverDBLabelsFromValue(q ssa.Value, useFold bool) (labels []string, via string, ok bool) {
+	if stmt, ok := features.ConstString(q); ok {
+		if op, table := sqlOpTable(stmt); op != "" {
+			return []string{joinOpTable(op, table)}, "", true
+		}
+	}
+	if useFold {
+		if op, tables, ok := sqlfold.Recover(q); ok {
+			return dbFoldLabels(op, tables), sqlfold.Via, true
+		}
+	}
+	return nil, "", false
+}
+
+// sinkMethodName is the opaque label dbLabel falls back to for a DB call whose
+// statement it cannot read — the driver method name (ExecContext, QueryContext, …),
+// or "call" when the callee is indirect. Shared so a re-attributed-but-unrecoverable
+// effect re-homes the EXACT label the sink would otherwise have carried.
+func sinkMethodName(site ssa.CallInstruction) string {
 	if c := site.Common().StaticCallee(); c != nil {
-		return []string{c.Name()}, ""
+		return c.Name()
 	}
-	return []string{"call"}, ""
+	return "call"
 }
 
 // dbFoldLabels renders a recovered op + table set into one label per table (a
