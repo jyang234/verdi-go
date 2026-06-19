@@ -36,6 +36,10 @@ type Card struct {
 	Effects     []string          `json:"effects,omitempty"`     // reachable boundary effects
 	Binding     []string          `json:"binding_rules,omitempty"`
 	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"`
+	// Annotations is the human/AI context attached to this card's blind spots
+	// (keyed by Site/Kind). Disclosure only — it explains a blind spot the analysis
+	// cannot close, it never changes a claim on the card.
+	Annotations []graph.Annotation `json:"annotations,omitempty"`
 
 	// CoverOverApprox marks the entrypoint cover as an upper bound: the backward
 	// reach to those entrypoints passed through a HighFanOut dispatch seam, which
@@ -114,6 +118,11 @@ func For(ix *graph.Index, p *policy.Policy, fqn string) (Card, error) {
 		}
 		return c.BlindSpots[i].Site < c.BlindSpots[j].Site
 	})
+	// Collect annotations in the now-sorted blind-spot order, so the card's context
+	// is deterministic and aligned with the spots it explains.
+	for _, s := range c.BlindSpots {
+		c.Annotations = append(c.Annotations, ix.AnnotationsAt(s.Site, s.Kind)...)
+	}
 	return c, nil
 }
 
@@ -222,6 +231,9 @@ func (c Card) Render() string {
 		fmt.Fprintf(&b, "🕳️  Blind spots touching this card's claims (%d)\n", len(c.BlindSpots))
 		for _, s := range c.BlindSpots {
 			fmt.Fprintf(&b, "- %s %s\n", s.Kind, s.Site)
+			for _, a := range graph.MatchAnnotations(c.Annotations, s.Site, s.Kind) {
+				b.WriteString(graph.AnnotationLine(a))
+			}
 		}
 	}
 	return b.String()

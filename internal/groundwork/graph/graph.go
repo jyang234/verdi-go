@@ -97,6 +97,30 @@ type Annotation struct {
 	By   string `json:"by,omitempty"`
 }
 
+// MatchAnnotations returns the annotations in anns whose (Site, Kind) identify the
+// blind spot at (site, kind). It is the single matching rule shared by every card
+// that echoes annotation context (ground, impact), so they cannot drift apart.
+func MatchAnnotations(anns []Annotation, site, kind string) []Annotation {
+	var out []Annotation
+	for _, a := range anns {
+		if a.Site == site && a.Kind == kind {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// AnnotationLine renders one annotation as an indented disclosure line to print
+// beneath the blind spot it explains: the note, and the author when recorded.
+// Shared so the context reads identically on every card.
+func AnnotationLine(a Annotation) string {
+	line := "    🗒 " + a.Note
+	if a.By != "" {
+		line += " — " + a.By
+	}
+	return line + "\n"
+}
+
 // FrontierSection mirrors flowmap's disclosed frontier: the per-site markers, the
 // aggregate count of routes whose severance could not be confirmed (so a consumer
 // cannot misread a 0 attribution loss as a proof of no severance), and the coverage

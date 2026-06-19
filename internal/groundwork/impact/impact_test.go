@@ -11,6 +11,32 @@ import (
 
 const goldensDir = "../../../testdata/groundwork/goldens"
 
+// TestAnnotationEchoedOnTriageCard pins Phase 2 for the triage/reach surface: a
+// blind spot's human/AI context rides the card a responder reads, beneath the spot
+// it explains.
+func TestAnnotationEchoedOnTriageCard(t *testing.T) {
+	g := &graph.Graph{
+		Algo:  "rta",
+		Nodes: []graph.Node{{FQN: "svc.Send"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "ExternalBoundaryCall", Site: "svc.Send", Detail: "hands off to acme"},
+		},
+		Annotations: []graph.Annotation{
+			{Site: "svc.Send", Kind: "ExternalBoundaryCall", Note: "POSTs to acme.example.com", By: "agent:claude"},
+		},
+	}
+	card := ForNodes(graph.NewIndex(g), []string{"svc.Send"})
+	if len(card.Annotations) != 1 {
+		t.Fatalf("annotation not collected onto triage card: %+v", card.Annotations)
+	}
+	out := card.Render()
+	for _, want := range []string{"POSTs to acme.example.com", "agent:claude"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("triage card missing %q:\n%s", want, out)
+		}
+	}
+}
+
 const (
 	hGetUser    = "(*example.com/layeredsvc/internal/handler.Server).GetUser"
 	sSelectUser = "(*example.com/layeredsvc/internal/store.Store).SelectUser"

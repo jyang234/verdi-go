@@ -22,6 +22,41 @@ func index(t *testing.T, name string) *graph.Index {
 	return graph.NewIndex(g)
 }
 
+// TestAnnotationEchoedOnCard pins Phase 2: the human/AI context attached to a
+// blind spot reaches the ground card an agent reads before editing — the note and
+// its author render beneath the blind spot they explain.
+func TestAnnotationEchoedOnCard(t *testing.T) {
+	g := &graph.Graph{
+		Algo:  "rta",
+		Nodes: []graph.Node{{FQN: "svc.Send"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "ExternalBoundaryCall", Site: "svc.Send", Detail: "hands off to acme"},
+		},
+		Annotations: []graph.Annotation{
+			{Site: "svc.Send", Kind: "ExternalBoundaryCall", Note: "issues an outbound HTTPS POST to acme", By: "dev@x"},
+		},
+	}
+	card, err := For(graph.NewIndex(g), nil, "svc.Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Annotations) != 1 {
+		t.Fatalf("annotation not collected onto card: %+v", card.Annotations)
+	}
+	out := card.Render()
+	for _, want := range []string{"ExternalBoundaryCall svc.Send", "issues an outbound HTTPS POST to acme", "dev@x"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ground card missing %q:\n%s", want, out)
+		}
+	}
+	// An annotation whose (site, kind) matches no blind spot on the card is not
+	// echoed — context only ever appears beneath the spot it explains.
+	g.Annotations = []graph.Annotation{{Site: "svc.Other", Kind: "reflect", Note: "stray", By: "x"}}
+	if other, _ := For(graph.NewIndex(g), nil, "svc.Send"); strings.Contains(other.Render(), "stray") {
+		t.Error("an annotation for an unrelated site must not appear on this card")
+	}
+}
+
 // GX-5 landed criterion: the binding-rules section names exactly the rules
 // that demonstrably fire on the function — cross-checked by seeding a
 // violation at the function and asserting the named rule catches it.

@@ -25,11 +25,12 @@ import (
 // Card is the triage evidence for one suspect set. Every field is sorted and
 // derived from the graph alone, so identical inputs render identical cards.
 type Card struct {
-	Suspects    []string          `json:"suspects"`
-	Entrypoints []string          `json:"entrypoints,omitempty"` // implicated routes: entrypoint cover of the suspects
-	Callers     []string          `json:"callers,omitempty"`     // reverse reach (who can be affected upstream)
-	Effects     []string          `json:"effects,omitempty"`     // boundary effects reachable from the suspects
-	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"` // gaps on any traversed path — where the card's claims stop being sound
+	Suspects    []string           `json:"suspects"`
+	Entrypoints []string           `json:"entrypoints,omitempty"` // implicated routes: entrypoint cover of the suspects
+	Callers     []string           `json:"callers,omitempty"`     // reverse reach (who can be affected upstream)
+	Effects     []string           `json:"effects,omitempty"`     // boundary effects reachable from the suspects
+	BlindSpots  []graph.BlindSpot  `json:"blind_spots,omitempty"` // gaps on any traversed path — where the card's claims stop being sound
+	Annotations []graph.Annotation `json:"annotations,omitempty"` // human/AI context on those blind spots (disclosure only)
 
 	// CoverOverApprox marks the implicated-entrypoint set as an upper bound: the
 	// reverse reach passed through a HighFanOut dispatch seam, which fans every
@@ -159,6 +160,12 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		}
 		return blind[i].Site < blind[j].Site
 	})
+	// Annotation context for those blind spots, collected in the sorted order so the
+	// card is deterministic and the context aligns with the spots it explains.
+	var annot []graph.Annotation
+	for _, s := range blind {
+		annot = append(annot, ix.AnnotationsAt(s.Site, s.Kind)...)
+	}
 
 	return Card{
 		Suspects:    suspects,
@@ -166,6 +173,7 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		Callers:     callers,
 		Effects:     setutil.SortedKeys(effects),
 		BlindSpots:  blind,
+		Annotations: annot,
 		// The implicated-entrypoint count is an upper bound iff the reverse reach
 		// to those entrypoints fanned out through a HighFanOut dispatch seam.
 		CoverOverApprox: ix.CrossesHighFanOut(callers),

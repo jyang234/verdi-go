@@ -248,6 +248,9 @@ func (c Card) Render() string {
 				fmt.Fprintf(&b, " — %s", s.Detail)
 			}
 			b.WriteString("\n")
+			for _, a := range graph.MatchAnnotations(c.Annotations, s.Site, s.Kind) {
+				b.WriteString(graph.AnnotationLine(a))
+			}
 		}
 		b.WriteString("\n")
 	}

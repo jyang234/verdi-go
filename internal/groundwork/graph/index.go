@@ -27,7 +27,8 @@ type Index struct {
 	callers map[string][]string // sorted, deduped first-party callers, by callee FQN
 	effOf   map[string][]Edge   // boundary edges, keyed by the first-party FQN that makes them
 	blind   map[string][]BlindSpot
-	sources []string // caller-less nodes, sorted; a pure function of the graph, computed once
+	annot   map[[2]string][]Annotation // human/AI context, keyed by (Site, Kind)
+	sources []string                   // caller-less nodes, sorted; a pure function of the graph, computed once
 }
 
 // NewIndex builds an Index over g. The graph is retained by reference; callers
@@ -38,6 +39,7 @@ func NewIndex(g *Graph) *Index {
 		nodes: make(map[string]Node, len(g.Nodes)),
 		effOf: make(map[string][]Edge),
 		blind: make(map[string][]BlindSpot),
+		annot: make(map[[2]string][]Annotation),
 	}
 	for _, n := range g.Nodes {
 		ix.nodes[n.FQN] = n
@@ -64,6 +66,10 @@ func NewIndex(g *Graph) *Index {
 
 	for _, b := range g.BlindSpots {
 		ix.blind[b.Site] = append(ix.blind[b.Site], b)
+	}
+	for _, a := range g.Annotations {
+		key := [2]string{a.Site, a.Kind}
+		ix.annot[key] = append(ix.annot[key], a)
 	}
 
 	// Sources (caller-less nodes) are a pure function of the now-frozen adjacency,
@@ -333,6 +339,13 @@ func (ix *Index) CrossesHighFanOut(nodes []string) bool {
 // BlindSpotsAt returns the blind spots recorded at a site (an FQN or a package
 // path).
 func (ix *Index) BlindSpotsAt(site string) []BlindSpot { return ix.blind[site] }
+
+// AnnotationsAt returns the human/AI annotations recorded for the blind spot at
+// (site, kind). Disclosure only: context a card echoes for a reader, never an
+// input to any verdict, count, or reachability decision.
+func (ix *Index) AnnotationsAt(site, kind string) []Annotation {
+	return ix.annot[[2]string{site, kind}]
+}
 
 // BlindSpots returns the whole graph-completeness blind-spot manifest.
 func (ix *Index) BlindSpots() []BlindSpot { return ix.g.BlindSpots }
