@@ -379,21 +379,20 @@ key on verb + target table, not columns), so it is left unrecovered by design. T
 `sqlpassthroughsvc` fixture and `TestPassthroughDeterministic` extend the determinism
 and breadth gates to the re-attribution path.
 
-**Known blind spots of Tier B re-attribution (self-honesty, tenet 3).** Moving an
-effect from the helper sink to its callers is the right call for the write-surface
-budget, but it shifts the effect's *position* in two graph consumers, so two
-deliberate, disclosed gaps remain rather than being papered over:
+**Concurrency cone — CLOSED.** Moving an effect from the helper sink to its callers
+shifts its *position* in `checkNoConcurrentReach`, which seeds a forward cone from
+each spawn site and collects effects keyed by a FROM in that cone. When the
+pass-through helper *itself* is spawned (`go execByID(...)`), the effect now lives at
+the caller, upstream of the cone — so the cone path cannot see it. The fix is precise,
+not a precision trade: the re-attributed edge inherits the concurrency of the
+*caller→helper dispatch* (a `go` site), taken from the same `features` extractor the
+rest of the graph uses, so the gate's **direct-boundary path** catches it via the
+edge's own `Concurrent` flag. Spawning the *caller* (`go DeleteEventType(...)`, the
+common shape) was already covered by the cone path. Pinned by
+`TestPassthroughInheritsDispatchConcurrency` (verified red without the inheritance).
 
-- **Concurrency cone.** `checkNoConcurrentReach` seeds a forward cone from each
-  `go`/`defer` spawn site and collects effects keyed by a FROM inside that cone. When
-  the pass-through helper *itself* is spawned (`go execByID(...)`), the cone is the
-  helper's forward reach, which no longer contains the caller where the effect now
-  lives — so a concurrent DB write can go unseen. Spawning the *caller*
-  (`go DeleteEventType(...)`, the common shape) is unaffected, because the caller is
-  the seed and is in the cone. Closing this fully would either trade away Tier B's
-  per-caller precision (re-home all verbs at the helper) or thread a "forwarded-origin"
-  edge flag through `fitness` so the budget skips it while reachability/concurrency
-  keep it — deferred as a larger change; disclosed here meanwhile.
+**Remaining, deliberately deferred (self-honesty, tenet 3):**
+
 - **Effect-order / always-effect channel.** A re-attributed mutation rides `g.Edges`
   for the write-surface budget but is NOT recorded as a committed `directEffect`: the
   derivation orders effects by the call *site*'s position *within a function*, and the

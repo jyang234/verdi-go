@@ -127,6 +127,18 @@ func (s *Store) IndirectCaller(ctx context.Context, id string, alt bool) error {
 	return fn(ctx, s.db, query, args, "indirect")
 }
 
+// SpawnDirect dispatches the pass-through helper ITSELF in a goroutine. The effect
+// is re-attributed to this caller (upstream of the spawned helper's forward cone), so
+// checkNoConcurrentReach's cone path cannot see it — the re-attributed edge must
+// therefore carry the dispatch's concurrency on its own Concurrent flag (the §19
+// cone gap, closed). Fire-and-forget, like a real background write.
+func (s *Store) SpawnDirect(ctx context.Context, id string) {
+	w := newSQLWriter()
+	w.Write("DELETE FROM event_types WHERE id = ").Arg(id)
+	query, args := w.Build()
+	go execByID(ctx, s.db, query, args, "spawn")
+}
+
 // participantStore is the per-table store: the table name is a struct field set to
 // one of a finite set of string CONSTANTS at construction. Its DeleteParticipant
 // routes through the SAME pass-through helper — so naming the table needs the

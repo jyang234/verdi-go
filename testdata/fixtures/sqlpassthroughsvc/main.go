@@ -30,6 +30,9 @@ func main() {
 	http.HandleFunc("DELETE /eventTypesIndirect", func(w http.ResponseWriter, r *http.Request) {
 		_ = s.IndirectCaller(ctx, r.URL.Query().Get("id"), r.URL.Query().Get("alt") == "1")
 	})
+	http.HandleFunc("POST /spawnDelete", func(w http.ResponseWriter, r *http.Request) {
+		s.SpawnDirect(ctx, r.URL.Query().Get("id"))
+	})
 
 	pubs := store.NewPublisherStore(nil)
 	subs := store.NewSubscriberStore(nil)

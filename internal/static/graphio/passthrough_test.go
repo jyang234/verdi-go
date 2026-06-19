@@ -156,6 +156,33 @@ func TestPassthroughPerCallerFailClosed(t *testing.T) {
 	}
 }
 
+// §19 concurrency-cone gap, closed: when the pass-through helper itself is dispatched
+// with `go helper(...)`, the re-attributed effect lives at the caller (upstream of the
+// spawned cone), so checkNoConcurrentReach's cone path cannot see it. The edge must
+// therefore carry the dispatch's concurrency on its own Concurrent flag (the gate's
+// direct-boundary path), so a concurrent DB write is never a silent false-clean.
+func TestPassthroughInheritsDispatchConcurrency(t *testing.T) {
+	g, err := graphio.Build(passthroughFixture(t), "", graphio.WithSQLFold())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range g.Edges {
+		if contains(e.From, "SpawnDirect") && e.To == "boundary:db DELETE event_types" {
+			found = true
+			if !e.Concurrent {
+				t.Errorf("a `go helper(...)` re-attributed write must be marked Concurrent; got %+v", e)
+			}
+			if e.Via != "sql-passthrough" {
+				t.Errorf("want via sql-passthrough; got %q", e.Via)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("SpawnDirect -> db DELETE event_types edge not found")
+	}
+}
+
 // Determinism: the re-attributed build is a pure function of the SSA — byte-identical
 // across repeated builds (CLAUDE.md determinism-test rule for a new label path).
 func TestPassthroughDeterministic(t *testing.T) {

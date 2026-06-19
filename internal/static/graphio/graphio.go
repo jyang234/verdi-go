@@ -570,7 +570,7 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		// else the opaque label re-homed). Sound-or-abstain: it fails closed to the
 		// normal opaque helper edge unless every caller is accounted for.
 		if foldSQL {
-			if redges, ok := passthroughReattribute(e, tier, string(f.Boundary), concurrent, scope, callers); ok {
+			if redges, ok := passthroughReattribute(ext, e, tier, string(f.Boundary), concurrent, scope, callers); ok {
 				return redges
 			}
 		}
@@ -620,7 +620,7 @@ func callerIndex(res *analyze.Result) map[*ssa.Function][]ssa.CallInstruction {
 // (an interface invoke, an out-of-scope caller, a truncated arg list) means
 // re-attribution could hide the helper's effect, so it fails closed — the
 // prime-directive choice (a disclosed opaque effect beats a silently dropped write).
-func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bool, scope map[*ssa.Function]bool, callers map[*ssa.Function][]ssa.CallInstruction) ([]Edge, bool) {
+func passthroughReattribute(ext *features.Extractor, e *cg.Edge, tier int, boundary string, concurrent bool, scope map[*ssa.Function]bool, callers map[*ssa.Function][]ssa.CallInstruction) ([]Edge, bool) {
 	helper := e.Caller.Func
 	sink := e.Site
 	if sink == nil {
@@ -649,21 +649,26 @@ func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bo
 		return nil, false // nobody to attribute to → keep the opaque helper edge
 	}
 	opaque := sinkMethodName(sink)
-	seen := map[[2]string]bool{}
+	seen := map[[2]string]int{}
 	var out []Edge
-	// Carry the sink's concurrency onto every re-attributed edge so a concurrency
-	// check cannot weaken just because the effect moved to the caller. (Known blind
-	// spot: a pass-through helper itself dispatched with `go helper(...)` seeds a
-	// forward cone that no longer includes the caller where the effect now lives, so
-	// checkNoConcurrentReach can miss it. Spawning the CALLER — the common shape — is
-	// unaffected. Disclosed in docs/design/sql-constfold-reclaim-plan.md §6.1.)
-	emit := func(from, label string) {
+	// A re-attributed effect is concurrent if EITHER the helper→sink call is
+	// concurrent OR the caller dispatches the helper concurrently (`go helper(...)`).
+	// Inheriting the caller→helper dispatch concurrency is what closes the §19
+	// cone gap: when the leaf helper itself is spawned, the effect now lives at the
+	// caller (upstream of the spawned cone), so checkNoConcurrentReach's cone path
+	// cannot see it — but the edge's own Concurrent flag (its direct-boundary path)
+	// now does. emit OR-s concurrency across duplicate (from,label) edges so a
+	// racy path is never masked by a synchronous one.
+	emit := func(from, label string, conc bool) {
 		key := [2]string{from, label}
-		if seen[key] {
+		if i, ok := seen[key]; ok {
+			if conc {
+				out[i].Concurrent = true
+			}
 			return
 		}
-		seen[key] = true
-		out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: concurrent, Via: viaPassthrough})
+		seen[key] = len(out)
+		out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: conc, Via: viaPassthrough})
 	}
 	keepHelper := false
 	for _, site := range sites {
@@ -676,6 +681,9 @@ func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bo
 			continue
 		}
 		from := callerFn.RelString(nil)
+		// concurrent OR the dispatch's own concurrency, taken from the SAME extractor
+		// the rest of the graph uses (one definition of "concurrent", no drift).
+		conc := concurrent || ext.Edge(callerFn, helper, site).Concurrent
 		// Sound arg mapping needs a statically-resolved DIRECT call whose Args align
 		// with the callee's Params (Args[0] is the receiver for a method, matching
 		// Params[0]) AND whose slot type matches the parameter — the type check rejects
@@ -685,7 +693,7 @@ func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bo
 			if paramIdx < len(args) && types.Identical(args[paramIdx].Type(), param.Type()) {
 				if labels, _, ok := recoverDBLabelsFromValue(args[paramIdx], true); ok {
 					for _, l := range labels {
-						emit(from, l)
+						emit(from, l, conc)
 					}
 					continue
 				}
@@ -695,10 +703,10 @@ func passthroughReattribute(e *cg.Edge, tier int, boundary string, concurrent bo
 		// re-home the opaque label at the caller — the effect is preserved and
 		// disclosed as unclassified, just not classified. This is per-caller fail
 		// closed: one such caller does not collapse re-attribution for its siblings.
-		emit(from, opaque)
+		emit(from, opaque, conc)
 	}
 	if keepHelper {
-		emit(helper.RelString(nil), opaque)
+		emit(helper.RelString(nil), opaque, concurrent)
 	}
 	if len(out) == 0 {
 		return nil, false
