@@ -183,9 +183,11 @@ func cmdGraph(args []string) error {
 			if err != nil {
 				return fmt.Errorf("--diff base graph: %w", err)
 			}
-			if len(base.Nodes) == 0 && len(base.Edges) == 0 {
-				return fmt.Errorf("--diff base graph %s decoded to an empty graph (no nodes or edges) — wrong file, or a non-graph JSON? refusing to render an all-added diff", *diffBase)
-			}
+			// An empty base is NOT refused: a new service (or one absent from the base
+			// branch) legitimately has an empty base graph, and an all-added diff is the
+			// correct answer. MermaidDiff discloses the empty base in a caveat so the
+			// "everything added" reading is unambiguous (new service vs wrong --diff base).
+			// A truly malformed base is already rejected by loadGraphJSON's strict decode.
 			_, err = os.Stdout.WriteString(render.Fence(graphio.MermaidDiff(base, g, opts)))
 			return err
 		}

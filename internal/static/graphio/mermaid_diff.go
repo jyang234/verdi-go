@@ -276,6 +276,12 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 // mismatch, so a golden-vs-golden diff stays caveat-free and byte-stable.
 func provenanceCaveats(base, branch *Graph) []string {
 	var out []string
+	// An empty base renders the whole branch as added — correct for a NEW service, but
+	// also what a wrong --diff base would produce. Disclose it so the reading is
+	// unambiguous rather than refusing the legitimate new-service case.
+	if len(base.Nodes) == 0 && len(base.Edges) == 0 {
+		out = append(out, "base graph is empty — the whole branch shows as added (a new service, or a wrong --diff base?)")
+	}
 	if base.Algo != "" && branch.Algo != "" && base.Algo != branch.Algo {
 		out = append(out, "algo differs (base "+base.Algo+" vs branch "+branch.Algo+
 			"): edges differing only by analysis precision show as added/removed, not code changes")

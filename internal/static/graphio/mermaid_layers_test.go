@@ -161,3 +161,21 @@ func TestLayerRouteMatchesAdversarial(t *testing.T) {
 		}
 	}
 }
+
+// TestLayerEmptyBaseDiff pins the generalizability fix: a NEW service has an empty
+// base graph, and the all-added diff is correct — it must render (not refuse) and
+// disclose the empty base so the "everything added" reading is unambiguous.
+func TestLayerEmptyBaseDiff(t *testing.T) {
+	branch := &Graph{Algo: "rta",
+		Nodes: []Node{{FQN: "newsvc.Handler", Tier: 1}, {FQN: "newsvc.store", Tier: 2}},
+		Edges: []Edge{{From: "newsvc.Handler", To: "newsvc.store", Tier: 2}},
+	}
+	out := MermaidDiff(&Graph{Algo: "rta"}, branch, MermaidOptions{MaxTier: 2})
+	assertValidMermaid(t, out)
+	if !strings.Contains(out, "base graph is empty") {
+		t.Errorf("empty-base diff must disclose the empty base:\n%s", out)
+	}
+	if !strings.Contains(out, ":::added") {
+		t.Errorf("empty-base diff must show the branch as added:\n%s", out)
+	}
+}
