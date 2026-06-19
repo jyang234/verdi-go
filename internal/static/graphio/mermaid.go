@@ -191,11 +191,16 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// first-party edge draws only when both endpoints are shown.
 	for _, e := range g.Edges {
 		if isBoundary(e.To) {
-			to, ok := bIDs[e.To]
-			if !ok {
+			// Both endpoints must be drawn: the source must be a SHOWN first-party node
+			// (a boundary target can be reached from an unshown/dangling source when
+			// another shown node also reaches it), else the edge would have an empty
+			// source id — invalid Mermaid.
+			from, okF := nodeID[e.From]
+			to, okT := bIDs[e.To]
+			if !okF || !okT {
 				continue
 			}
-			b.WriteString("    " + edgeLine(nodeID[e.From], to, e) + "\n")
+			b.WriteString("    " + edgeLine(from, to, e) + "\n")
 			continue
 		}
 		from, okF := nodeID[e.From]
@@ -282,24 +287,29 @@ const classDefs = "    classDef fallible stroke:#c44,stroke-width:2px\n" +
 	"    classDef external fill:#fef6e8,stroke:#c93\n" +
 	"    classDef blind fill:#fde,stroke:#c33,stroke-dasharray:3 3\n"
 
-// mermaidText escapes DATA-derived label text for Mermaid's HTML-label mode. Mermaid
-// renders the text between a node's quotes as HTML — we rely on that for the literal
-// <br/> the disclosure labels inject — so a '<' or '>' coming from the data (the
-// "<dynamic>" effect marker, a generic type parameter) would be parsed as a (dropped)
-// HTML tag, silently blanking part of the label: a confidently-wrong, silent render of
-// exactly the dynamic-publish blind spot the honesty channel exists to surface. Escape
-// the five HTML-significant characters so data stays literal while our own <br/> stays
-// markup. Applied to data text only, never to the markup we compose around it.
+// mermaidText neutralizes DATA-derived label text so it cannot corrupt the diagram.
+// Two hazards: (1) Mermaid renders the text between a node's quotes as HTML — we rely
+// on that for the literal <br/> the disclosure labels inject — so a '<'/'>'/'"' from
+// the data (the "<dynamic>" effect marker, a generic type parameter, an embedded
+// quote) would be parsed as markup and silently dropped or break the quoting; the five
+// HTML-significant characters are escaped so data stays literal while our own <br/>
+// stays markup. (2) A raw newline/carriage-return in the data (a multi-line SQL label,
+// a crafted FQN) would split the single-line node declaration into two, producing
+// invalid Mermaid — so control characters are folded to a space. Applied to data text
+// only, never to the markup we compose around it.
 func mermaidText(s string) string {
-	return htmlEscaper.Replace(s)
+	return labelEscaper.Replace(s)
 }
 
-var htmlEscaper = strings.NewReplacer(
+var labelEscaper = strings.NewReplacer(
 	"&", "&amp;",
 	"<", "&lt;",
 	">", "&gt;",
 	`"`, "&quot;",
 	"'", "&#39;",
+	"\n", " ",
+	"\r", " ",
+	"\t", " ",
 )
 
 // collectEmitsEffect returns the set of first-party FQNs that emit at least one

@@ -39,16 +39,23 @@ func validateMermaid(diagram string) error {
 
 	for i, ln := range lines {
 		trimmed := strings.TrimSpace(ln)
+		// %% comment text is free-form (it carries the raw scope/algo); Mermaid ignores
+		// it, so it is never validated for labels or class refs.
+		if strings.HasPrefix(trimmed, "%%") {
+			continue
+		}
 		if strings.HasPrefix(trimmed, "classDef ") {
 			if f := strings.Fields(trimmed); len(f) >= 2 {
 				defined[f[1]] = true
 			}
 		}
-		for _, m := range classRef.FindAllStringSubmatch(ln, -1) {
+		// Scan for :::class refs OUTSIDE the quoted label — a literal ":::" inside a
+		// quoted label is harmless display text (the quotes are escaped), not a class
+		// assignment, so counting it would be a false positive.
+		for _, m := range classRef.FindAllStringSubmatch(stripQuotedLabel(ln), -1) {
 			refs = append(refs, ref{m[1], ln})
 		}
-		// %% comment text is free-form; only validate quoted-label lines.
-		if strings.HasPrefix(trimmed, "%%") || !strings.Contains(ln, `"`) {
+		if !strings.Contains(ln, `"`) {
 			continue
 		}
 		if c := strings.Count(ln, `"`); c != 2 {
@@ -81,7 +88,12 @@ func validateMermaid(diagram string) error {
 			trimmed == "direction LR",
 			trimmed == "end":
 		case strings.Contains(ln, "-->"), strings.Contains(ln, "==>"), strings.Contains(ln, ".->"):
-			// an edge (optionally with an inline node declaration / label)
+			// an edge (optionally with an inline node declaration / label). The source
+			// id must be present — a line starting with the arrow is an edge with no
+			// source node (empty from-id), which is invalid Mermaid.
+			if c := trimmed[0]; !isIDChar(c) {
+				return fmt.Errorf("line %d is an edge with no source node: %q", i+1, ln)
+			}
 		case strings.Contains(ln, `"`):
 			// a node declaration; its label was checked above
 		default:
@@ -95,6 +107,21 @@ func validateMermaid(diagram string) error {
 		}
 	}
 	return nil
+}
+
+// stripQuotedLabel removes a line's quoted label ("…") so a literal ":::" inside it is
+// not mistaken for a class assignment. Node/edge lines carry exactly one quoted label.
+func stripQuotedLabel(ln string) string {
+	lo := strings.IndexByte(ln, '"')
+	hi := strings.LastIndexByte(ln, '"')
+	if lo >= 0 && hi > lo {
+		return ln[:lo] + ln[hi+1:]
+	}
+	return ln
+}
+
+func isIDChar(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
 }
 
 func assertValidMermaid(t *testing.T, diagram string) {
