@@ -94,6 +94,16 @@ func validateMermaid(diagram string) error {
 			if c := trimmed[0]; !isIDChar(c) {
 				return fmt.Errorf("line %d is an edge with no source node: %q", i+1, ln)
 			}
+			// The edge LABEL (`|…|` or `-. … .->`) is policed too — a stray '|' from the
+			// data closes the label early, and a raw <,> is dropped by HTML labels. Pipes
+			// are counted on the label-stripped line so a '|' inside a node label is ignored.
+			s := stripQuotedLabel(ln)
+			if strings.Count(s, "|")%2 != 0 {
+				return fmt.Errorf("line %d has an unbalanced | in its edge label (a | leaked from the data): %q", i+1, ln)
+			}
+			if lbl, ok := edgeLabelOf(s); ok && strings.ContainsAny(lbl, "<>") {
+				return fmt.Errorf("line %d edge label %q carries a raw <,>: %q", i+1, lbl, ln)
+			}
 		case strings.Contains(ln, `"`):
 			// a node declaration; its label was checked above
 		default:
@@ -122,6 +132,22 @@ func stripQuotedLabel(ln string) string {
 
 func isIDChar(c byte) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
+}
+
+// edgeLabelOf extracts an edge's label from a (quote-stripped) line, in either the
+// pipe form (`-->|label|`) or the dotted form (`-. label .->`).
+func edgeLabelOf(s string) (string, bool) {
+	if i := strings.IndexByte(s, '|'); i >= 0 {
+		if j := strings.IndexByte(s[i+1:], '|'); j >= 0 {
+			return s[i+1 : i+1+j], true
+		}
+	}
+	if i := strings.Index(s, "-. "); i >= 0 {
+		if j := strings.Index(s[i+3:], " .->"); j >= 0 {
+			return s[i+3 : i+3+j], true
+		}
+	}
+	return "", false
 }
 
 func assertValidMermaid(t *testing.T, diagram string) {

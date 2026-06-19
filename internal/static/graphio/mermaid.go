@@ -389,6 +389,8 @@ func boundaryDelims(class string) (open, close string) {
 // concurrent or asynchronous hop, and the reclaimer `via` provenance. It is the one
 // source of edge-annotation text for both edgeLine and the diff renderer, so a new
 // annotation cannot appear on one and not the other (CLAUDE.md: one source of truth).
+// The output is edge-label-safe: the `via` value is data, so it is HTML-escaped and
+// its '|' (the Mermaid edge-label delimiter) neutralized, just as node labels are.
 func edgeDecoration(e Edge) string {
 	var text string
 	switch {
@@ -403,7 +405,16 @@ func edgeDecoration(e Edge) string {
 		}
 		text += "via " + e.Via
 	}
-	return text
+	return edgeLabelSafe(text)
+}
+
+// edgeLabelSafe makes text safe to place in a Mermaid edge label. Beyond the node-label
+// escaping (HTML-significant chars, control chars), it neutralizes '|' — the character
+// that DELIMITS a `-->|label|` edge label, so a '|' in the data would close the label
+// early and corrupt the edge. Folded to '/' rather than escaped, since edge labels are
+// short provenance, not prose.
+func edgeLabelSafe(text string) string {
+	return strings.ReplaceAll(mermaidText(text), "|", "/")
 }
 
 // edgeLine renders one edge. Concurrent (`go`) and outbound-async hops are dashed
