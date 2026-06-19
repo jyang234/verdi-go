@@ -93,11 +93,37 @@ func buildBoundaryNodes(g *Graph, ids *idAlloc, shown map[string]bool) (map[stri
 // attaching each to its first-party site/owner when that node is drawn. It is the one
 // builder of the honesty channel, used by BOTH the full render and the over-cap index,
 // so a large graph can never silently drop a blind spot the small graph would show.
+// annotationNotes renders the human/AI context lines for the header, one per
+// annotation in the graph's canonical (Site, Kind) order. Disclosure only — the
+// note explains a blind spot, never closes it.
+func annotationNotes(g *Graph) []string {
+	out := make([]string, 0, len(g.Annotations))
+	for _, a := range g.Annotations {
+		line := "annotation · " + a.Kind + " at " + frontier.ShortName(a.Site) + ": " + a.Note
+		if a.By != "" {
+			line += " — by " + a.By
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string) []disc {
+	annotated := map[[2]string]bool{}
+	for _, a := range g.Annotations {
+		annotated[[2]string{a.Site, a.Kind}] = true
+	}
 	var discs []disc
 	for _, b := range g.BlindSpots {
 		id := ids.get("blind_" + string(b.Kind))
-		discs = append(discs, disc{id: id, label: "⊥ " + mermaidText(string(b.Kind)) + "<br/>blind spot", from: nodeID[b.Site]})
+		label := "⊥ " + mermaidText(string(b.Kind)) + "<br/>blind spot"
+		if annotated[[2]string{b.Site, string(b.Kind)}] {
+			// A blind spot a human/AI has supplied context for: marked so a reader
+			// sees "explained" vs "unexamined" at a glance; the note text rides the
+			// header notes (mermaid), keeping the node label legible.
+			label += " 🗒"
+		}
+		discs = append(discs, disc{id: id, label: label, from: nodeID[b.Site]})
 	}
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
@@ -116,6 +142,11 @@ func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string) []disc {
 // it returns an index of entry points instead of an illegible hairball.
 func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	ids := &idAlloc{used: map[string]bool{}}
+
+	// Annotation context rides the header disclosure notes (deterministic, already
+	// sorted by Site/Kind), so it survives the node cap (the overview gets the same
+	// notes) and stays legible instead of crammed into a node label.
+	notes = append(notes, annotationNotes(g)...)
 
 	// A node that emits a boundary effect is load-bearing: hiding it would drop the
 	// effect from the diagram, which the trust model forbids (keepNode enforces this).

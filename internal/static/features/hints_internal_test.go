@@ -24,3 +24,40 @@ func TestBuiltinTelemetryIncludesZap(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinExternalBoundaryExemptsOTel pins OpenTelemetry as a built-in exempt
+// prefix: even with nil config its span/attribute packages must not surface as an
+// ExternalBoundaryCall, or every instrumented function would disclose one.
+func TestBuiltinExternalBoundaryExemptsOTel(t *testing.T) {
+	hs := NewHintSet(nil) // nil cfg => only built-ins
+	for _, p := range []string{"go.opentelemetry.io/otel", "go.opentelemetry.io/otel/trace", "go.opentelemetry.io/otel/attribute"} {
+		if !prefixExempt(p, hs.externalExempt) {
+			t.Errorf("OpenTelemetry package %q should be exempt by default", p)
+		}
+	}
+}
+
+// TestPrefixExempt pins the segment-boundary matching the externalBoundaryExempt
+// list relies on: a bare entry matches itself and its subpackages but not a
+// look-alike sibling; a trailing-slash entry matches the whole family.
+func TestPrefixExempt(t *testing.T) {
+	prefixes := []string{"github.com/go-chi/chi/v5", "go.opentelemetry.io/"}
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"github.com/go-chi/chi/v5", true},            // exact
+		{"github.com/go-chi/chi/v5/middleware", true}, // subpackage at a segment boundary
+		{"github.com/go-chi/chi/v52", false},          // look-alike sibling, not a boundary
+		{"github.com/go-chi/chi", false},              // parent is not under the prefix
+		{"go.opentelemetry.io/otel", true},            // trailing-slash family
+		{"go.opentelemetry.io/otel/trace", true},
+		{"golang.org/x/sync/errgroup", false}, // unrelated
+		{"", false},                           // synthetic / no package
+	}
+	for _, c := range cases {
+		if got := prefixExempt(c.path, prefixes); got != c.want {
+			t.Errorf("prefixExempt(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -119,6 +120,102 @@ type StaticConfig struct {
 	// CODEOWNER commits the seam here (paired with a blind_spot_ratchet allow-list
 	// entry in the policy, §8 crack #6). Each carries a reason — the witness — for audit.
 	DeclaredBlindSpots []DeclaredBlindSpot `yaml:"declaredBlindSpots,omitempty"`
+
+	// ExternalBoundaryExempt lists third-party package-path prefixes to treat as
+	// infrastructure/plumbing rather than a dependency boundary, suppressing their
+	// ExternalBoundaryCall disclosures. OpenTelemetry is exempt built-in (observability
+	// plumbing already modeled on the behavioral side); teams add framework/utility
+	// deps — an HTTP router, a decimal lib — whose handoffs are not the external
+	// surface a reviewer reviews. Matched by package-path prefix at a segment boundary,
+	// so "github.com/go-chi/chi/v5" also covers its subpackages. It only NARROWS a
+	// disclosure: it can never hide a classified boundary effect (those are excluded by
+	// classification, not by this) nor change a verdict (ExternalBoundaryCall is
+	// disclosure-only), so an over-broad entry costs visibility, never soundness.
+	ExternalBoundaryExempt []string `yaml:"externalBoundaryExempt,omitempty"`
+
+	// Annotations attach human/AI CONTEXT to a blind spot the analysis already
+	// detected — the irreducible residue a machine-stated shape cannot close (what
+	// happens BEHIND an ExternalBoundaryCall, inside a goroutine, past an unresolved
+	// func value). They are DISCLOSURE-ONLY: an annotation never closes a blind spot,
+	// changes a count, or moves a verdict — it decorates the disclosure channel so a
+	// reviewer reads the context, never a laundered claim (CLAUDE.md tenet 3). Each
+	// must match a detected blind spot by (kind, site); an annotation that matches
+	// none is a load-time error (a stale FQN is drift, fail closed), surfaced where
+	// the merge runs (graphio), not silently dropped.
+	Annotations []Annotation `yaml:"annotations,omitempty"`
+}
+
+// Annotation is one piece of human/AI context on a detected blind spot. Site is
+// the FQN (fn.RelString(nil)) the disclosure names; Kind, when set, must name a
+// recognized blindspots.Kind and disambiguates a site carrying more than one (it
+// may be omitted when the site has exactly one blind spot). Note is the context
+// (required — an annotation with no note is drift). By records authorship for
+// audit (a human handle, or an agent id/model); it must be drawn only from this
+// committed config — never wall-clock or a live session id — so output stays
+// deterministic.
+type Annotation struct {
+	Site string `yaml:"site"`
+	Kind string `yaml:"kind,omitempty"`
+	Note string `yaml:"note"`
+	By   string `yaml:"by,omitempty"`
+	// Claim is an OPTIONAL structured assertion of the boundary effect behind the
+	// seam, written as the canonical corpus effect key ("PUBLISH email.sent",
+	// "db DELETE ledger"). It is a falsifiable, machine-checkable form of the note:
+	// the impeach lens grades it CONFIRMED when the corpus observed that exact effect
+	// severed at the site, UNCONFIRMED when the corpus witnessed the seam but not this
+	// effect (a sample's silence is never proof of absence — never "false"), and
+	// UNWITNESSED when no corpus reaches the site. It stays disclosure-only: even a
+	// CONFIRMED claim never closes the blind spot or feeds a verdict. No format
+	// validation here — an unmatched claim simply reads UNCONFIRMED (fail-closed
+	// disclosure), and config stays decoupled from the impeach key space.
+	Claim string `yaml:"claim,omitempty"`
+}
+
+// ResolveAnnotationKind binds one annotation to a single blind-spot kind given the
+// DISTINCT kinds detected at its site. It is the single source of truth for the
+// annotation→blind-spot binding rule, shared by the producer-side merge (graphio,
+// which embeds the bound annotation in the graph) and the read-only MCP `annotate`
+// proposer (which validates a proposed annotation against the live manifest). One
+// rule in one place means the proposer can never suggest an annotation the build
+// would reject, or vice versa — parity is guarded by a test on each side.
+//
+// Fail closed: a site with no detected blind spot is an orphan (a stale FQN or
+// moved code); an empty requestedKind binds a site that has exactly one kind but is
+// ambiguous on a multi-kind site; a named kind must be present at the site. The
+// returned error names the site and the kinds actually present, so a caller (or an
+// agent) can correct the annotation without another round-trip.
+func ResolveAnnotationKind(site, requestedKind string, kindsAtSite []string) (string, error) {
+	distinct := sortedUnique(kindsAtSite)
+	if len(distinct) == 0 {
+		return "", fmt.Errorf("no blind spot detected at site %q — a stale annotation or moved code", site)
+	}
+	if requestedKind == "" {
+		if len(distinct) != 1 {
+			return "", fmt.Errorf("site %q carries %d blind-spot kinds (%s); set kind to disambiguate", site, len(distinct), strings.Join(distinct, ", "))
+		}
+		return distinct[0], nil
+	}
+	for _, k := range distinct {
+		if k == requestedKind {
+			return requestedKind, nil
+		}
+	}
+	return "", fmt.Errorf("no %q blind spot at site %q (present: %s)", requestedKind, site, strings.Join(distinct, ", "))
+}
+
+// sortedUnique returns the distinct values of ss in lexical order — a
+// run-independent ordering so an ambiguity/absence error message is deterministic.
+func sortedUnique(ss []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DeclaredBlindSpot is one ratified seam (plan §8). Site is the FQN to blind (the
@@ -375,6 +472,26 @@ func (c *Config) validate() error {
 		}
 		if b.Reason == "" {
 			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): reason is required (the impeachment witness)", i, b.Site)
+		}
+	}
+	// An empty exempt prefix would match every package — silently suppressing the
+	// whole ExternalBoundaryCall disclosure. Fail closed at load rather than blind
+	// the surface by typo.
+	for i, p := range c.Static.ExternalBoundaryExempt {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("flowmap config: static.externalBoundaryExempt[%d] is empty; an empty prefix would suppress every external boundary", i)
+		}
+	}
+	// An annotation must name the site it decorates and carry a note (the context).
+	// The (site, kind) match against a detected blind spot — and the kind's
+	// recognition — are checked in graphio where the merge sees the manifest (config
+	// cannot import blindspots). A site/note-less annotation is drift, refused here.
+	for i, a := range c.Static.Annotations {
+		if a.Site == "" {
+			return fmt.Errorf("flowmap config: static.annotations[%d]: site is required", i)
+		}
+		if strings.TrimSpace(a.Note) == "" {
+			return fmt.Errorf("flowmap config: static.annotations[%d] (%s): note is required (the context)", i, a.Site)
 		}
 	}
 	return nil

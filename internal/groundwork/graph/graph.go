@@ -78,6 +78,53 @@ type Graph struct {
 	// from topology. It is a disclosure: no verdict reads it. Omitted when there is
 	// nothing to disclose.
 	Frontier *FrontierSection `json:"frontier,omitempty"`
+
+	// Annotations are human/AI context attached to blind spots (keyed by Site/Kind),
+	// decoded on this side of the trust boundary like every other section. It is a
+	// disclosure: NO verdict reads it — it explains a blind spot, it does not change
+	// one. groundwork decodes it so the field is known to the strict reader (an
+	// unknown field would otherwise be rejected) and so review/triage can echo the
+	// context beside the blind spot. Omitted when none.
+	Annotations []Annotation `json:"annotations,omitempty"`
+}
+
+// Annotation is operator/agent context on a blind spot, keyed by (Site, Kind).
+// Disclosure only: no verdict, count, or reachability computation reads it. Claim,
+// when set, is the canonical effect key the note asserts is behind the seam — a
+// falsifiable form the impeach lens grades against the corpus (still disclosure).
+type Annotation struct {
+	Site  string `json:"site"`
+	Kind  string `json:"kind"`
+	Note  string `json:"note"`
+	By    string `json:"by,omitempty"`
+	Claim string `json:"claim,omitempty"`
+}
+
+// MatchAnnotations returns the annotations in anns whose (Site, Kind) identify the
+// blind spot at (site, kind). It is the single matching rule shared by every card
+// that echoes annotation context (ground, impact), so they cannot drift apart.
+func MatchAnnotations(anns []Annotation, site, kind string) []Annotation {
+	var out []Annotation
+	for _, a := range anns {
+		if a.Site == site && a.Kind == kind {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// AnnotationLine renders one annotation as an indented disclosure line to print
+// beneath the blind spot it explains: the note, and the author when recorded.
+// Shared so the context reads identically on every card.
+func AnnotationLine(a Annotation) string {
+	line := "    🗒 " + a.Note
+	if a.Claim != "" {
+		line += " [claims: " + a.Claim + "]"
+	}
+	if a.By != "" {
+		line += " — " + a.By
+	}
+	return line + "\n"
 }
 
 // FrontierSection mirrors flowmap's disclosed frontier: the per-site markers, the

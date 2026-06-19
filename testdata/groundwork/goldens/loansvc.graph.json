@@ -467,7 +467,13 @@
       "tier": 3
     }
   ],
-  "blind_spots": [],
+  "blind_spots": [
+    {
+      "kind": "ExternalBoundaryCall",
+      "site": "(*example.com/loansvc/internal/origination.Evaluator).Evaluate",
+      "detail": "hands off to external package golang.org/x/sync/errgroup; its behavior is outside the analyzed module and invisible to the static call graph"
+    }
+  ],
   "entrypoints": [
     {
       "kind": "consumer",

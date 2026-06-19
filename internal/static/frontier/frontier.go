@@ -245,11 +245,24 @@ func Classify(in *Input) *Result {
 		if blindspots.Kind(bs.Kind).Ratified() {
 			continue
 		}
+		// A disclosure-only kind (ExternalBoundaryCall) is a dependency-surface
+		// disclosure, not a severance frontier: high-volume and a KNOWN intentional
+		// boundary, not a cut in first-party reachability. Admitting it would swamp
+		// ReclaimableShare — the metric of how reclaimable the SEVERANCE frontier is —
+		// with framework/SDK plumbing, so it rides the blind-spots manifest and the
+		// render's blind channel instead. The same predicate gates the reach frontier
+		// (fitness.firstReachBlinding); blindSpotBin still maps it to A for the
+		// exhaustiveness guard, but this loop never asks.
+		if blindspots.Kind(bs.Kind).IsDisclosureOnlyFrontier() {
+			continue
+		}
 		// A ratified ImpeachmentSeam never reaches here (skipped above). An
-		// UnresolvedCall that coincides with a structural marker is redundant — drop
-		// it; otherwise it is disclosed in its own right (blindSpotBin → BinA: a
-		// func-value call no structural reclaimer recognized is irreducible).
-		if bs.Kind == string(blindspots.UnresolvedCall) && markedSites[bs.Site] {
+		// UnresolvedCall — or its goroutine sibling ConcurrentDispatch — that
+		// coincides with a structural marker is the low-level CAUSE of that seam and
+		// is redundant, so drop it; otherwise it is disclosed in its own right
+		// (blindSpotBin → BinA: a func-value call no structural reclaimer recognized
+		// is irreducible).
+		if (bs.Kind == string(blindspots.UnresolvedCall) || bs.Kind == string(blindspots.ConcurrentDispatch)) && markedSites[bs.Site] {
 			continue
 		}
 		bin, _ := blindSpotBin(bs.Kind)
@@ -403,11 +416,16 @@ func blindSpotBin(kind string) (Bin, bool) {
 	case string(blindspots.Reflect), string(blindspots.Unsafe),
 		string(blindspots.Cgo), string(blindspots.Linkname),
 		string(blindspots.UnresolvedDispatch), string(blindspots.NonConstantBoundaryArg),
-		string(blindspots.ImpeachmentSeam), string(blindspots.UnresolvedCall):
-		// UnresolvedCall lands in A whenever the marker loop emits it (a func-value
-		// call at a site no structural marker covers — irreducible to static, like
-		// reflect); at a site a structural seam already covers, the loop dedups it
-		// instead, so this bin applies only to the standalone case.
+		string(blindspots.ImpeachmentSeam), string(blindspots.UnresolvedCall),
+		string(blindspots.ConcurrentDispatch), string(blindspots.ExternalBoundaryCall):
+		// UnresolvedCall and its goroutine sibling ConcurrentDispatch land in A
+		// whenever the marker loop emits them (a func-value call at a site no
+		// structural marker covers — irreducible to static, like reflect; a `go`
+		// dispatch is irreducible AND async); at a site a structural seam already
+		// covers, the loop dedups them instead, so this bin applies only to the
+		// standalone case. ExternalBoundaryCall is mapped here ONLY to satisfy the
+		// exhaustiveness guard — the marker loop skips every Kind.IsDisclosureOnlyFrontier
+		// kind, so this branch is never reached for it.
 		return BinA, true // runtime/irreducible frontier (a ratified seam is irreducible to static)
 	default:
 		return BinA, false // unrecognized — disclosed as A, but the guard test flags it

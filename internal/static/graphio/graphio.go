@@ -105,6 +105,15 @@ type Graph struct {
 	// unscoped service emits a byte-identical graph.
 	Frontier *FrontierSection `json:"frontier,omitempty"`
 
+	// Annotations are human/AI CONTEXT attached to blind spots (config
+	// static.annotations), keyed by (Site, Kind) to the manifest above. A
+	// disclosure-only channel: no verdict, count, or reachability computation reads
+	// it; it explains a blind spot the machine cannot close, it never closes one.
+	// Each is matched to a detected blind spot at build time (an unmatched one fails
+	// the build — drift, not a silent drop). Omitted when none, so an annotation-free
+	// service emits a byte-identical graph.
+	Annotations []Annotation `json:"annotations,omitempty"`
+
 	// foldSQL records whether this graph was built with the SQL const-fold
 	// (--reclaim-sql / WithSQLFold). Unexported, so it never serializes (no golden
 	// churn) and is an in-memory build flag only: the frontier classifier reads it
@@ -214,6 +223,79 @@ func mergeDeclaredBlindSpots(detected []blindspots.BlindSpot, cfg *config.Config
 	return out, nil
 }
 
+// Annotation is human/AI context on a blind spot, keyed by (Site, Kind) to the
+// graph's blind-spot manifest. Disclosure only — no consumer verdict reads it.
+type Annotation struct {
+	Site  string `json:"site"`
+	Kind  string `json:"kind"`
+	Note  string `json:"note"`
+	By    string `json:"by,omitempty"`
+	Claim string `json:"claim,omitempty"`
+}
+
+// annotationLess is the total intrinsic order used to break dedup ties on a
+// colliding (site, kind): compare Note, then By, then Claim. Totality matters —
+// falling back to arrival order on equal notes would make the kept by/claim depend
+// on config-file position, not content.
+func annotationLess(a, b Annotation) bool {
+	if a.Note != b.Note {
+		return a.Note < b.Note
+	}
+	if a.By != b.By {
+		return a.By < b.By
+	}
+	return a.Claim < b.Claim
+}
+
+// mergeAnnotations matches each config annotation to a blind spot already in the
+// manifest and returns the bound annotations, sorted by (Site, Kind) for a
+// byte-identical result. An annotation is CONTEXT on a detected gap, so it must
+// name one: an annotation that matches no blind spot is refused (a stale FQN or a
+// kind that no longer fires is drift, the fail-closed direction — never a silent
+// drop). When kind is omitted it binds a site that carries exactly one blind spot;
+// a site with several requires the kind, so context can never attach to the wrong
+// shape. The match is against the graph's blind-spot subset (the manifest a
+// consumer sees) — the gated boundary disclosures live in their own channel.
+func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]Annotation, error) {
+	if cfg == nil || len(cfg.Static.Annotations) == 0 {
+		return nil, nil
+	}
+	// Index the manifest: the kinds present at each site (deduped by the resolver).
+	kindsAt := map[string][]string{}
+	for _, b := range manifest {
+		kindsAt[b.Site] = append(kindsAt[b.Site], string(b.Kind))
+	}
+	byKey := map[[2]string]Annotation{}
+	for i, a := range cfg.Static.Annotations {
+		// The binding rule lives in config.ResolveAnnotationKind so the producer here
+		// and the read-only MCP `annotate` proposer cannot drift (parity test below).
+		kind, err := config.ResolveAnnotationKind(a.Site, a.Kind, kindsAt[a.Site])
+		if err != nil {
+			return nil, fmt.Errorf("flowmap config: static.annotations[%d]: %w", i, err)
+		}
+		// Collapse duplicate (site, kind) annotations to the lexically-smallest
+		// (Note, By, Claim) — a TOTAL intrinsic tie-break, never arrival order: two
+		// entries with the same note but different by/claim still resolve on content,
+		// not config-file position (CLAUDE.md determinism).
+		cand := Annotation{Site: a.Site, Kind: kind, Note: a.Note, By: a.By, Claim: a.Claim}
+		key := [2]string{a.Site, kind}
+		if cur, ok := byKey[key]; !ok || annotationLess(cand, cur) {
+			byKey[key] = cand
+		}
+	}
+	out := make([]Annotation, 0, len(byKey))
+	for _, a := range byKey {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Site != out[j].Site {
+			return out[i].Site < out[j].Site
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out, nil
+}
+
 // Build renders the full first-party graph of res. If entry is non-empty, the
 // graph is scoped to the functions reachable from the matching entry-point root.
 // BuildOption tunes a graph build. Options are opt-in refinements (D2-style): the
@@ -277,6 +359,14 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		return nil, err
 	}
 	g.BlindSpots = merged
+	// Bind human/AI context to the finalized manifest (detected + declared). An
+	// annotation that matches no blind spot fails the build — a disclosure-only
+	// channel still fails closed on drift, never attaching context to a vanished site.
+	annots, err := mergeAnnotations(g.BlindSpots, res.Config)
+	if err != nil {
+		return nil, err
+	}
+	g.Annotations = annots
 	rootFns := rootFuncSet(res)
 	if entry == "" {
 		for _, r := range res.Roots.Roots {

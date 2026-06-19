@@ -22,6 +22,74 @@ func index(t *testing.T, name string) *graph.Index {
 	return graph.NewIndex(g)
 }
 
+// TestAnnotationEchoedOnCard pins Phase 2: the human/AI context attached to a
+// blind spot reaches the ground card an agent reads before editing — the note and
+// its author render beneath the blind spot they explain.
+func TestAnnotationEchoedOnCard(t *testing.T) {
+	g := &graph.Graph{
+		Algo:  "rta",
+		Nodes: []graph.Node{{FQN: "svc.Send"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "ExternalBoundaryCall", Site: "svc.Send", Detail: "hands off to acme"},
+		},
+		Annotations: []graph.Annotation{
+			{Site: "svc.Send", Kind: "ExternalBoundaryCall", Note: "issues an outbound HTTPS POST to acme", By: "dev@x"},
+		},
+	}
+	card, err := For(graph.NewIndex(g), nil, "svc.Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Annotations) != 1 {
+		t.Fatalf("annotation not collected onto card: %+v", card.Annotations)
+	}
+	out := card.Render()
+	for _, want := range []string{"ExternalBoundaryCall svc.Send", "issues an outbound HTTPS POST to acme", "dev@x"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ground card missing %q:\n%s", want, out)
+		}
+	}
+	// An annotation whose (site, kind) matches no blind spot on the card is not
+	// echoed — context only ever appears beneath the spot it explains.
+	g.Annotations = []graph.Annotation{{Site: "svc.Other", Kind: "reflect", Note: "stray", By: "x"}}
+	if other, _ := For(graph.NewIndex(g), nil, "svc.Send"); strings.Contains(other.Render(), "stray") {
+		t.Error("an annotation for an unrelated site must not appear on this card")
+	}
+}
+
+// TestAnnotationNotDuplicatedAcrossSameSeam pins the dedup fix: when a site carries
+// more than one blind spot of the same kind (a function with two ExternalBoundaryCall
+// handoffs to different packages), the shared annotation is collected and rendered
+// ONCE, not once per blind spot.
+func TestAnnotationNotDuplicatedAcrossSameSeam(t *testing.T) {
+	g := &graph.Graph{
+		Algo:  "rta",
+		Nodes: []graph.Node{{FQN: "svc.Send"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "ExternalBoundaryCall", Site: "svc.Send", Detail: "hands off to acme"},
+			{Kind: "ExternalBoundaryCall", Site: "svc.Send", Detail: "hands off to stripe"},
+		},
+		Annotations: []graph.Annotation{
+			{Site: "svc.Send", Kind: "ExternalBoundaryCall", Note: "the SDK behind this seam POSTs out", By: "dev"},
+		},
+	}
+	card, err := For(graph.NewIndex(g), nil, "svc.Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Annotations) != 1 {
+		t.Errorf("annotation collected %d times, want 1: %+v", len(card.Annotations), card.Annotations)
+	}
+	out := card.Render()
+	if n := strings.Count(out, "the SDK behind this seam POSTs out"); n != 1 {
+		t.Errorf("annotation rendered %d times, want 1:\n%s", n, out)
+	}
+	// Both blind-spot rows still appear — dedup is on the annotation, not the spots.
+	if n := strings.Count(out, "ExternalBoundaryCall svc.Send"); n != 2 {
+		t.Errorf("both blind-spot rows must still render (want 2), got %d:\n%s", n, out)
+	}
+}
+
 // GX-5 landed criterion: the binding-rules section names exactly the rules
 // that demonstrably fire on the function — cross-checked by seeding a
 // violation at the function and asserting the named rule catches it.

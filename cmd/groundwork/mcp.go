@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -23,6 +24,8 @@ import (
 	"github.com/jyang234/golang-code-graph/ir"
 
 	"github.com/jyang234/golang-code-graph/capture"
+
+	"gopkg.in/yaml.v3"
 )
 
 const mcpUsage = `usage: groundwork mcp <graph.json> [--policy <policy.json>] [--corpus <dir>] [--capture production|integration] [--expect <stamp>] [--log <calls.jsonl>]
@@ -533,6 +536,17 @@ func toolDefs() []map[string]any {
 			"inputSchema": obj(map[string]any{"fqn": str("fully-qualified function name from the graph")}, "fqn"),
 		},
 		{
+			"name":        "annotate",
+			"description": "Propose human/AI CONTEXT for a blind spot — what lies BEHIND a seam the analysis cannot see past (the I/O behind an ExternalBoundaryCall, the work inside a goroutine). Validates (site, kind) against this graph's live blind-spot manifest and returns ready-to-commit .flowmap.yaml under static.annotations. READ-ONLY: it writes no file — you persist the snippet — and an annotation is disclosure-only, so it never changes a count or a verdict. Errors (orphan site, ambiguous kind) name the kinds actually present so you can correct without re-deriving.",
+			"inputSchema": obj(map[string]any{
+				"site":  str("FQN of the blind spot to annotate (as it appears in a ground/reach card)"),
+				"kind":  str("blind-spot kind, e.g. ExternalBoundaryCall; omit only when the site has exactly one"),
+				"note":  str("the context: what happens beyond this seam"),
+				"by":    str("authorship for audit — a human handle or an agent id/model"),
+				"claim": str("optional canonical effect key the seam hides (e.g. 'PUBLISH email.sent', 'db DELETE ledger'); the impeach lens grades it CONFIRMED/UNCONFIRMED against the corpus"),
+			}, "site", "note"),
+		},
+		{
 			"name":        "triage",
 			"description": "Incident triage card from a symptom. Provide exactly one of frame/route/table/event/peer; set fail=true for the what-if fault framing (includes effects possibly committed before the fault).",
 			"inputSchema": obj(map[string]any{
@@ -576,7 +590,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "impeach",
-			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
+			"description": "AUDIT-ONLY, never a gate: join the loaded graph against its committed behavioral corpus (--corpus) and disclose impeachment candidates — effects OBSERVED in the corpus where static analysis placed none. Each is classified through the downgrade ladder (IMPEACHMENT, or a specific downgrade like VERSION-SKEW / CAPTURE-UNTRUSTED), with the localized site where static lost the effect. Also grades blind-spot annotations against the corpus: WITNESSED when an observed effect is severed at the annotation's site (the corpus corroborates the SEAM, not the note's prose), UNWITNESSED otherwise. This is disclosure for an agent before an edit; the deterministic MERGE gate is `groundwork verify --corpus` over CI-built base/branch graphs, never this lens (the loaded graph may be a local build). Requires the service to be started with --corpus and --policy.",
 			"inputSchema": obj(map[string]any{}),
 		},
 	}
@@ -593,6 +607,11 @@ type toolArgs struct {
 	Peer    string `json:"peer"`
 	Fail    bool   `json:"fail"`
 	Expect  string `json:"expect"`
+	Site    string `json:"site"`
+	Kind    string `json:"kind"`
+	Note    string `json:"note"`
+	By      string `json:"by"`
+	Claim   string `json:"claim"`
 }
 
 // callTool dispatches one tools/call. Failures are tool results (isError),
@@ -833,6 +852,8 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 			return toolError(fmt.Sprintf("no function %q in graph", a.FQN))
 		}
 		return withStale(toolText(impact.ForNodes(ix, []string{a.FQN}).Render()))
+	case "annotate":
+		return withStale(annotateCard(ix, a))
 	case "triage":
 		var res impact.Resolution
 		set := 0
@@ -902,6 +923,62 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 	}
 }
 
+// annotateCard validates a proposed blind-spot annotation against this graph's live
+// manifest and returns the ready-to-commit .flowmap.yaml snippet. It is READ-ONLY:
+// it writes nothing (the server's NO WRITE TOOLS invariant holds — the agent
+// persists the snippet itself), and an annotation is disclosure-only, so even once
+// committed it cannot move a count or a verdict. The binding rule is
+// config.ResolveAnnotationKind, shared with the producer-side merge, so a proposal
+// this tool accepts is one the flowmap build will accept (and vice versa).
+func annotateCard(ix *graph.Index, a toolArgs) map[string]any {
+	if strings.TrimSpace(a.Site) == "" {
+		return toolError("site is required: the FQN of the blind spot to annotate")
+	}
+	if strings.TrimSpace(a.Note) == "" {
+		return toolError("note is required: the context to attach")
+	}
+	spots := ix.BlindSpotsAt(a.Site)
+	kinds := make([]string, 0, len(spots))
+	for _, b := range spots {
+		kinds = append(kinds, b.Kind)
+	}
+	kind, err := config.ResolveAnnotationKind(a.Site, a.Kind, kinds)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	// Ground the proposal in the matched disclosure so the author sees what the
+	// machine actually saw at this seam.
+	var detail string
+	for _, b := range spots {
+		if b.Kind == kind {
+			detail = b.Detail
+			break
+		}
+	}
+	var w struct {
+		Static struct {
+			Annotations []config.Annotation `yaml:"annotations"`
+		} `yaml:"static"`
+	}
+	w.Static.Annotations = []config.Annotation{{Site: a.Site, Kind: kind, Note: a.Note, By: a.By, Claim: a.Claim}}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2) // match the 2-space convention of a hand-written .flowmap.yaml
+	if err := enc.Encode(w); err != nil {
+		return toolError("rendering annotation YAML: " + err.Error())
+	}
+	_ = enc.Close()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "✓ binds the %s blind spot at %s\n", kind, a.Site)
+	if detail != "" {
+		fmt.Fprintf(&b, "  %s\n", detail)
+	}
+	b.WriteString("\nThis tool writes nothing. Add to .flowmap.yaml (merge under an existing static.annotations if present) and rebuild the graph:\n\n")
+	b.WriteString(buf.String())
+	return toolText(b.String())
+}
+
 // computeImpeach renders the audit-only impeachment disclosure for this service and
 // caches it in s.impeachBody: the loaded graph joined against its committed corpus,
 // resolved against the policy's must_not_reach rules. It runs at OriginLive ON
@@ -961,6 +1038,29 @@ func (s *mcpServer) computeImpeach() {
 	if len(res.Caveats) > 0 {
 		b.WriteString("\n")
 	}
+	// Blind-spot annotations vs the corpus: grade each annotation by whether the
+	// corpus independently witnesses an effect severed at its site. The corpus
+	// witnesses the SEAM, never the note's prose — so a witnessed annotation is a
+	// stronger DISCLOSURE (the gap it explains is behaviorally real), never a proof
+	// and never a gate. Audit-only, like the rest of this lens.
+	if anns := s.ix.Annotations(); len(anns) > 0 {
+		b.WriteString("\nblind-spot annotations vs corpus (the corpus witnesses the SEAM/CLAIM, not the note's prose):\n")
+		for _, ga := range impeach.GradeAnnotations(res.Candidates, anns) {
+			fmt.Fprintf(&b, "  %s %s at %s\n      note: %s\n", annotationMark(ga.Grade), ga.Annotation.Kind, ga.Annotation.Site, ga.Annotation.Note)
+			if ga.Annotation.Claim != "" {
+				fmt.Fprintf(&b, "      claims: %s\n", ga.Annotation.Claim)
+			}
+			for _, e := range ga.Effects {
+				fmt.Fprintf(&b, "      corpus observed an effect severed here (%s): %s [flow %q]\n", e.Verdict, e.Effect, e.Flow)
+			}
+			switch ga.Grade {
+			case impeach.AnnotationUnwitnessed:
+				b.WriteString("      no corpus effect severed at this site; the note stands but is unverified\n")
+			case impeach.AnnotationUnconfirmed:
+				b.WriteString("      the seam is witnessed but the CLAIMED effect was not observed — look (a sample is not proof of absence)\n")
+			}
+		}
+	}
 	// Disclose the load-once contract so corpus freshness is legible, not silent
 	// (the graph alone is staleness-tracked; a committed corpus is a startup input).
 	// CorpusDigest above IS the agent's integrity check: recompute over the dir to
@@ -970,6 +1070,23 @@ func (s *mcpServer) computeImpeach() {
 	}
 	b.WriteString("\nThis lens DISCLOSES; it does not gate. The deterministic merge gate is `groundwork verify --corpus` over CI-built base/branch graphs.\n")
 	s.impeachBody = b.String()
+}
+
+// annotationMark renders the glyph + fixed-width label for an annotation grade, so
+// the audit lines align and the strongest signal (a claim corroborated or not) reads
+// at a glance. CONFIRMED/WITNESSED corroborate; UNCONFIRMED flags a discrepancy to
+// look at (never "false"); UNWITNESSED is simply unverified.
+func annotationMark(g impeach.AnnotationGrade) string {
+	switch g {
+	case impeach.AnnotationConfirmed:
+		return "✓ CONFIRMED  "
+	case impeach.AnnotationWitnessed:
+		return "✓ WITNESSED  "
+	case impeach.AnnotationUnconfirmed:
+		return "✗ UNCONFIRMED"
+	default:
+		return "? UNWITNESSED"
+	}
 }
 
 func toolText(text string) map[string]any {

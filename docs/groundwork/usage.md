@@ -783,14 +783,20 @@ derived with the exact matchers the checks use, so the card never promises a
 guardrail that does not bind.
 
 `groundwork mcp <graph.json> [--policy …] [--corpus <dir>] [--capture <grade>] [--expect …] [--log calls.jsonl]`
-serves ten tools over
+serves eleven tools over
 MCP stdio (newline-delimited JSON-RPC, protocol 2024-11-05, no third-party
 dependencies): `ground`, `reach`, `triage` (with the `fail` what-if framing,
-including effects possibly committed before the fault), `exceptions`,
+including effects possibly committed before the fault), `annotate` (propose
+human/AI context for a blind spot — validates against the live manifest and
+returns ready-to-commit `.flowmap.yaml`, writing nothing), `exceptions`,
 `entrypoints` (what the route/event symptoms can address), `fleet-events`,
 `chains` (the cross-service effect-chain cards — fleet-wide, like
 `fleet-events`), `fitness`, `impeach`, and
 `reload`.
+
+`annotate` is **read-only**, like every tool here: it never writes a file (the
+server's no-write-tools invariant holds — the agent persists the snippet itself),
+and an annotation is disclosure-only, so it can never move a count or a verdict.
 
 The `impeach` tool is **audit-only and never a gate** (it is always listed, but
 returns an error unless the server was started with both `--corpus` and `--policy`).
@@ -807,6 +813,23 @@ optional `--capture production|integration` asserts the corpus's fidelity grade
 and is reconciled against the grade the corpus self-describes — it requires
 `--corpus`, and a contradiction fails closed (the candidate caps below
 IMPEACHMENT) rather than laundering a test corpus into a trusted one.
+
+The lens also grades **blind-spot annotations** against the corpus. An annotation
+(`static.annotations`) attaches human/AI context to a blind spot; the lens marks it
+**WITNESSED** when the corpus shows an observed effect severed at the annotation's
+site — the same localization (`Severance.Site`) it uses for candidates — and
+**UNWITNESSED** otherwise. The corpus corroborates the *seam* (a real effect is
+hidden there), never the note's prose (the machine cannot read it), and the
+observed effect is disclosed alongside so a human judges the note against it.
+
+An annotation may also carry a structured **`claim`** — the canonical effect key it
+asserts is behind the seam (`PUBLISH email.sent`, `db DELETE ledger`). The lens then
+grades the claim itself: **CONFIRMED** when the corpus observed that exact effect
+severed at the site, and **UNCONFIRMED** when the seam is witnessed but the claimed
+effect was not observed. UNCONFIRMED is deliberately asymmetric — a sample's silence
+is never proof of absence, so it reads "look", never "false". Like everything in
+this lens it is disclosure-only: even a CONFIRMED claim is a stronger *disclosure*,
+never a proof, and never closes the blind spot or feeds a verdict.
 
 The corpus is a **load-once startup input** (like `--policy`): only the graph is
 staleness-tracked and reloadable, because the graph is the one input CI rewrites

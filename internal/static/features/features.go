@@ -56,7 +56,7 @@ func (e *Extractor) Edge(caller, callee *ssa.Function, site ssa.CallInstruction)
 		Identity:   callee.RelString(nil),
 		Origin:     e.origin(caller, callee),
 		Fallible:   returnsError(callee.Signature),
-		Concurrent: isConcurrentSite(site),
+		Concurrent: IsConcurrentSite(site),
 	}
 	switch {
 	case e.hints.IsTelemetry(callee):
@@ -106,7 +106,7 @@ func (e *Extractor) origin(caller, callee *ssa.Function) model.Origin {
 	if e.isFirstParty(cp) {
 		return model.OriginFirstParty
 	}
-	if isStdlib(cp) {
+	if IsStdlib(cp) {
 		return model.OriginStdlib
 	}
 	return model.OriginThirdParty
@@ -167,14 +167,18 @@ func constSQLOp(site ssa.CallInstruction) string {
 	return ""
 }
 
-// isConcurrentSite reports whether the call is a `go` dispatch — the direct SSA
+// IsConcurrentSite reports whether the call is a `go` dispatch — the direct SSA
 // signal for a concurrently-executing (potentially racing) call. A `defer` is
 // NOT concurrent: it runs synchronously at function exit on the same goroutine,
 // so feeding it to the no_concurrent_reach gate as a racy edge would produce a
 // false Violation. A closure dispatched concurrently by a library such as
 // errgroup is also not detected here (the behavioral pipeline owns runtime
 // concurrency).
-func isConcurrentSite(site ssa.CallInstruction) bool {
+//
+// Exported as the single source of truth for "is a goroutine launch": the
+// per-edge Concurrent flag (here) and the blindspots ConcurrentDispatch shape
+// both read it, so the two cannot drift on what counts as a `go` site.
+func IsConcurrentSite(site ssa.CallInstruction) bool {
 	_, ok := site.(*ssa.Go)
 	return ok
 }
@@ -226,10 +230,13 @@ func PkgPath(fn *ssa.Function) string {
 	return fn.Pkg.Pkg.Path()
 }
 
-// isStdlib reports whether an import path is a standard-library package: its first
+// IsStdlib reports whether an import path is a standard-library package: its first
 // path segment contains no dot (so "net/http" and "database/sql" are stdlib,
-// "golang.org/x/sync" is not).
-func isStdlib(pkgPath string) bool {
+// "golang.org/x/sync" is not). Exported as the single source of truth for the
+// stdlib/third-party split shared by the Origin classifier (here) and the
+// blindspots ExternalBoundaryCall detector, so the two cannot disagree on what
+// counts as a third-party dependency boundary.
+func IsStdlib(pkgPath string) bool {
 	seg := pkgPath
 	if i := strings.IndexByte(pkgPath, '/'); i >= 0 {
 		seg = pkgPath[:i]

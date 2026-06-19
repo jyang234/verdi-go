@@ -36,6 +36,7 @@ flowchart LR
     db_db_SELECT_applicants[("db SELECT applicants")]:::db
     db_db_SELECT_loans[("db SELECT loans")]:::db
     bus_bus_CONSUME_payment_settled{{"bus CONSUME payment.settled"}}:::bus
+    blind_ExternalBoundaryCall(["⊥ ExternalBoundaryCall<br/>blind spot"]):::blind
     frontier_dynamic_bus(["⌖ dynamic-bus<br/>frontier A"]):::blind
     frontier_severed_closure(["⌖ severed-closure<br/>frontier B"]):::blind
     frontier_severed_closure1(["⌖ severed-closure<br/>frontier B"]):::blind
@@ -64,6 +65,7 @@ flowchart LR
     store_Loans_SelectLoan --> db_db_SELECT_loans
     loansvc_main --> loansvc_run
     loansvc_run --> bus_bus_CONSUME_payment_settled
+    origination_Evaluator_Evaluate -. blind .-> blind_ExternalBoundaryCall
     origination_Evaluator_notify -. blind .-> frontier_dynamic_bus
     origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure
     origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure1

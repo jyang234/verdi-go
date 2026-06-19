@@ -36,6 +36,10 @@ type Card struct {
 	Effects     []string          `json:"effects,omitempty"`     // reachable boundary effects
 	Binding     []string          `json:"binding_rules,omitempty"`
 	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"`
+	// Annotations is the human/AI context attached to this card's blind spots
+	// (keyed by Site/Kind). Disclosure only — it explains a blind spot the analysis
+	// cannot close, it never changes a claim on the card.
+	Annotations []graph.Annotation `json:"annotations,omitempty"`
 
 	// CoverOverApprox marks the entrypoint cover as an upper bound: the backward
 	// reach to those entrypoints passed through a HighFanOut dispatch seam, which
@@ -108,12 +112,11 @@ func For(ix *graph.Index, p *policy.Policy, fqn string) (Card, error) {
 	// reach — then the entrypoint count is an over-approximation (F3).
 	c.CoverOverApprox = ix.CrossesHighFanOut(reaching)
 
-	sort.Slice(c.BlindSpots, func(i, j int) bool {
-		if c.BlindSpots[i].Kind != c.BlindSpots[j].Kind {
-			return c.BlindSpots[i].Kind < c.BlindSpots[j].Kind
-		}
-		return c.BlindSpots[i].Site < c.BlindSpots[j].Site
-	})
+	graph.SortBlindSpots(c.BlindSpots)
+	// Collect annotations once per (Site, Kind) in the now-sorted blind-spot order,
+	// so the card's context is deterministic and a seam with several blind spots
+	// (e.g. two external handoffs) does not repeat its shared annotation.
+	c.Annotations = ix.DistinctAnnotationsAt(c.BlindSpots)
 	return c, nil
 }
 
@@ -220,8 +223,15 @@ func (c Card) Render() string {
 	section("Reachable boundary effects", c.Effects)
 	if len(c.BlindSpots) > 0 {
 		fmt.Fprintf(&b, "🕳️  Blind spots touching this card's claims (%d)\n", len(c.BlindSpots))
+		shown := map[[2]string]bool{} // print a seam's annotation under its first row only
 		for _, s := range c.BlindSpots {
 			fmt.Fprintf(&b, "- %s %s\n", s.Kind, s.Site)
+			if key := [2]string{s.Site, s.Kind}; !shown[key] {
+				shown[key] = true
+				for _, a := range graph.MatchAnnotations(c.Annotations, s.Site, s.Kind) {
+					b.WriteString(graph.AnnotationLine(a))
+				}
+			}
 		}
 	}
 	return b.String()

@@ -125,8 +125,8 @@ func Direct()    { sink() }
 		if site == nil {
 			t.Fatalf("%s: no call site", c.fn)
 		}
-		if got := isConcurrentSite(site); got != c.want {
-			t.Errorf("%s: isConcurrentSite = %v, want %v", c.fn, got, c.want)
+		if got := IsConcurrentSite(site); got != c.want {
+			t.Errorf("%s: IsConcurrentSite = %v, want %v", c.fn, got, c.want)
 		}
 	}
 }

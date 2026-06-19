@@ -196,6 +196,53 @@ static:
   highFanOutThreshold: 20   # default 8; flags dynamic-dispatch sites with more callees
 ```
 
+**Quieting external-boundary noise.** flowmap discloses each handoff into a
+third-party (non-stdlib) package that is not already a classified boundary as an
+`ExternalBoundaryCall` — the unclassified external-dependency surface. OpenTelemetry
+is exempt built-in (observability plumbing). To exempt framework/utility deps whose
+handoffs are not the external surface you review (an HTTP router, a decimal lib),
+list their package-path prefixes; a prefix covers a dependency's subpackages. This
+only narrows a disclosure — it can never hide a classified effect or change a
+verdict (`ExternalBoundaryCall` is disclosure-only), so an over-broad entry costs
+visibility, never soundness.
+
+```yaml
+static:
+  externalBoundaryExempt:
+    - github.com/go-chi/chi/v5   # the web framework, not a dependency boundary
+    - golang.org/x/sync          # concurrency helpers
+```
+
+**Annotating a blind spot.** A machine-stated shape (a goroutine, an
+`ExternalBoundaryCall`) names *where* the analysis stops, but not *what* lies
+beyond. Attach that context — for a human or AI reviewer — keyed to the blind spot
+by `site` and `kind`:
+
+```yaml
+static:
+  annotations:
+    - site: "(*example.com/svc/internal/email.Dispatcher).Send"
+      kind: ExternalBoundaryCall   # omit when the site has exactly one blind spot
+      note: "the CustomerIO SDK behind this seam sends an outbound HTTPS POST to api.customer.io"
+      by: "jane@example.com"       # or an agent id/model, for audit
+      claim: "PUBLISH email.sent"  # optional: a canonical effect key the seam hides
+```
+
+The optional `claim` is a falsifiable, machine-checkable form of the note — the
+canonical effect key (`PUBLISH <event>`, `db <OP> <table>`) you assert is behind the
+seam. With a behavioral corpus, `groundwork`'s `impeach` lens grades it **CONFIRMED**
+when that exact effect is observed severed at the site, or **UNCONFIRMED** when the
+seam is witnessed but the claimed effect was not seen (a sample's silence is not
+proof of absence, so never "false"). It stays disclosure-only: a confirmed claim is
+stronger evidence, never a proof, and never closes the blind spot or moves a verdict.
+
+Annotations are **disclosure-only**: an annotation never closes a blind spot,
+changes a count, or moves a verdict — it rides the render's blind channel and the
+graph's `annotations` section as context, nothing more. An annotation whose
+`site`/`kind` matches no detected blind spot **fails the build** (a stale FQN is
+drift, refused — never silently attached to a vanished site), so the context
+cannot rot out of sync with the code.
+
 **HTTP routers.** Root discovery recognizes stdlib `ServeMux` and go-chi (so
 oapi-codegen's chi *and* std-net/http servers work out of the box). For another
 method-named router — echo, or a custom one where each registration function is

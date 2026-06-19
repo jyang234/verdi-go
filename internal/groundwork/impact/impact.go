@@ -14,7 +14,6 @@ package impact
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
@@ -25,11 +24,12 @@ import (
 // Card is the triage evidence for one suspect set. Every field is sorted and
 // derived from the graph alone, so identical inputs render identical cards.
 type Card struct {
-	Suspects    []string          `json:"suspects"`
-	Entrypoints []string          `json:"entrypoints,omitempty"` // implicated routes: entrypoint cover of the suspects
-	Callers     []string          `json:"callers,omitempty"`     // reverse reach (who can be affected upstream)
-	Effects     []string          `json:"effects,omitempty"`     // boundary effects reachable from the suspects
-	BlindSpots  []graph.BlindSpot `json:"blind_spots,omitempty"` // gaps on any traversed path — where the card's claims stop being sound
+	Suspects    []string           `json:"suspects"`
+	Entrypoints []string           `json:"entrypoints,omitempty"` // implicated routes: entrypoint cover of the suspects
+	Callers     []string           `json:"callers,omitempty"`     // reverse reach (who can be affected upstream)
+	Effects     []string           `json:"effects,omitempty"`     // boundary effects reachable from the suspects
+	BlindSpots  []graph.BlindSpot  `json:"blind_spots,omitempty"` // gaps on any traversed path — where the card's claims stop being sound
+	Annotations []graph.Annotation `json:"annotations,omitempty"` // human/AI context on those blind spots (disclosure only)
 
 	// CoverOverApprox marks the implicated-entrypoint set as an upper bound: the
 	// reverse reach passed through a HighFanOut dispatch seam, which fans every
@@ -153,12 +153,11 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 			addBlind([]graph.BlindSpot{{Kind: "DynamicEffect", Site: e.From, Detail: strings.TrimPrefix(e.To, "boundary:")}})
 		}
 	}
-	sort.Slice(blind, func(i, j int) bool {
-		if blind[i].Kind != blind[j].Kind {
-			return blind[i].Kind < blind[j].Kind
-		}
-		return blind[i].Site < blind[j].Site
-	})
+	graph.SortBlindSpots(blind)
+	// Annotation context for those blind spots, collected once per (Site, Kind) in
+	// the sorted order so the card is deterministic and a seam with several blind
+	// spots does not repeat its shared annotation.
+	annot := ix.DistinctAnnotationsAt(blind)
 
 	return Card{
 		Suspects:    suspects,
@@ -166,6 +165,7 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		Callers:     callers,
 		Effects:     setutil.SortedKeys(effects),
 		BlindSpots:  blind,
+		Annotations: annot,
 		// The implicated-entrypoint count is an upper bound iff the reverse reach
 		// to those entrypoints fanned out through a HighFanOut dispatch seam.
 		CoverOverApprox: ix.CrossesHighFanOut(callers),

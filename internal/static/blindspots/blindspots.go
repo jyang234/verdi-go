@@ -21,6 +21,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
+	"github.com/jyang234/golang-code-graph/internal/static/ssabuild"
 )
 
 // Kind is a blind-spot category.
@@ -40,6 +41,39 @@ const (
 	// function and all its downstream edges and effects are absent from the
 	// graph, so a must_not_reach over the site must abstain, not prove absence.
 	UnresolvedCall Kind = "UnresolvedCall"
+	// ConcurrentDispatch is the goroutine sibling of UnresolvedCall: a func-value
+	// call the algorithm resolved to NO callee whose dispatching instruction is a
+	// `go` statement (*ssa.Go). The concurrency is a VERIFIED fact read straight
+	// from the SSA — not an inference — so the machine states "an asynchronous body
+	// is hidden here" instead of the generic "a call is hidden". It is the same
+	// graph-completeness gap as UnresolvedCall (the goroutine's body and downstream
+	// edges are absent) and Bin A — irreducible to static, never reclaimable by
+	// --reclaim — so a must_not_reach over the site must abstain. Split out so a
+	// reviewer reads the recovered shape rather than a flattened catch-all; a
+	// resolved `go` dispatch is NOT here — its body is in the graph and its
+	// concurrency rides the edge's Concurrent flag.
+	ConcurrentDispatch Kind = "ConcurrentDispatch"
+	// ExternalBoundaryCall is a call from first-party code into a THIRD-PARTY
+	// (non-stdlib) package that is not already a classified boundary effect
+	// (HTTP/DB/bus/telemetry). The callee is KNOWN — its package is named — but its
+	// body lies outside the analyzed module, so its downstream edges and effects are
+	// invisible (the cgate CustomerIO-SDK seam: the outbound HTTPS send happens
+	// inside the vendored client). It is the machine-verified "control leaves into
+	// package X here" disclosure, the unclassified-external-dependency surface a
+	// reviewer either classifies, annotates, or accepts as out of scope. Stdlib is
+	// excluded (the language platform, not a dependency boundary); classified
+	// boundaries are excluded (already disclosed as typed effects); and infrastructure
+	// plumbing is excluded via the exempt list (HintSet.IsExternalBoundaryExempt:
+	// OpenTelemetry built-in, plus any config static.externalBoundaryExempt prefixes).
+	//
+	// Unlike UnresolvedCall/ConcurrentDispatch (UNKNOWN target — could dispatch back
+	// into first-party code and reach a forbidden sink, so reach must abstain) this
+	// has a known external target that is the SAME leaf the reachability index
+	// already stops at (graph.Index drops external edges). So it is DISCLOSURE-ONLY:
+	// reach.frontierBlindSiteWith deliberately skips it, leaving every must_not_reach
+	// verdict unchanged — it discloses the accepted external-leaf boundary, it does
+	// not redefine it.
+	ExternalBoundaryCall Kind = "ExternalBoundaryCall"
 	// Reflect is reflective code, invisible to the call graph.
 	Reflect Kind = "reflect"
 	// HighFanOut is a dynamic-dispatch site the algorithm resolved to many
@@ -67,7 +101,7 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
+		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, ExternalBoundaryCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
 	}
 }
 
@@ -126,6 +160,19 @@ func (k Kind) Ratified() bool {
 // §7: "the boundary subset of this manifest is part of the gated artifact").
 func (k Kind) Boundary() bool {
 	return k == NonConstantBoundaryArg || k == UnresolvedDispatch
+}
+
+// IsDisclosureOnlyFrontier reports whether a blind spot of this kind discloses a
+// KNOWN out-of-module leaf the analysis already stops at — so it must NOT act as a
+// reachability or severance frontier. Such a kind neither blinds a must_not_reach
+// proof (fitness.firstReachBlinding skips it) nor enters the frontier marker set /
+// ReclaimableShare (frontier.Classify skips it): the effect it names is the same
+// leaf the call graph already terminates at, hiding no in-scope path and severing
+// nothing. ExternalBoundaryCall is the one such kind today. Centralized here so the
+// two skip sites read one predicate instead of each re-deciding by literal Kind —
+// a future disclosure-only kind flips this and both honor it.
+func (k Kind) IsDisclosureOnlyFrontier() bool {
+	return k == ExternalBoundaryCall
 }
 
 // BlindSpot is one disclosed gap. Fields are JSON-tagged for the gated artifact.
@@ -215,6 +262,16 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 					Site:   site,
 					Detail: "reflective call; downstream edges are invisible to the static call graph",
 				})
+			case isExternalBoundary(res.Program, hints, callee):
+				// A handoff into a third-party package we do not analyze and have not
+				// classified as a typed boundary effect. Detail names the package, not
+				// the symbol, so multiple callees in one package at this site dedup to a
+				// single per-(site, package) disclosure.
+				out = append(out, BlindSpot{
+					Kind:   ExternalBoundaryCall,
+					Site:   site,
+					Detail: "hands off to external package " + features.PkgPath(callee) + "; its behavior is outside the analyzed module and invisible to the static call graph",
+				})
 			}
 			if e.Site != nil {
 				m := perSite[e.Site]
@@ -266,6 +323,14 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 // callback, a struct field assigned elsewhere, a registry populated past the
 // rooted entry points), which is the seam that vanishes silently. Builtins are
 // excluded — they are not call-graph edges.
+//
+// Each gap is reported with the shape the SSA proves rather than one flattened
+// kind: a `go` dispatch (*ssa.Go, read via the shared features.IsConcurrentSite)
+// is a ConcurrentDispatch — the machine states the hidden body is asynchronous —
+// and every other zero-resolution func value is an UnresolvedCall. Both carry the
+// func value's signature when known, so even the irreducible residue names its
+// type instead of "unknown". This only re-labels sites already flagged; it adds
+// and removes none, so reachability and every verdict are unchanged.
 func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.CallInstruction]map[string]bool) []BlindSpot {
 	var out []BlindSpot
 	for _, b := range fn.Blocks {
@@ -281,16 +346,52 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
 				continue
 			}
-			if len(resolved[call]) == 0 {
-				out = append(out, BlindSpot{
-					Kind:   UnresolvedCall,
-					Site:   site,
-					Detail: "a func-value call resolved to no callee; the invoked function and its downstream edges are invisible to the static call graph",
-				})
+			if len(resolved[call]) != 0 {
+				continue
 			}
+			sig := ""
+			if s := cc.Signature(); s != nil {
+				sig = " of type " + s.String()
+			}
+			if features.IsConcurrentSite(call) {
+				out = append(out, BlindSpot{
+					Kind:   ConcurrentDispatch,
+					Site:   site,
+					Detail: "a goroutine (`go`) dispatches a func value" + sig + " resolved to no callee; the concurrent body and its downstream edges are invisible to the static call graph",
+				})
+				continue
+			}
+			out = append(out, BlindSpot{
+				Kind:   UnresolvedCall,
+				Site:   site,
+				Detail: "a func-value call" + sig + " resolved to no callee; the invoked function and its downstream edges are invisible to the static call graph",
+			})
 		}
 	}
 	return out
+}
+
+// isExternalBoundary reports whether a call to callee is an ExternalBoundaryCall:
+// a handoff into a third-party (non-stdlib) package whose behavior the analysis
+// does not see and that is not already a classified boundary effect. First-party
+// callees are ordinary in-graph edges; stdlib is the language platform, not a
+// dependency boundary (and reach already leafs it); a callee the hints classify as
+// telemetry/publish/consume/DB/HTTP is disclosed as a typed boundary effect, so
+// re-flagging it here would double-count. What remains — an unclassified
+// third-party dependency — is the surface this discloses.
+func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee *ssa.Function) bool {
+	path := features.PkgPath(callee)
+	if path == "" || prog.IsFirstPartyPath(path) || features.IsStdlib(path) {
+		return false
+	}
+	if hints.IsExternalBoundaryExempt(callee) {
+		// Observability/infrastructure plumbing (OTel built-in, plus any
+		// static.externalBoundaryExempt prefixes) — a known dependency, not a
+		// boundary worth disclosing per the noise it would otherwise generate.
+		return false
+	}
+	return !hints.IsTelemetry(callee) && !hints.IsPublish(callee) && !hints.IsConsume(callee) &&
+		!hints.IsDB(callee) && !hints.IsHTTP(callee)
 }
 
 // packageDisclosures flags first-party packages that use unsafe, cgo, or a

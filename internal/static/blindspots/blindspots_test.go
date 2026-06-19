@@ -81,7 +81,7 @@ func TestDetectEmitsNoDeclaredKind(t *testing.T) {
 
 func TestKindBoundaryClassification(t *testing.T) {
 	gated := []blindspots.Kind{blindspots.NonConstantBoundaryArg, blindspots.UnresolvedDispatch}
-	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall}
+	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall, blindspots.ConcurrentDispatch, blindspots.ExternalBoundaryCall}
 	for _, k := range gated {
 		if !k.Boundary() {
 			t.Errorf("%q should be a gated boundary blind spot", k)
@@ -223,6 +223,160 @@ func main() {
 	for i := 0; i < 8; i++ {
 		if got := blindspots.Detect(res, hints); !reflect.DeepEqual(first, got) {
 			t.Fatalf("UnresolvedCall detection not deterministic on run %d:\n%+v\n%+v", i, first, got)
+		}
+	}
+}
+
+// TestDetectConcurrentDispatch pins the shape recovery: a zero-resolution func
+// value dispatched by `go` surfaces as ConcurrentDispatch (the machine states the
+// hidden body is asynchronous), while the same call made synchronously stays an
+// UnresolvedCall — proving the SSA instruction type, not a guess, drives the
+// split. Both ride the non-gated graph subset, and the manifest stays byte-stable
+// across runs (the determinism test this new ordering path ships with).
+func TestDetectConcurrentDispatch(t *testing.T) {
+	const src = `package main
+
+// h.cb is a func(string) field never assigned a first-party func, so cb("x")
+// binds to no callee. async launches it with ` + "`go`" + ` (an *ssa.Go); sync calls
+// it directly (an *ssa.Call). Same unresolved seam, different SSA shape.
+type handler struct{ cb func(string) }
+
+func async(h handler) { go h.cb("x") }
+func sync(h handler)  { h.cb("y") }
+
+func main() {
+	async(handler{})
+	sync(handler{})
+}
+`
+	res := analyzeModule(t, map[string]string{
+		"go.mod":  "module example.com/m\n\ngo 1.24\n",
+		"main.go": src,
+	})
+	hints := features.NewHintSet(res.Config)
+	bs := blindspots.Detect(res, hints)
+
+	var concurrent, unresolved []string
+	for _, b := range bs {
+		switch b.Kind {
+		case blindspots.ConcurrentDispatch:
+			concurrent = append(concurrent, b.Site)
+			if !strings.Contains(b.Detail, "goroutine") {
+				t.Errorf("ConcurrentDispatch detail should name the goroutine shape, got %q", b.Detail)
+			}
+		case blindspots.UnresolvedCall:
+			unresolved = append(unresolved, b.Site)
+		}
+	}
+	if len(concurrent) != 1 || !strings.HasSuffix(concurrent[0], ".async") {
+		t.Fatalf("ConcurrentDispatch sites = %v, want exactly [m.async]", concurrent)
+	}
+	if len(unresolved) != 1 || !strings.HasSuffix(unresolved[0], ".sync") {
+		t.Fatalf("UnresolvedCall sites = %v, want exactly [m.sync] (the `go` site must not be flagged plain)", unresolved)
+	}
+	// Neither shape gates: both are graph-completeness disclosures.
+	for _, b := range blindspots.Boundary(bs) {
+		if b.Kind == blindspots.ConcurrentDispatch {
+			t.Errorf("ConcurrentDispatch must not gate; found in boundary subset: %+v", b)
+		}
+	}
+	// Byte-stable across runs.
+	for i := 0; i < 8; i++ {
+		if got := blindspots.Detect(res, hints); !reflect.DeepEqual(bs, got) {
+			t.Fatalf("ConcurrentDispatch detection not deterministic on run %d", i)
+		}
+	}
+}
+
+// TestDetectExternalBoundaryCall pins the unclassified-external-dependency
+// surface over the loansvc fixture: a first-party handoff into a third-party
+// (non-stdlib) package that is not a classified boundary effect surfaces as an
+// ExternalBoundaryCall naming the package. loansvc calls golang.org/x/sync/errgroup
+// directly (a genuine concurrency dependency) — that must surface. It also
+// instruments with OpenTelemetry on nearly every function; those span/attribute
+// calls must NOT surface (the isInstrumentation exclusion), or the disclosure
+// would drown in per-span noise. And it must never gate.
+func TestDetectExternalBoundaryCall(t *testing.T) {
+	res, err := statictest.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+
+	var sawErrgroup, sawOTel bool
+	for _, b := range bs {
+		if b.Kind != blindspots.ExternalBoundaryCall {
+			continue
+		}
+		switch {
+		case strings.Contains(b.Detail, "golang.org/x/sync/errgroup"):
+			sawErrgroup = true
+		case strings.Contains(b.Detail, "go.opentelemetry.io/"):
+			sawOTel = true
+		}
+		if b.Kind.Boundary() {
+			t.Errorf("ExternalBoundaryCall leaked into the gated boundary subset at %q", b.Site)
+		}
+	}
+	if !sawErrgroup {
+		t.Errorf("expected an ExternalBoundaryCall for golang.org/x/sync/errgroup; manifest=%+v", bs)
+	}
+	if sawOTel {
+		t.Errorf("OpenTelemetry instrumentation must be excluded from ExternalBoundaryCall (isInstrumentation), but one surfaced")
+	}
+	// A classified third-party boundary (database/sql is stdlib; the bus/HTTP hints
+	// cover the rest) must not double-emit as EBC: stdlib is excluded by rule, and
+	// any hinted callee is excluded. The non-gated subset carries every EBC.
+	for _, b := range blindspots.Boundary(bs) {
+		if b.Kind == blindspots.ExternalBoundaryCall {
+			t.Errorf("ExternalBoundaryCall must not gate; found in boundary subset: %+v", b)
+		}
+	}
+}
+
+// TestExternalBoundaryExemptSuppresses pins the suppression mechanism: a
+// static.externalBoundaryExempt prefix removes a package's ExternalBoundaryCall
+// while leaving the rest of the manifest intact. loansvc's one genuine EBC is
+// golang.org/x/sync/errgroup; exempting that prefix must drop exactly it and
+// nothing else (the disclosure narrows, it does not vanish wholesale).
+func TestExternalBoundaryExemptSuppresses(t *testing.T) {
+	res, err := statictest.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(hints *features.HintSet) (ebc int, other int) {
+		for _, b := range blindspots.Detect(res, hints) {
+			if b.Kind == blindspots.ExternalBoundaryCall {
+				ebc++
+			} else {
+				other++
+			}
+		}
+		return
+	}
+
+	baseEBC, baseOther := count(features.NewHintSet(res.Config))
+	if baseEBC == 0 {
+		t.Fatal("loansvc should emit at least one ExternalBoundaryCall; the suppression check would be vacuous")
+	}
+
+	// Same classification config as the base, with only the exempt prefix added, so
+	// the exempt list is the sole variable.
+	cfg := *res.Config
+	cfg.Static.ExternalBoundaryExempt = append([]string{"golang.org/x/sync"}, cfg.Static.ExternalBoundaryExempt...)
+	exEBC, exOther := count(features.NewHintSet(&cfg))
+
+	if exEBC >= baseEBC {
+		t.Errorf("exempting golang.org/x/sync should reduce ExternalBoundaryCall count: base=%d exempt=%d", baseEBC, exEBC)
+	}
+	// Suppression is surgical: it touches only the EBC channel, never other kinds.
+	if exOther != baseOther {
+		t.Errorf("exempt list must not change non-EBC disclosures: base=%d exempt=%d", baseOther, exOther)
+	}
+	for _, b := range blindspots.Detect(res, features.NewHintSet(&cfg)) {
+		if b.Kind == blindspots.ExternalBoundaryCall && strings.Contains(b.Detail, "golang.org/x/sync") {
+			t.Errorf("golang.org/x/sync EBC should be suppressed, still present: %+v", b)
 		}
 	}
 }
