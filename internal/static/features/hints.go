@@ -51,6 +51,11 @@ type HintSet struct {
 	busConsume []hint
 	db         []hint
 	http       []hint
+	// externalExempt are package-path prefixes treated as infrastructure/plumbing
+	// rather than a dependency boundary, suppressing their ExternalBoundaryCall
+	// disclosures. Prefix (not exact-path) so one entry covers a dependency's
+	// subpackages — the OTel family is one built-in prefix, not a list per package.
+	externalExempt []string
 }
 
 // NewHintSet builds the hint set from cfg (nil => only built-ins).
@@ -61,6 +66,11 @@ func NewHintSet(cfg *config.Config) *HintSet {
 		// its logging calls out of the tier-1..3 bands.
 		telemetry: parseHints([]string{"log", "log/slog", "go.uber.org/zap", "go.uber.org/zap/zapcore"}),
 		db:        parseHints([]string{"database/sql"}),
+		// OpenTelemetry is observability plumbing already modeled on the behavioral
+		// side; its span/attribute/metric calls pepper nearly every instrumented
+		// function, so flagging them as ExternalBoundaryCall would bury the genuine
+		// seams. Built-in exempt; teams extend via static.externalBoundaryExempt.
+		externalExempt: []string{"go.opentelemetry.io/"},
 	}
 	if cfg != nil {
 		hs.telemetry = append(hs.telemetry, parseHints(cfg.Classify.Telemetry)...)
@@ -68,6 +78,7 @@ func NewHintSet(cfg *config.Config) *HintSet {
 		hs.busConsume = append(hs.busConsume, parseHints(cfg.Classify.BusConsume)...)
 		hs.db = append(hs.db, parseHints(cfg.Classify.DB)...)
 		hs.http = append(hs.http, parseHints(cfg.Classify.HTTP)...)
+		hs.externalExempt = append(hs.externalExempt, cfg.Static.ExternalBoundaryExempt...)
 	}
 	return hs
 }
@@ -114,6 +125,37 @@ func (hs *HintSet) IsDB(fn *ssa.Function) bool {
 
 // IsHTTP reports whether fn is an outbound HTTP/RPC seam call.
 func (hs *HintSet) IsHTTP(fn *ssa.Function) bool { return anyMatch(hs.http, fn) }
+
+// IsExternalBoundaryExempt reports whether fn's package is exempt from the
+// ExternalBoundaryCall disclosure — observability/infrastructure plumbing rather
+// than a dependency boundary worth surfacing (the OTel built-in plus any
+// static.externalBoundaryExempt prefixes).
+func (hs *HintSet) IsExternalBoundaryExempt(fn *ssa.Function) bool {
+	return prefixExempt(PkgPath(fn), hs.externalExempt)
+}
+
+// prefixExempt reports whether pkgPath falls under one of the exempt prefixes,
+// matched at a path-SEGMENT boundary so "github.com/go-chi/chi/v5" covers
+// ".../v5/middleware" but not an unrelated ".../v52". An entry with a trailing
+// slash ("go.opentelemetry.io/") is itself the boundary, matching the whole family.
+func prefixExempt(pkgPath string, prefixes []string) bool {
+	if pkgPath == "" {
+		return false
+	}
+	for _, pre := range prefixes {
+		switch {
+		case pkgPath == pre:
+			return true
+		case strings.HasSuffix(pre, "/"):
+			if strings.HasPrefix(pkgPath, pre) {
+				return true
+			}
+		case strings.HasPrefix(pkgPath, pre+"/"):
+			return true
+		}
+	}
+	return false
+}
 
 // StringArgs returns the call's string-typed arguments, in source order. The
 // receiver and a leading context are naturally skipped (they are not strings),

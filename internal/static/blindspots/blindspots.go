@@ -62,8 +62,9 @@ const (
 	// package X here" disclosure, the unclassified-external-dependency surface a
 	// reviewer either classifies, annotates, or accepts as out of scope. Stdlib is
 	// excluded (the language platform, not a dependency boundary); classified
-	// boundaries are excluded (already disclosed as typed effects); and OpenTelemetry
-	// instrumentation is excluded as observability plumbing (see isInstrumentation).
+	// boundaries are excluded (already disclosed as typed effects); and infrastructure
+	// plumbing is excluded via the exempt list (HintSet.IsExternalBoundaryExempt:
+	// OpenTelemetry built-in, plus any config static.externalBoundaryExempt prefixes).
 	//
 	// Unlike UnresolvedCall/ConcurrentDispatch (UNKNOWN target — could dispatch back
 	// into first-party code and reach a forbidden sink, so reach must abstain) this
@@ -367,24 +368,17 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 // third-party dependency — is the surface this discloses.
 func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee *ssa.Function) bool {
 	path := features.PkgPath(callee)
-	if path == "" || prog.IsFirstPartyPath(path) || features.IsStdlib(path) || isInstrumentation(path) {
+	if path == "" || prog.IsFirstPartyPath(path) || features.IsStdlib(path) {
+		return false
+	}
+	if hints.IsExternalBoundaryExempt(callee) {
+		// Observability/infrastructure plumbing (OTel built-in, plus any
+		// static.externalBoundaryExempt prefixes) — a known dependency, not a
+		// boundary worth disclosing per the noise it would otherwise generate.
 		return false
 	}
 	return !hints.IsTelemetry(callee) && !hints.IsPublish(callee) && !hints.IsConsume(callee) &&
 		!hints.IsDB(callee) && !hints.IsHTTP(callee)
-}
-
-// isInstrumentation reports whether a package is observability instrumentation
-// rather than a service-effect dependency boundary. OpenTelemetry is the one
-// built-in exclusion beyond stdlib: span/attribute/metric calls pepper nearly
-// every instrumented function, so flagging them as ExternalBoundaryCall would
-// bury the genuine seams (a payments/email SDK) under per-span noise and get the
-// disclosure muted (CLAUDE.md tenet 3). OTel is also already modeled on the
-// behavioral side (the OTLP capture), so it is plumbing here, not a hidden effect.
-// A team's own telemetry libs are excluded the normal way — via the telemetry
-// classify hint — so this stays a minimal, well-known default, not a grab-bag.
-func isInstrumentation(pkgPath string) bool {
-	return pkgPath == "go.opentelemetry.io/otel" || strings.HasPrefix(pkgPath, "go.opentelemetry.io/")
 }
 
 // packageDisclosures flags first-party packages that use unsafe, cgo, or a

@@ -119,6 +119,18 @@ type StaticConfig struct {
 	// CODEOWNER commits the seam here (paired with a blind_spot_ratchet allow-list
 	// entry in the policy, §8 crack #6). Each carries a reason — the witness — for audit.
 	DeclaredBlindSpots []DeclaredBlindSpot `yaml:"declaredBlindSpots,omitempty"`
+
+	// ExternalBoundaryExempt lists third-party package-path prefixes to treat as
+	// infrastructure/plumbing rather than a dependency boundary, suppressing their
+	// ExternalBoundaryCall disclosures. OpenTelemetry is exempt built-in (observability
+	// plumbing already modeled on the behavioral side); teams add framework/utility
+	// deps — an HTTP router, a decimal lib — whose handoffs are not the external
+	// surface a reviewer reviews. Matched by package-path prefix at a segment boundary,
+	// so "github.com/go-chi/chi/v5" also covers its subpackages. It only NARROWS a
+	// disclosure: it can never hide a classified boundary effect (those are excluded by
+	// classification, not by this) nor change a verdict (ExternalBoundaryCall is
+	// disclosure-only), so an over-broad entry costs visibility, never soundness.
+	ExternalBoundaryExempt []string `yaml:"externalBoundaryExempt,omitempty"`
 }
 
 // DeclaredBlindSpot is one ratified seam (plan §8). Site is the FQN to blind (the
@@ -375,6 +387,14 @@ func (c *Config) validate() error {
 		}
 		if b.Reason == "" {
 			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): reason is required (the impeachment witness)", i, b.Site)
+		}
+	}
+	// An empty exempt prefix would match every package — silently suppressing the
+	// whole ExternalBoundaryCall disclosure. Fail closed at load rather than blind
+	// the surface by typo.
+	for i, p := range c.Static.ExternalBoundaryExempt {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("flowmap config: static.externalBoundaryExempt[%d] is empty; an empty prefix would suppress every external boundary", i)
 		}
 	}
 	return nil

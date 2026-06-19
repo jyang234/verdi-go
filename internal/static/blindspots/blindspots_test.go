@@ -334,6 +334,53 @@ func TestDetectExternalBoundaryCall(t *testing.T) {
 	}
 }
 
+// TestExternalBoundaryExemptSuppresses pins the suppression mechanism: a
+// static.externalBoundaryExempt prefix removes a package's ExternalBoundaryCall
+// while leaving the rest of the manifest intact. loansvc's one genuine EBC is
+// golang.org/x/sync/errgroup; exempting that prefix must drop exactly it and
+// nothing else (the disclosure narrows, it does not vanish wholesale).
+func TestExternalBoundaryExemptSuppresses(t *testing.T) {
+	res, err := statictest.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(hints *features.HintSet) (ebc int, other int) {
+		for _, b := range blindspots.Detect(res, hints) {
+			if b.Kind == blindspots.ExternalBoundaryCall {
+				ebc++
+			} else {
+				other++
+			}
+		}
+		return
+	}
+
+	baseEBC, baseOther := count(features.NewHintSet(res.Config))
+	if baseEBC == 0 {
+		t.Fatal("loansvc should emit at least one ExternalBoundaryCall; the suppression check would be vacuous")
+	}
+
+	// Same classification config as the base, with only the exempt prefix added, so
+	// the exempt list is the sole variable.
+	cfg := *res.Config
+	cfg.Static.ExternalBoundaryExempt = append([]string{"golang.org/x/sync"}, cfg.Static.ExternalBoundaryExempt...)
+	exEBC, exOther := count(features.NewHintSet(&cfg))
+
+	if exEBC >= baseEBC {
+		t.Errorf("exempting golang.org/x/sync should reduce ExternalBoundaryCall count: base=%d exempt=%d", baseEBC, exEBC)
+	}
+	// Suppression is surgical: it touches only the EBC channel, never other kinds.
+	if exOther != baseOther {
+		t.Errorf("exempt list must not change non-EBC disclosures: base=%d exempt=%d", baseOther, exOther)
+	}
+	for _, b := range blindspots.Detect(res, features.NewHintSet(&cfg)) {
+		if b.Kind == blindspots.ExternalBoundaryCall && strings.Contains(b.Detail, "golang.org/x/sync") {
+			t.Errorf("golang.org/x/sync EBC should be suppressed, still present: %+v", b)
+		}
+	}
+}
+
 // highFanOutMain renders a main package whose interface has n implementations,
 // all instantiated, so RTA resolves the interface call to n callees.
 func highFanOutMain(n int) string {
