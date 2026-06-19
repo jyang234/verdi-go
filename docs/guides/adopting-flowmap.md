@@ -213,6 +213,27 @@ static:
     - golang.org/x/sync          # concurrency helpers
 ```
 
+**Annotating a blind spot.** A machine-stated shape (a goroutine, an
+`ExternalBoundaryCall`) names *where* the analysis stops, but not *what* lies
+beyond. Attach that context — for a human or AI reviewer — keyed to the blind spot
+by `site` and `kind`:
+
+```yaml
+static:
+  annotations:
+    - site: "(*example.com/svc/internal/email.Dispatcher).Send"
+      kind: ExternalBoundaryCall   # omit when the site has exactly one blind spot
+      note: "the CustomerIO SDK behind this seam sends an outbound HTTPS POST to api.customer.io"
+      by: "jane@example.com"       # or an agent id/model, for audit
+```
+
+Annotations are **disclosure-only**: an annotation never closes a blind spot,
+changes a count, or moves a verdict — it rides the render's blind channel and the
+graph's `annotations` section as context, nothing more. An annotation whose
+`site`/`kind` matches no detected blind spot **fails the build** (a stale FQN is
+drift, refused — never silently attached to a vanished site), so the context
+cannot rot out of sync with the code.
+
 **HTTP routers.** Root discovery recognizes stdlib `ServeMux` and go-chi (so
 oapi-codegen's chi *and* std-net/http servers work out of the box). For another
 method-named router — echo, or a custom one where each registration function is

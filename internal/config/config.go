@@ -131,6 +131,32 @@ type StaticConfig struct {
 	// classification, not by this) nor change a verdict (ExternalBoundaryCall is
 	// disclosure-only), so an over-broad entry costs visibility, never soundness.
 	ExternalBoundaryExempt []string `yaml:"externalBoundaryExempt,omitempty"`
+
+	// Annotations attach human/AI CONTEXT to a blind spot the analysis already
+	// detected — the irreducible residue a machine-stated shape cannot close (what
+	// happens BEHIND an ExternalBoundaryCall, inside a goroutine, past an unresolved
+	// func value). They are DISCLOSURE-ONLY: an annotation never closes a blind spot,
+	// changes a count, or moves a verdict — it decorates the disclosure channel so a
+	// reviewer reads the context, never a laundered claim (CLAUDE.md tenet 3). Each
+	// must match a detected blind spot by (kind, site); an annotation that matches
+	// none is a load-time error (a stale FQN is drift, fail closed), surfaced where
+	// the merge runs (graphio), not silently dropped.
+	Annotations []Annotation `yaml:"annotations,omitempty"`
+}
+
+// Annotation is one piece of human/AI context on a detected blind spot. Site is
+// the FQN (fn.RelString(nil)) the disclosure names; Kind, when set, must name a
+// recognized blindspots.Kind and disambiguates a site carrying more than one (it
+// may be omitted when the site has exactly one blind spot). Note is the context
+// (required — an annotation with no note is drift). By records authorship for
+// audit (a human handle, or an agent id/model); it must be drawn only from this
+// committed config — never wall-clock or a live session id — so output stays
+// deterministic.
+type Annotation struct {
+	Site string `yaml:"site"`
+	Kind string `yaml:"kind,omitempty"`
+	Note string `yaml:"note"`
+	By   string `yaml:"by,omitempty"`
 }
 
 // DeclaredBlindSpot is one ratified seam (plan §8). Site is the FQN to blind (the
@@ -395,6 +421,18 @@ func (c *Config) validate() error {
 	for i, p := range c.Static.ExternalBoundaryExempt {
 		if strings.TrimSpace(p) == "" {
 			return fmt.Errorf("flowmap config: static.externalBoundaryExempt[%d] is empty; an empty prefix would suppress every external boundary", i)
+		}
+	}
+	// An annotation must name the site it decorates and carry a note (the context).
+	// The (site, kind) match against a detected blind spot — and the kind's
+	// recognition — are checked in graphio where the merge sees the manifest (config
+	// cannot import blindspots). A site/note-less annotation is drift, refused here.
+	for i, a := range c.Static.Annotations {
+		if a.Site == "" {
+			return fmt.Errorf("flowmap config: static.annotations[%d]: site is required", i)
+		}
+		if strings.TrimSpace(a.Note) == "" {
+			return fmt.Errorf("flowmap config: static.annotations[%d] (%s): note is required (the context)", i, a.Site)
 		}
 	}
 	return nil

@@ -78,6 +78,23 @@ type Graph struct {
 	// from topology. It is a disclosure: no verdict reads it. Omitted when there is
 	// nothing to disclose.
 	Frontier *FrontierSection `json:"frontier,omitempty"`
+
+	// Annotations are human/AI context attached to blind spots (keyed by Site/Kind),
+	// decoded on this side of the trust boundary like every other section. It is a
+	// disclosure: NO verdict reads it — it explains a blind spot, it does not change
+	// one. groundwork decodes it so the field is known to the strict reader (an
+	// unknown field would otherwise be rejected) and so review/triage can echo the
+	// context beside the blind spot. Omitted when none.
+	Annotations []Annotation `json:"annotations,omitempty"`
+}
+
+// Annotation is operator/agent context on a blind spot, keyed by (Site, Kind).
+// Disclosure only: no verdict, count, or reachability computation reads it.
+type Annotation struct {
+	Site string `json:"site"`
+	Kind string `json:"kind"`
+	Note string `json:"note"`
+	By   string `json:"by,omitempty"`
 }
 
 // FrontierSection mirrors flowmap's disclosed frontier: the per-site markers, the
