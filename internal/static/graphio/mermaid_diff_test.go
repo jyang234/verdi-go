@@ -17,21 +17,7 @@ func TestMermaidDiffGolden(t *testing.T) {
 	base := loadGraph(t, "../../../testdata/groundwork/goldens/layeredsvc.branch-good.graph.json")
 	branch := loadGraph(t, "../../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json")
 	got := render.Fence(MermaidDiff(base, branch, MermaidOptions{MaxTier: 2}))
-
-	mdPath := "../../../testdata/groundwork/goldens/layeredsvc.rewire.callgraph-diff.md"
-	if *updateGolden {
-		if err := os.WriteFile(mdPath, []byte(got), 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		return
-	}
-	want, err := os.ReadFile(mdPath)
-	if err != nil {
-		t.Fatalf("missing golden %s; run with -update: %v", mdPath, err)
-	}
-	if string(want) != got {
-		t.Errorf("%s is stale (run -update to rebase):\n%s", mdPath, firstDiff(string(want), got))
-	}
+	assertGolden(t, "../../../testdata/groundwork/goldens/layeredsvc.rewire.callgraph-diff.md", got)
 }
 
 func loadGraph(t *testing.T, path string) *Graph {

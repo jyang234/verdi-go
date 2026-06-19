@@ -53,20 +53,28 @@ func TestCallGraphMermaidGoldens(t *testing.T) {
 			got := render.Fence(g.Mermaid(MermaidOptions{MaxTier: 2}))
 
 			mdPath := strings.TrimSuffix(gj, ".graph.json") + ".callgraph.md"
-			if *updateGolden {
-				if err := os.WriteFile(mdPath, []byte(got), 0o644); err != nil {
-					t.Fatalf("write golden: %v", err)
-				}
-				return
-			}
-			want, err := os.ReadFile(mdPath)
-			if err != nil {
-				t.Fatalf("missing golden %s; run `go test ./internal/static/graphio -run TestCallGraphMermaidGoldens -update`: %v", mdPath, err)
-			}
-			if string(want) != got {
-				t.Errorf("%s is stale (run -update to rebase):\n%s", mdPath, firstDiff(string(want), got))
-			}
+			assertGolden(t, mdPath, got)
 		})
+	}
+}
+
+// assertGolden compares got against the committed golden at path, or rebases it
+// under -update. It is the single golden lifecycle the call-graph, diff, and rooted
+// views all go through, so every committed .md view rebases identically.
+func assertGolden(t *testing.T, path, got string) {
+	t.Helper()
+	if *updateGolden {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing golden %s; run `go test ./internal/static/graphio -update`: %v", path, err)
+	}
+	if string(want) != got {
+		t.Errorf("%s is stale (run -update to rebase):\n%s", path, firstDiff(string(want), got))
 	}
 }
 

@@ -34,6 +34,13 @@ type MermaidOptions struct {
 // "flowchart LR\n" and ends with a newline, and is byte-identical across runs for
 // a given (g, opts).
 func (g *Graph) Mermaid(opts MermaidOptions) string {
+	return g.mermaid(opts, nil)
+}
+
+// mermaid is the shared renderer. notes are extra %% disclosure lines emitted in
+// the header (after the hidden-plumbing note) — MermaidRootedAt uses them to
+// disclose what a per-handler scoping pruned.
+func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	ids := &idAlloc{used: map[string]bool{}}
 
 	// A node that emits a boundary effect is load-bearing: hiding it would drop the
@@ -109,6 +116,9 @@ func (g *Graph) Mermaid(opts MermaidOptions) string {
 	if hidden > 0 {
 		b.WriteString("    %% " + plural(hidden, "first-party node") +
 			" above tier " + itoa(opts.MaxTier) + " hidden as plumbing; pass --show-plumbing to include\n")
+	}
+	for _, n := range notes {
+		b.WriteString("    %% " + comment(n) + "\n")
 	}
 
 	// First-party node declarations, in canonical Node order.

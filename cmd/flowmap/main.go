@@ -128,6 +128,7 @@ func cmdGraph(args []string) error {
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
 	diffBase := fs.String("diff", "", "with --mermaid, render the delta from this BASE graph JSON to the analyzed branch (added/removed nodes and edges colored); a view, never a gate")
+	rootAt := fs.String("root", "", `with --mermaid, scope to one entry point at RENDER time (e.g. "POST /loan-application") — unlike --entry this keeps the frontier markers in the per-handler view`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -160,6 +161,19 @@ func cmdGraph(args []string) error {
 			maxTier = 0
 		}
 		opts := graphio.MermaidOptions{MaxTier: maxTier}
+		if *rootAt != "" {
+			// Render-time scoping needs the UNSCOPED graph so the frontier section is
+			// present; --entry would have scoped it at build time and dropped frontier.
+			if *entry != "" {
+				return fmt.Errorf("graph --root and --entry are mutually exclusive: --root scopes at render time over the full graph (keeping frontier markers), --entry scopes the build (dropping them)")
+			}
+			out, ok := g.MermaidRootedAt(*rootAt, opts)
+			if !ok {
+				return fmt.Errorf("graph --root %q: no entry point or function matches in this graph", *rootAt)
+			}
+			_, err = os.Stdout.WriteString(render.Fence(out))
+			return err
+		}
 		if *diffBase != "" {
 			base, err := loadGraphJSON(*diffBase)
 			if err != nil {
