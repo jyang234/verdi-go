@@ -40,6 +40,18 @@ const (
 	// function and all its downstream edges and effects are absent from the
 	// graph, so a must_not_reach over the site must abstain, not prove absence.
 	UnresolvedCall Kind = "UnresolvedCall"
+	// ConcurrentDispatch is the goroutine sibling of UnresolvedCall: a func-value
+	// call the algorithm resolved to NO callee whose dispatching instruction is a
+	// `go` statement (*ssa.Go). The concurrency is a VERIFIED fact read straight
+	// from the SSA — not an inference — so the machine states "an asynchronous body
+	// is hidden here" instead of the generic "a call is hidden". It is the same
+	// graph-completeness gap as UnresolvedCall (the goroutine's body and downstream
+	// edges are absent) and Bin A — irreducible to static, never reclaimable by
+	// --reclaim — so a must_not_reach over the site must abstain. Split out so a
+	// reviewer reads the recovered shape rather than a flattened catch-all; a
+	// resolved `go` dispatch is NOT here — its body is in the graph and its
+	// concurrency rides the edge's Concurrent flag.
+	ConcurrentDispatch Kind = "ConcurrentDispatch"
 	// Reflect is reflective code, invisible to the call graph.
 	Reflect Kind = "reflect"
 	// HighFanOut is a dynamic-dispatch site the algorithm resolved to many
@@ -67,7 +79,7 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
+		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
 	}
 }
 
@@ -266,6 +278,14 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 // callback, a struct field assigned elsewhere, a registry populated past the
 // rooted entry points), which is the seam that vanishes silently. Builtins are
 // excluded — they are not call-graph edges.
+//
+// Each gap is reported with the shape the SSA proves rather than one flattened
+// kind: a `go` dispatch (*ssa.Go, read via the shared features.IsConcurrentSite)
+// is a ConcurrentDispatch — the machine states the hidden body is asynchronous —
+// and every other zero-resolution func value is an UnresolvedCall. Both carry the
+// func value's signature when known, so even the irreducible residue names its
+// type instead of "unknown". This only re-labels sites already flagged; it adds
+// and removes none, so reachability and every verdict are unchanged.
 func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.CallInstruction]map[string]bool) []BlindSpot {
 	var out []BlindSpot
 	for _, b := range fn.Blocks {
@@ -281,13 +301,26 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
 				continue
 			}
-			if len(resolved[call]) == 0 {
-				out = append(out, BlindSpot{
-					Kind:   UnresolvedCall,
-					Site:   site,
-					Detail: "a func-value call resolved to no callee; the invoked function and its downstream edges are invisible to the static call graph",
-				})
+			if len(resolved[call]) != 0 {
+				continue
 			}
+			sig := ""
+			if s := cc.Signature(); s != nil {
+				sig = " of type " + s.String()
+			}
+			if features.IsConcurrentSite(call) {
+				out = append(out, BlindSpot{
+					Kind:   ConcurrentDispatch,
+					Site:   site,
+					Detail: "a goroutine (`go`) dispatches a func value" + sig + " resolved to no callee; the concurrent body and its downstream edges are invisible to the static call graph",
+				})
+				continue
+			}
+			out = append(out, BlindSpot{
+				Kind:   UnresolvedCall,
+				Site:   site,
+				Detail: "a func-value call" + sig + " resolved to no callee; the invoked function and its downstream edges are invisible to the static call graph",
+			})
 		}
 	}
 	return out
