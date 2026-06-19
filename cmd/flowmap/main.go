@@ -115,7 +115,8 @@ func cmdBoundary(args []string) error {
 }
 
 // cmdGraph prints the non-gated call-graph view, optionally scoped to one entry
-// point with --entry.
+// point with --entry. Default output is canonical JSON; --mermaid renders the same
+// graph as a human-readable flowchart (a view, never gated) for review.
 func cmdGraph(args []string) error {
 	fs := flag.NewFlagSet("graph", flag.ContinueOnError)
 	entry := fs.String("entry", "", `scope to the subgraph reachable from this entry point (e.g. "POST /loan-application")`)
@@ -123,6 +124,8 @@ func cmdGraph(args []string) error {
 	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta" (refines interface-dense dispatch — fewer spurious callees), "cha" (rootless fallback)`)
 	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers (opt-in; adds provenance-tagged edges that close the strict-server seam)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
+	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
+	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -145,6 +148,17 @@ func cmdGraph(args []string) error {
 	}
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
+	}
+	if *asMermaid {
+		// The Mermaid flowchart is a deterministic view of the graph, so it carries
+		// no stamp/tool provenance (those gate-adjacent fields ride the JSON only).
+		// Collapse tier-3 plumbing by default; --show-plumbing renders the full graph.
+		maxTier := 2
+		if *showPlumbing {
+			maxTier = 0
+		}
+		_, err = os.Stdout.WriteString(g.Mermaid(graphio.MermaidOptions{MaxTier: maxTier}))
+		return err
 	}
 	// The stamp is caller-supplied, never derived: deriving it (from git HEAD,
 	// a timestamp) would make the graph a function of more than the code and
