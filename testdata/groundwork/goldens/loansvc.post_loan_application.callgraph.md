@@ -17,6 +17,7 @@ flowchart LR
     bus_bus_PUBLISH__dynamic_{{"bus PUBLISH &lt;dynamic&gt;"}}:::bus
     db_db_INSERT_audit_log[("db INSERT audit_log")]:::db
     db_db_INSERT_ledger[("db INSERT ledger")]:::db
+    blind_ExternalBoundaryCall(["⊥ ExternalBoundaryCall<br/>blind spot"]):::blind
     frontier_dynamic_bus(["⌖ dynamic-bus<br/>frontier A"]):::blind
     frontier_severed_closure(["⌖ severed-closure<br/>frontier B"]):::blind
     frontier_severed_closure1(["⌖ severed-closure<br/>frontier B"]):::blind
@@ -34,6 +35,7 @@ flowchart LR
     origination_Evaluator_notify -. async .-> bus_bus_PUBLISH__dynamic_
     store_Loans_InsertAudit --> db_db_INSERT_audit_log
     store_Loans_InsertLedger --> db_db_INSERT_ledger
+    origination_Evaluator_Evaluate -. blind .-> blind_ExternalBoundaryCall
     origination_Evaluator_notify -. blind .-> frontier_dynamic_bus
     origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure
     origination_Evaluator_Evaluate -. blind .-> frontier_severed_closure1

@@ -38,7 +38,7 @@
   "loansvc.graph.json": {
     "nodes": 39,
     "edges": 47,
-    "blind_spots": 0,
+    "blind_spots": 1,
     "entrypoints": 3,
     "obligations": 0,
     "effect_order": 2,
