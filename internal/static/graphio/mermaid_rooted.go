@@ -23,9 +23,24 @@ import (
 // an UNSCOPED graph (graphio.Build with entry==""), so its Frontier and Entrypoints
 // sections are populated.
 func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool) {
-	rootFn, ok := g.resolveRoot(root)
+	sub, notes, rootFn, ok := g.rootedSubgraph(root)
 	if !ok {
 		return "", false
+	}
+	opts.pinRoot = rootFn
+	return sub.mermaid(opts, notes), true
+}
+
+// rootedSubgraph resolves root and builds the forward-reachable sub-graph that
+// MermaidRootedAt renders, returning that sub-graph, the disclosure notes for what
+// render-time scoping pruned, and the resolved root FQN. Split out from MermaidRootedAt
+// so a test can render the very same sub-graph with and without the --root pin
+// (opts.pinRoot) and assert the pin is inert for a root tier-collapse would keep anyway —
+// without re-deriving this scoping logic in the test (CLAUDE.md: one source of truth).
+func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
+	rootFn, ok := g.resolveRoot(root)
+	if !ok {
+		return nil, nil, "", false
 	}
 
 	reach := g.forwardReach(rootFn)
@@ -110,8 +125,7 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 		notes = append(notes, plural(droppedFrontier, "frontier marker")+
 			" outside this handler's reach shown only in the whole-graph view")
 	}
-	opts.pinRoot = rootFn
-	return sub.mermaid(opts, notes), true
+	return sub, notes, rootFn, true
 }
 
 // resolveRoot maps a user-supplied root to a handler FQN. It tries, in order: an

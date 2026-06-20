@@ -204,18 +204,31 @@ func TestMermaidRootedEffectBearingPlumbingRootNoMisfire(t *testing.T) {
 	}
 }
 
-// TestMermaidRootedNonPlumbingRootByteIdentical pins that pinning a root which would be
-// kept anyway (a tier-1 handler at/under MaxTier) changes nothing: the rescue note is
-// gated on the root being above tier, so a low-tier root produces no note and the same
-// bytes the renderer would emit if the pin path did not exist.
+// TestMermaidRootedNonPlumbingRootByteIdentical pins that the --root pin is inert for a
+// root tier-collapse keeps anyway (a tier-1 handler at/under MaxTier): rendering the
+// SAME rooted sub-graph with the pin set is byte-identical to rendering it with the pin
+// cleared, and emits no rescue note. Only a plumbing-tier root the pin actually rescues
+// may differ (TestMermaidRootedPinsPlumbingTierRoot). Rendering the one sub-graph both
+// ways — rather than asserting only that the note is absent — is what proves byte-identity.
 func TestMermaidRootedNonPlumbingRootByteIdentical(t *testing.T) {
 	g := rootedSampleGraph()
-	out, ok := g.MermaidRootedAt("POST /create", MermaidOptions{MaxTier: 2})
+	sub, notes, rootFn, ok := g.rootedSubgraph("POST /create")
 	if !ok {
 		t.Fatal("expected POST /create to resolve")
 	}
-	if strings.Contains(out, "pinned into view") {
-		t.Errorf("a non-plumbing root must not emit the pin note:\n%s", out)
+
+	pinned := MermaidOptions{MaxTier: 2, pinRoot: rootFn}
+	unpinned := MermaidOptions{MaxTier: 2}
+	// Independent note copies so an append into a shared backing array cannot make the
+	// two renders differ for a reason other than the pin (the property under test).
+	withPin := sub.mermaid(pinned, append([]string(nil), notes...))
+	withoutPin := sub.mermaid(unpinned, append([]string(nil), notes...))
+
+	if withPin != withoutPin {
+		t.Errorf("the pin must be inert for a non-plumbing root, but the bytes differ:\nwith pin:\n%s\nwithout pin:\n%s", withPin, withoutPin)
+	}
+	if strings.Contains(withPin, "pinned into view") {
+		t.Errorf("a non-plumbing root must not emit the pin note:\n%s", withPin)
 	}
 }
 
