@@ -27,12 +27,17 @@ func (r *PackageRollup) Mermaid() string {
 	b.WriteString("    %% component (C3) rollup — " + plural(len(r.Components), "component") +
 		", " + plural(len(r.Edges), "edge") + " (a view, never a gate)\n")
 	b.WriteString("    %% solid = resolved call/effect (code); dashed = disclosed effect (blind, documented)\n")
+	b.WriteString("    %% dotted into a :::root box = composition-root wiring (DI back-edge, not a domain dependency)\n")
 
 	compID := make(map[string]string, len(r.Components))
 	for _, c := range r.Components {
 		id := ids.get("comp_" + c.Package)
 		compID[c.Package] = id
-		b.WriteString("    " + id + `["` + mermaidText(shortPkg(c.Package)) + `"]` + "\n")
+		class := ""
+		if c.Role == RollupRoot {
+			class = ":::root" // the composition root — assembly, not a domain component
+		}
+		b.WriteString("    " + id + `["` + mermaidText(shortPkg(c.Package)) + `"]` + class + "\n")
 	}
 	extID := rollupExternalIDs(r.Edges, ids, &b)
 
@@ -43,7 +48,7 @@ func (r *PackageRollup) Mermaid() string {
 		return b.String()
 	}
 
-	var disclosedIdx []int
+	var disclosedIdx, wiringIdx []int
 	var idx int
 	for _, e := range r.Edges {
 		from, ok := compID[e.From]
@@ -54,9 +59,15 @@ func (r *PackageRollup) Mermaid() string {
 		if !ok {
 			continue
 		}
-		if e.Resolved() {
+		switch {
+		case e.Wiring():
+			// A DI back-edge into the composition root: drawn dotted, labeled "wires", so
+			// it never reads as a solid domain dependency pointing the wrong way.
+			b.WriteString("    " + from + " -.->|" + mermaidText("wires") + "| " + to + "\n")
+			wiringIdx = append(wiringIdx, idx)
+		case e.Resolved():
 			b.WriteString("    " + from + " --> " + to + "\n")
-		} else {
+		default:
 			label := "discloses"
 			if e.Note != "" {
 				label = e.Note
@@ -67,7 +78,9 @@ func (r *PackageRollup) Mermaid() string {
 		idx++
 	}
 	writeLinkStyle(&b, disclosedIdx, "stroke-dasharray:5 3,stroke:#8a6d3b")
+	writeLinkStyle(&b, wiringIdx, "stroke-dasharray:2 2,stroke:#8a8a8a")
 	b.WriteString("    classDef ext fill:#eef3fb,stroke:#3b6ea5,color:#244a6e\n")
+	b.WriteString("    classDef root fill:#f3eefb,stroke:#6b4ba5,color:#3a246e\n")
 	return b.String()
 }
 
@@ -151,11 +164,14 @@ func rollupMermaidDiff(base, branch *PackageRollup, caveats []string) string {
 	return b.String()
 }
 
-// rollupDiffEdgeLine styles a component edge: a dashed arrow for a disclosed effect, a
-// solid one for resolved code, with a ±-prefix label so the delta survives greyscale.
+// rollupDiffEdgeLine styles a component edge: a dashed arrow for a disclosed effect OR
+// a composition-root wiring back-edge, a solid one for resolved domain code, with a
+// ±-prefix label so the delta survives greyscale. Wiring is drawn dashed like a
+// disclosure (not solid like a call) so a re-wired injection never reads as a new/
+// dropped real dependency — the same code-vs-wiring honesty the JSON diff enforces.
 func rollupDiffEdgeLine(from, to string, e RollupEdge, s diffState) string {
 	arrow := "-->"
-	if !e.Resolved() {
+	if !e.Resolved() || e.Wiring() {
 		arrow = "-.->"
 	}
 	if p := strings.TrimSpace(prefixFor(s)); p != "" {

@@ -26,12 +26,27 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 )
 
-// Edge-kind values. CODE = {call, effect}; DISCLOSURE = {disclosed}. The class an
-// edge belongs to is its diff split, so the two are named once here.
+// Edge-kind values. CODE = {call, effect}; WIRING = {wiring}; DISCLOSURE = {disclosed}.
+// The class an edge belongs to is its diff split, so the two are named once here.
 const (
 	// RollupCall is a component→component dependency: a resolved first-party call
 	// crossing a package boundary. Solid.
 	RollupCall = "call"
+	// RollupWiring is a dependency-injection BACK-EDGE into a composition root: a
+	// first-party component invokes a func value (a closure or method value) whose
+	// body is DEFINED in a `package main` command and that main INJECTED into the
+	// component. It is a real resolved call — the body genuinely lives in main — but
+	// the dependency reads backwards: main wired the value INTO the component; the
+	// component does not depend on main. A composition-root package CANNOT be imported,
+	// so EVERY edge whose target is a composition root is necessarily such an injected
+	// func value (there is no other way for first-party code to reach a function
+	// defined in `package main`) — which is what makes the classification sound rather
+	// than a heuristic. Carried apart from RollupCall so the C3 view is not inverted by
+	// assembly wiring and the rollup diff does not file an injected-closure swap under
+	// the code bin (see PackageRollupDiff). CODE-adjacent and solid-by-default, but its
+	// own class: External() is false (the target is a first-party component) yet it is
+	// not a domain call.
+	RollupWiring = "wiring"
 	// RollupEffect is a component→external-system effect: a resolved typed boundary
 	// edge (a DB op, a bus publish/consume, an outbound peer call). Solid.
 	RollupEffect = "effect"
@@ -42,6 +57,14 @@ const (
 	// resolved dependency.
 	RollupDisclosed = "disclosed"
 )
+
+// RollupRoot is the Component.Role marker for a COMPOSITION-ROOT component: the
+// package declaring `func main` (the `cmd/<svc>` assembly point). It is where the
+// program is wired together, so nothing should read as depending on it — a consumer
+// folds every edge incident to it (both the cmd→X constructor wiring and the X→cmd
+// injected-closure back-edges) to recover the domain topology without assembly noise.
+// A pure function of the graph (the main package is unambiguous) and disclosure-only.
+const RollupRoot = "composition_root"
 
 // PackageRollup is the component-level view of a Graph.
 type PackageRollup struct {
@@ -56,6 +79,12 @@ type Component struct {
 	Package string `json:"package"`
 	Name    string `json:"name"`
 	Nodes   int    `json:"nodes"`
+	// Role marks a component whose place in the architecture a consumer must read
+	// specially. The only value today is RollupRoot ("composition_root"): the
+	// `package main` assembly point. Empty (omitted) for an ordinary domain
+	// component. Disclosure-only — it names a role, it computes no verdict; an old
+	// consumer that ignores it sees today's behavior.
+	Role string `json:"role,omitempty"`
 }
 
 // RollupEdge is one collapsed component-level edge. From is always a component
@@ -73,12 +102,22 @@ type RollupEdge struct {
 }
 
 // External reports whether the edge's To is an external system rather than a
-// first-party component — true for every kind but a call.
-func (e RollupEdge) External() bool { return e.Kind != RollupCall }
+// first-party component — true for an effect/disclosed edge, false for a first-party
+// call OR a composition-root wiring edge (both target a component box). Spelled as a
+// positive enumeration, not "everything but a call", so a future kind cannot silently
+// fall into the external bin.
+func (e RollupEdge) External() bool { return e.Kind == RollupEffect || e.Kind == RollupDisclosed }
 
 // Resolved reports whether the edge is statically proven (solid) rather than a
-// disclosed-but-blind effect (dashed). The diff's code-vs-disclosure split keys on it.
+// disclosed-but-blind effect (dashed). True for call/wiring/effect, false for
+// disclosed. The diff's code-vs-disclosure split keys on it (wiring is split out
+// ahead of this — see PackageRollupDiff.add).
 func (e RollupEdge) Resolved() bool { return e.Kind != RollupDisclosed }
+
+// Wiring reports whether the edge is a dependency-injection back-edge into a
+// composition root (RollupWiring) — classified apart from a domain call so it stays
+// out of the diff's code bin and a consumer can fold it.
+func (e RollupEdge) Wiring() bool { return e.Kind == RollupWiring }
 
 // RollupByPackage computes the component view. Pure function of g; every list is
 // sorted on intrinsic keys so the result is byte-identical across runs.
@@ -87,17 +126,34 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	// (empty Package) is not a component and anchors no edge.
 	pkgOf := make(map[string]string, len(g.Nodes))
 	counts := map[string]int{}
+	roots := map[string]bool{} // composition-root packages (those declaring `func main`)
 	for _, n := range g.Nodes {
 		if n.Package == "" {
 			continue
 		}
 		pkgOf[n.FQN] = n.Package
 		counts[n.Package]++
+		// The composition root is the package declaring `func main`. We recognize it
+		// from the node FQN — the same `.main` convention groundwork/fitness.proposeLayers
+		// keys composition roots on (one shared convention; parity guarded by
+		// TestRollupMarksCompositionRoot here and TestProposeLayersMultipleRoots there).
+		// FQN == Package+".main" is the PRECISE form: it matches a package-level `func
+		// main` only, never a method named main (whose FQN is "(*pkg.T).main", not
+		// "pkg.main"). A non-main package that declared its own package-level `func main`
+		// (legal Go, but dead code / a smell) is the one residual ambiguity, the same one
+		// the proposeLayers heuristic carries.
+		if n.FQN == n.Package+".main" {
+			roots[n.Package] = true
+		}
 	}
 
 	components := make([]Component, 0, len(counts))
 	for pkg, c := range counts {
-		components = append(components, Component{Package: pkg, Name: lastSegment(pkg), Nodes: c})
+		comp := Component{Package: pkg, Name: lastSegment(pkg), Nodes: c}
+		if roots[pkg] {
+			comp.Role = RollupRoot
+		}
+		components = append(components, comp)
 	}
 	sort.Slice(components, func(i, j int) bool { return components[i].Package < components[j].Package })
 
@@ -119,7 +175,18 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 		if to == "" || to == from {
 			continue // out-of-graph target, or an intra-package call (not a component edge)
 		}
-		seen[edgeKey{from, to, RollupCall}] = true
+		// A back-edge INTO a composition root from a domain component is dependency-
+		// injection WIRING, not a domain call: the target is a func value (closure or
+		// method value) defined in `package main` and injected here, so the dependency
+		// reads backwards. Sound to reclassify wholesale — main cannot be imported, so
+		// there is no other kind of X→root edge to mistake for a real call. The cmd→X
+		// constructor wiring (from is the root) deliberately stays a call; the RollupRoot
+		// marker lets a consumer fold it too if it wants.
+		kind := RollupCall
+		if roots[to] && !roots[from] {
+			kind = RollupWiring
+		}
+		seen[edgeKey{from, to, kind}] = true
 	}
 
 	// DISCLOSURE edges: effect-bearing ExternalBoundaryCall handoffs. A trivial EBC
@@ -241,14 +308,23 @@ func joinSortedSet(set map[string]bool, sep string) string {
 	return strings.Join(out, sep)
 }
 
-// PackageRollupDiff is the component delta between two rollups, split so a code change
-// (a real new/dropped dependency or effect) is NEVER conflated with a disclosure change
-// (a newly-documented or removed blind effect). Each list is sorted. Conflating the two
-// is the failure mode this split exists to prevent: pure instrumentation (annotating a
-// seam) would otherwise read as an architecture change.
+// PackageRollupDiff is the component delta between two rollups, split THREE ways so a
+// code change (a real new/dropped dependency or effect) is NEVER conflated with either
+// a wiring change (which closure the composition root injects) or a disclosure change
+// (a newly-documented or removed blind effect). Each list is sorted. Conflating the
+// classes is the failure mode this split exists to prevent: pure instrumentation
+// (annotating a seam) or pure re-wiring (swapping an injected handler) would otherwise
+// read as an architecture change.
 type PackageRollupDiff struct {
-	CodeAdded         []RollupEdge `json:"code_added"`
-	CodeRemoved       []RollupEdge `json:"code_removed"`
+	CodeAdded   []RollupEdge `json:"code_added"`
+	CodeRemoved []RollupEdge `json:"code_removed"`
+	// WiringAdded/Removed are the composition-root DI back-edges (RollupWiring) that
+	// changed. They are split out of Code* precisely so a change in WHICH closure main
+	// injects (a different error-handler, a swapped factory) does not read as a new/
+	// dropped domain dependency — the diff-pollution harm the wiring class exists to
+	// fix. Classified, never dropped: the delta is still disclosed, just in its own bin.
+	WiringAdded       []RollupEdge `json:"wiring_added"`
+	WiringRemoved     []RollupEdge `json:"wiring_removed"`
 	DisclosureAdded   []RollupEdge `json:"disclosure_added"`
 	DisclosureRemoved []RollupEdge `json:"disclosure_removed"`
 	// Caveats discloses a base↔branch SUBSTRATE skew (empty base, --algo/tool/reclaimer
@@ -286,6 +362,8 @@ func diffRollups(base, branch *PackageRollup) *PackageRollupDiff {
 	d := &PackageRollupDiff{
 		CodeAdded:         []RollupEdge{},
 		CodeRemoved:       []RollupEdge{},
+		WiringAdded:       []RollupEdge{},
+		WiringRemoved:     []RollupEdge{},
 		DisclosureAdded:   []RollupEdge{},
 		DisclosureRemoved: []RollupEdge{},
 	}
@@ -301,6 +379,8 @@ func diffRollups(base, branch *PackageRollup) *PackageRollupDiff {
 	}
 	sortRollupEdges(d.CodeAdded)
 	sortRollupEdges(d.CodeRemoved)
+	sortRollupEdges(d.WiringAdded)
+	sortRollupEdges(d.WiringRemoved)
 	sortRollupEdges(d.DisclosureAdded)
 	sortRollupEdges(d.DisclosureRemoved)
 	return d
@@ -323,9 +403,15 @@ func rollupDiffCaveats(base, branch *Graph, rb, rbr *PackageRollup) []string {
 	return caveats
 }
 
-// add routes an edge into the code or disclosure half of the diff by its class.
+// add routes an edge into the wiring, code, or disclosure third of the diff by its
+// class. Wiring is tested FIRST: a wiring edge is Resolved() too, so it would fall
+// into the code bin — the very conflation this split exists to prevent.
 func (d *PackageRollupDiff) add(e RollupEdge, added bool) {
 	switch {
+	case e.Wiring() && added:
+		d.WiringAdded = append(d.WiringAdded, e)
+	case e.Wiring():
+		d.WiringRemoved = append(d.WiringRemoved, e)
 	case e.Resolved() && added:
 		d.CodeAdded = append(d.CodeAdded, e)
 	case e.Resolved():
