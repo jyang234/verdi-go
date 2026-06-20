@@ -68,10 +68,10 @@ HTML-escaped, both so it renders correctly and as a guard against markup
 injection into a reviewer's rendered view. A test-suite "dialect floor" fails CI
 if a less-portable construct is ever introduced.
 
-**Output stability.** `--mermaid`, `--root`, `--diff`, `--show-plumbing`, and
-`--max-nodes` are the committed CLI surface; treat the rendered Markdown as a
-view (diff-reviewable, never gated), and pin a flowmap version in CI so the diff
-sides share one renderer.
+**Output stability.** `--mermaid`, `--root`, `--diff`, `--show-plumbing`,
+`--all-blind-spots`, and `--max-nodes` are the committed CLI surface; treat the
+rendered Markdown as a view (diff-reviewable, never gated), and pin a flowmap
+version in CI so the diff sides share one renderer.
 
 **Tuning the view for your codebase.** The renderer's *logic* is codebase-agnostic
 and hardened against arbitrary input, but a few *defaults* are opinionated toward
@@ -86,6 +86,17 @@ small, HTTP-shaped services and may want revisiting:
   `--show-plumbing` shows everything. A node that emits a boundary effect is never
   collapsed, so effects are never hidden — but if your salience tiers carry
   meaning the default hides, prefer `--show-plumbing`.
+- **Plumbing-tier disclosures are denoised by default**, in step with the node
+  collapse: a trivial boundary blind spot (uuid/framework) and a disclosure
+  orphaned onto a collapsed plumbing node would otherwise float as a caller-less
+  box, so the default drops them into a counted header note (e.g. *"4 blind
+  spot/markers on hidden plumbing omitted"*) rather than dumping them. The count is
+  always disclosed — never a silent drop — and the *site* of an effect-bearing
+  blind spot (a cloud-SDK send, an outbox) is treated as load-bearing, so it is
+  never collapsed and its disclosure stays attached. `--all-blind-spots` redraws
+  every disclosure node, restoring the full honesty channel without un-collapsing
+  the plumbing nodes (`--show-plumbing` does both). The gated JSON manifest always
+  carries the complete blind-spot set; this denoise is presentation-only.
 - **Effect shapes** key off the boundary vocabulary the analyzer emits (`db` →
   cylinder, `bus` → hexagon); anything else renders as an `external` stadium. That
   is graceful, not wrong, but a cache/queue/RPC peer will read as "external".

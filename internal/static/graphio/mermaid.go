@@ -47,6 +47,17 @@ type MermaidOptions struct {
 	// diagram. The zero value (0) is uncapped, so the library renders everything by
 	// default and the CLI opts into a legible cap for humans.
 	MaxNodes int
+
+	// ShowAllBlindSpots, when set, draws EVERY blind-spot and frontier disclosure node
+	// even under tier collapse — including the trivial boundaries (uuid/framework) and
+	// the disclosures orphaned onto collapsed plumbing that the denoised default rolls
+	// into a counted header note. It is the escape hatch back to the complete honesty
+	// channel WITHOUT also un-collapsing the plumbing NODES (--show-plumbing / MaxTier 0
+	// does both); a reviewer who wants the full "where the analysis goes dark" set but a
+	// legible call structure sets this alone. Presentation only — like MaxTier it never
+	// touches the gated JSON manifest, only this human-readable view. The zero value
+	// keeps the denoise-with-a-count default.
+	ShowAllBlindSpots bool
 }
 
 // Mermaid renders g as a Mermaid flowchart per opts. The output begins with
@@ -90,10 +101,6 @@ func buildBoundaryNodes(g *Graph, ids *idAlloc, shown map[string]bool) (map[stri
 	return bIDs, bnodes
 }
 
-// buildDiscs assigns ids to the disclosure nodes (blind spots then frontier markers),
-// attaching each to its first-party site/owner when that node is drawn. It is the one
-// builder of the honesty channel, used by BOTH the full render and the over-cap index,
-// so a large graph can never silently drop a blind spot the small graph would show.
 // annotationNotes renders the human/AI context lines for the header, one per
 // annotation in the graph's canonical (Site, Kind) order. Disclosure only — the
 // note explains a blind spot, never closes it.
@@ -151,13 +158,39 @@ func shortPkg(path string) string {
 	return strings.Join(segs[len(segs)-2:], "/")
 }
 
-func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string) []disc {
+// buildDiscs assigns ids to the disclosure nodes (blind spots then frontier markers),
+// attaching each to its first-party site/owner via `from` when that node is drawn. It
+// is the one builder of the honesty channel, used by BOTH the full render and the
+// over-cap index, so a large graph can never silently drop a blind spot the small graph
+// would show. When hidePlumbing is set (the CLI's tier-collapse default), two classes of
+// plumbing-tier noise are dropped — but COUNTED in the returned (hiddenTrivial,
+// hiddenOrphan) so the caller can disclose them in a header note and recover them with
+// --all-blind-spots (or --show-plumbing): never a silent drop. Effect-bearing blind-spot
+// sites are force-kept
+// upstream (collectEffectBearingBlindSites), so the dropped set is only trivial
+// boundaries and severity-less disclosures whose caller already collapsed.
+func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string, hidePlumbing bool) (discs []disc, hiddenTrivial, hiddenOrphan int) {
 	annotated := map[[2]string]bool{}
 	for _, a := range g.Annotations {
 		annotated[[2]string{a.Site, a.Kind}] = true
 	}
-	var discs []disc
 	for _, b := range g.BlindSpots {
+		// Trivial boundaries (uuid/framework) are plumbing-tier noise — drop under the
+		// --show-plumbing gate, counted below so the honesty channel is recoverable,
+		// never silently dropped.
+		if hidePlumbing && b.Severity == blindspots.SeverityTrivial {
+			hiddenTrivial++
+			continue
+		}
+		from := nodeID[b.Site]
+		// A disclosure whose caller is hidden plumbing has no drawn context — it would
+		// float as a caller-less box. Effect-bearing sites are force-kept
+		// (collectEffectBearingBlindSites), so this only catches severity-less disclosures
+		// (UnresolvedCall, etc.) on collapsed plumbing: drop under the same gate, counted.
+		if hidePlumbing && from == "" && b.Severity != blindspots.SeverityEffectBearing {
+			hiddenOrphan++
+			continue
+		}
 		id := ids.get("blind_" + string(b.Kind))
 		label := blindSpotLabel(b)
 		if annotated[[2]string{b.Site, string(b.Kind)}] {
@@ -166,16 +199,40 @@ func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string) []disc {
 			// header notes (mermaid), keeping the node label legible.
 			label += " 🗒"
 		}
-		discs = append(discs, disc{id: id, label: label, from: nodeID[b.Site]})
+		discs = append(discs, disc{id: id, label: label, from: from})
 	}
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
+			from := nodeID[m.Owner]
+			// A frontier marker whose owner is hidden plumbing floats the same way; drop
+			// it under the gate (counted) and keep only those attached to a drawn owner.
+			if hidePlumbing && from == "" {
+				hiddenOrphan++
+				continue
+			}
 			id := ids.get("frontier_" + m.Kind)
 			label := "⌖ " + mermaidText(m.Kind) + "<br/>frontier " + mermaidText(string(m.Bin))
-			discs = append(discs, disc{id: id, label: label, from: nodeID[m.Owner]})
+			discs = append(discs, disc{id: id, label: label, from: from})
 		}
 	}
-	return discs
+	return discs, hiddenTrivial, hiddenOrphan
+}
+
+// collectEffectBearingBlindSites returns first-party FQNs that are the SITE of an
+// effect-bearing blind spot — the seam where the code calls out to a dependency that
+// DOES something (the AWS/SNS/SQS send, the CustomerIO send, the outbox), as opposed
+// to a trivial pure-compute boundary (uuid, framework). Hiding such a site orphans its
+// disclosure node (it floats with no caller), so it is load-bearing exactly like
+// a node that emits a resolved boundary effect. Trivial boundaries are intentionally
+// NOT load-bearing and may collapse with their plumbing.
+func collectEffectBearingBlindSites(g *Graph) map[string]bool {
+	m := map[string]bool{}
+	for _, b := range g.BlindSpots {
+		if b.Severity == blindspots.SeverityEffectBearing {
+			m[b.Site] = true
+		}
+	}
+	return m
 }
 
 // mermaid is the shared renderer. notes are extra %% disclosure lines emitted in
@@ -193,7 +250,14 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 
 	// A node that emits a boundary effect is load-bearing: hiding it would drop the
 	// effect from the diagram, which the trust model forbids (keepNode enforces this).
+	// The SITE of an effect-bearing blind spot (the AWS/SNS/SQS send, the CustomerIO
+	// send, the outbox) is load-bearing for the SAME reason — hiding it orphans an
+	// effect-bearing boundary into a caller-less floating disclosure node. Fold
+	// both into one load-bearing set; trivial boundaries (uuid, framework) are excluded.
 	emitsEffect := collectEmitsEffect(g.Edges)
+	for site := range collectEffectBearingBlindSites(g) {
+		emitsEffect[site] = true
+	}
 
 	// Pass A: assign ids to the first-party nodes we will show.
 	nodeID := make(map[string]string, len(g.Nodes))
@@ -209,7 +273,19 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	}
 
 	bIDs, bnodes := buildBoundaryNodes(g, ids, shown)
-	discs := buildDiscs(g, ids, nodeID)
+	// The tier-collapse default (MaxTier > 0) is the gate for dropping plumbing-tier
+	// disclosure noise — trivial boundaries and disclosures orphaned onto collapsed
+	// plumbing — counted into the header notes below so nothing is silently dropped.
+	// ShowAllBlindSpots is the dedicated escape hatch back to the complete set (and
+	// --show-plumbing / MaxTier 0 restores it too, alongside the plumbing nodes).
+	hideDiscPlumbing := opts.MaxTier > 0 && !opts.ShowAllBlindSpots
+	discs, hiddenTrivial, hiddenOrphan := buildDiscs(g, ids, nodeID, hideDiscPlumbing)
+	if hiddenTrivial > 0 {
+		notes = append(notes, plural(hiddenTrivial, "trivial boundary blind spot")+" (uuid/framework) hidden; pass --all-blind-spots to include")
+	}
+	if hiddenOrphan > 0 {
+		notes = append(notes, plural(hiddenOrphan, "blind spot/marker")+" on hidden plumbing omitted; pass --all-blind-spots to include")
+	}
 
 	// Cap on the FULL drawn-node count — first-party + boundary effects + disclosures.
 	// Counting first-party alone under-counts: a thin handler over many distinct
@@ -345,11 +421,25 @@ func (g *Graph) overview(opts MermaidOptions, ids *idAlloc, drawn int, discs []d
 		b.WriteString("    " + root + `["` +
 			mermaidText("⚠ "+strconv.Itoa(drawn)+" nodes in this scope — too large to draw legibly. Narrow the scope, or raise --max-nodes to render anyway.") + `"]` + "\n")
 	}
-	// The honesty channel survives the cap: blind spots and frontier markers are drawn
-	// standalone (the first-party nodes they attach to are not in the index), so a large
-	// graph's "where the analysis goes dark" markers are never silently dropped.
-	for _, d := range discs {
-		b.WriteString("    " + d.id + `(["` + d.label + `"]):::blind` + "\n")
+	// The honesty channel survives the cap — but in the index the disclosure nodes have
+	// no drawn first-party caller to attach to, so dumping them individually produces a
+	// pile of caller-less floating boxes that buries the entry-point list. Roll
+	// them into ONE counted node hung off the index root: the count is disclosed (never
+	// silently dropped), and each disclosure is drawn ATTACHED to its caller in the
+	// per-entry-point --root views this index steers you to.
+	if len(discs) > 0 {
+		var blinds, markers int
+		for _, d := range discs {
+			if strings.HasPrefix(d.label, "⌖") {
+				markers++
+			} else {
+				blinds++
+			}
+		}
+		sum := ids.get("disclosures")
+		b.WriteString("    " + root + " --> " + sum + `(["` +
+			mermaidText("⊥ "+plural(blinds, "blind spot")+", "+plural(markers, "frontier marker")+
+				" — shown attached to their callers in the --root views") + `"]):::blind` + "\n")
 	}
 	b.WriteString(classDefs)
 	return b.String()
