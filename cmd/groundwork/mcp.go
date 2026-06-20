@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -929,8 +930,16 @@ func (s *mcpServer) call(name string, a toolArgs) map[string]any {
 // it writes nothing (the server's NO WRITE TOOLS invariant holds — the agent
 // persists the snippet itself), and an annotation is disclosure-only, so even once
 // committed it cannot move a count or a verdict. The binding rule is
-// config.ResolveAnnotationKind, shared with the producer-side merge, so a proposal
-// this tool accepts is one the flowmap build will accept (and vice versa).
+// config.ResolveAnnotationKind, shared with the producer-side merge.
+//
+// Parity with the build is exact, in both directions and including the §22
+// algorithm-fragility relaxation: a proposal this tool ACCEPTS (binds) is one the
+// build binds, a proposal it hard-REJECTS (orphan/stale FQN, ambiguous multi-kind
+// site, or a mismatch on an algo-STABLE kind) is one the build fails on, and a
+// proposal it returns as algorithm-dependent GUIDANCE (a fragile kind absent under
+// this graph's --algo at an otherwise-live site) is exactly the case the build
+// warn-and-skips rather than failing. The tool therefore never rejects what the
+// build would tolerate, nor vice versa.
 func annotateCard(ix *graph.Index, a toolArgs) map[string]any {
 	if strings.TrimSpace(a.Site) == "" {
 		return toolError("site is required: the FQN of the blind spot to annotate")
@@ -945,6 +954,21 @@ func annotateCard(ix *graph.Index, a toolArgs) map[string]any {
 	}
 	kind, err := config.ResolveAnnotationKind(a.Site, a.Kind, kinds)
 	if err != nil {
+		// Mirror the producer-side merge (graphio.mergeAnnotations): a requested kind
+		// merely ABSENT under this graph's --algo at an otherwise-live site, and itself
+		// algorithm-fragile, is NOT a hard rejection — the build warn-and-skips it, never
+		// fails (§22). Return algorithm-dependent guidance instead, so the tool and the
+		// build agree on this case. Every other error — an orphan (stale FQN), an
+		// ambiguous multi-kind site, or a mismatch on an algo-stable kind (a real typo) —
+		// stays a hard rejection, fail-closed, exactly as the build still fails on it.
+		var ka *config.KindAbsentError
+		if errors.As(err, &ka) && blindspots.AlgoFragile(blindspots.Kind(ka.RequestedKind)) {
+			return toolText(fmt.Sprintf(
+				"the %q blind spot is algorithm-dependent and is not present at %s under this graph's --algo %s (present: %s).\n"+
+					"A flowmap build would warn-and-skip — never fail — an annotation for it here, so committing one is safe but it will NOT attach under %s.\n"+
+					"To author and ground it, re-run this server on a graph built with the --algo that surfaces it (e.g. vta), then annotate again.",
+				ka.RequestedKind, ka.Site, ix.Algo(), strings.Join(ka.Present, ", "), ix.Algo()))
+		}
 		return toolError(err.Error())
 	}
 	// Ground the proposal in the matched disclosure so the author sees what the

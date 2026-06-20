@@ -314,6 +314,16 @@ func annotationLess(a, b Annotation) bool {
 // the lost note, and an annotation never moves a count or a verdict. Every other
 // error — an orphan site, an ambiguous multi-kind site, or a mismatch on an
 // algo-STABLE kind (a real typo) — still fails closed.
+//
+// Known limit of the relaxation: it requires the site to stay LIVE (carry another
+// blind spot) under the dropping algo. A site whose ONLY blind spot was the fragile
+// kind has zero blind spots once the algo drops it, which is byte-for-byte
+// indistinguishable from a stale FQN — so it takes the orphan path and FAILS the
+// build, even though the cause is an --algo skew, not a typo. That is the sound
+// direction (fail closed): the alternative — skipping any fragile-kind annotation at
+// a zero-blind-spot site — would silently swallow a genuine typo. The fix for such a
+// site is to pin --algo (build under the algo that surfaces the kind), not to relax
+// here. See docs/specs/static-extractor-spec.md §7 (annotations).
 func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]Annotation, []SkippedAnnotation, error) {
 	if cfg == nil || len(cfg.Static.Annotations) == 0 {
 		return nil, nil, nil

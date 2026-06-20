@@ -60,6 +60,28 @@ func TestAnnotateTool(t *testing.T) {
 		t.Errorf("orphan site must error, got: %s", txt)
 	}
 
+	// Algo-FRAGILE kind absent at a LIVE site (svc.Send carries only ExternalBoundaryCall
+	// under this rta graph): the build would warn-and-skip, never fail (§22), so the
+	// proposer must NOT hard-reject — it returns algorithm-dependent guidance instead,
+	// naming the present kinds and the --algo to switch to. This is the parity fix: the
+	// tool no longer rejects what the build tolerates.
+	txt, isErr = toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Send", Kind: "UnresolvedCall", Note: "behind the func value, under vta"}))
+	if isErr {
+		t.Errorf("a fragile kind absent at a live site must be guidance, not a hard error: %s", txt)
+	}
+	for _, want := range []string{"algorithm-dependent", "ExternalBoundaryCall", "rta", "vta", "warn-and-skip"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("fragile-absent guidance missing %q:\n%s", want, txt)
+		}
+	}
+
+	// Algo-STABLE kind absent at a live site (Reflect at svc.Send) is a real typo: the
+	// build still fails closed on it, so the proposer must still hard-reject it — only
+	// fragile kinds earn the guidance path.
+	if txt, isErr := toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Send", Kind: "reflect", Note: "x"})); !isErr {
+		t.Errorf("an algo-stable kind absent at a live site must still error, got: %s", txt)
+	}
+
 	// Ambiguous: a multi-kind site with no kind is refused, naming the present kinds.
 	txt, isErr = toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Mixed", Note: "x"}))
 	if !isErr {

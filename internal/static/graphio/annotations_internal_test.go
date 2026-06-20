@@ -91,6 +91,17 @@ func TestMergeAnnotationsAlgoFragileKindSkips(t *testing.T) {
 	if s := skipped[0]; s.Site != "ex.com/svc.Send" || s.Kind != "UnresolvedCall" || len(s.Present) != 1 || s.Present[0] != "ExternalBoundaryCall" {
 		t.Errorf("skipped record wrong: %+v", skipped[0])
 	}
+
+	// Limit of the relaxation (§22): the skip requires the site to stay LIVE. A fragile
+	// kind at a site with NO blind spot at all (the fragile kind was its only one, now
+	// dropped by this algo) is indistinguishable from a stale FQN, so it takes the
+	// orphan path and FAILS — never warn-and-skipped. This pins the fail-closed boundary
+	// so a future relaxation cannot silently swallow a genuine typo at a dead site.
+	if _, _, err := mergeAnnotations(nil, annCfg(
+		config.Annotation{Site: "ex.com/svc.Gone", Kind: "UnresolvedCall", Note: "fragile kind, but the site is dead"},
+	)); err == nil {
+		t.Fatal("a fragile kind at a site with no blind spot must still fail (orphan), not warn-and-skip")
+	}
 }
 
 // TestMergeAnnotationsAmbiguousKindFails pins that a site carrying more than one
