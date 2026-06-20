@@ -194,9 +194,12 @@ type Annotation struct {
 //
 // Fail closed: a site with no detected blind spot is an orphan (a stale FQN or
 // moved code); an empty requestedKind binds a site that has exactly one kind but is
-// ambiguous on a multi-kind site; a named kind must be present at the site. The
+// ambiguous on a multi-kind site; a named kind absent at a live site yields a typed
+// *KindAbsentError. That last case is the only tolerable one: a caller may downgrade
+// it to a warn-and-skip when the requested kind is algorithm-fragile (§22), so it is
+// typed distinctly from the orphan/ambiguity errors a caller must always fail on. The
 // returned error names the site and the kinds actually present, so a caller (or an
-// agent) can correct the annotation without another round-trip.
+// agent) can correct or classify the annotation without another round-trip.
 func ResolveAnnotationKind(site, requestedKind string, kindsAtSite []string) (string, error) {
 	distinct := sortedUnique(kindsAtSite)
 	if len(distinct) == 0 {
@@ -213,7 +216,28 @@ func ResolveAnnotationKind(site, requestedKind string, kindsAtSite []string) (st
 			return requestedKind, nil
 		}
 	}
-	return "", fmt.Errorf("no %q blind spot at site %q (present: %s)", requestedKind, site, strings.Join(distinct, ", "))
+	return "", &KindAbsentError{Site: site, RequestedKind: requestedKind, Present: distinct}
+}
+
+// KindAbsentError is returned by ResolveAnnotationKind when the requested kind is
+// not present at a site that DOES carry other blind spots — distinct from an orphan
+// (no blind spot at the site at all, a stale FQN or moved code). The site is live,
+// so a present-but-different kind is a (site, kind) SKEW: when the requested kind is
+// algorithm-fragile (blindspots.AlgoFragile — its presence flips with --algo), the
+// producer-side merge warns and skips the disclosure-only annotation rather than
+// failing the build (§22), while a non-fragile mismatch still fails closed. config
+// cannot import blindspots, so the fragility test lives in the callers; this typed
+// error is the single signal they branch on. Present names the kinds actually at the
+// site (sorted, deterministic) so a caller can correct or classify without a
+// round-trip; Error() is byte-identical to the prior inline message.
+type KindAbsentError struct {
+	Site          string
+	RequestedKind string
+	Present       []string
+}
+
+func (e *KindAbsentError) Error() string {
+	return fmt.Sprintf("no %q blind spot at site %q (present: %s)", e.RequestedKind, e.Site, strings.Join(e.Present, ", "))
 }
 
 // sortedUnique returns the distinct values of ss in lexical order — a

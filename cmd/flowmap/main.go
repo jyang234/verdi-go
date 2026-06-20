@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -150,6 +151,7 @@ func cmdGraph(args []string) error {
 	if err != nil {
 		return err
 	}
+	warnSkippedAnnotations(os.Stderr, g)
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
 	}
@@ -270,6 +272,7 @@ func cmdFrontier(args []string) error {
 	if err != nil {
 		return err
 	}
+	warnSkippedAnnotations(os.Stderr, g)
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
 	}
@@ -314,6 +317,24 @@ func sqlFoldOpts(on bool) []graphio.BuildOption {
 		return []graphio.BuildOption{graphio.WithSQLFold()}
 	}
 	return nil
+}
+
+// warnSkippedAnnotations writes, to w (stderr at the CLI boundary), one warning per
+// config annotation the build dropped because its (site, kind) named an
+// algorithm-fragile blind-spot kind absent from THIS --algo's manifest at an
+// otherwise-live site (§22). The skip itself happens in the pure graphio.Build (which
+// records it on g.SkippedAnnotations, json:"-"); the WARNING is surfaced here so Build
+// stays a byte-identical function of its inputs and stdout (the graph JSON / view) is
+// untouched. A dropped annotation is disclosure-only — no count, edge, or verdict
+// moves — so warn-and-skip is the right severity: louder than silent, never an exit-1
+// on a note. The most likely fix is an --algo skew (the annotation was authored under
+// vta; this build ran the CLI-default rta), so the message names the algo and the fix.
+func warnSkippedAnnotations(w io.Writer, g *graphio.Graph) {
+	for _, s := range g.SkippedAnnotations {
+		_, _ = fmt.Fprintf(w,
+			"flowmap: warning: skipped annotation at %s: no %q blind spot under --algo %s (present: %s); the %q kind is algorithm-dependent — keep --algo consistent with how the annotation was authored (e.g. --algo vta)\n",
+			s.Site, s.Kind, g.Algo, strings.Join(s.Present, ", "), s.Kind)
+	}
 }
 
 // cmdDiff prints the structural, prioritized change set between two canonical

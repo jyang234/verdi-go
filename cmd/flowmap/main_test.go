@@ -15,8 +15,35 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/impeach"
 	"github.com/jyang234/golang-code-graph/internal/ingest"
+	"github.com/jyang234/golang-code-graph/internal/static/graphio"
 	"github.com/jyang234/golang-code-graph/ir"
 )
+
+// TestWarnSkippedAnnotations pins the §22 CLI warning: a build that warn-and-skipped
+// an algorithm-fragile annotation (recorded on g.SkippedAnnotations) emits a stderr
+// warning naming the site, the absent kind, the --algo, and the fix — and NOTHING
+// when there is nothing to skip (a clean build is silent). The skip itself is decided
+// in graphio.Build; this only covers the boundary surface.
+func TestWarnSkippedAnnotations(t *testing.T) {
+	var buf bytes.Buffer
+	g := &graphio.Graph{Algo: "rta", SkippedAnnotations: []graphio.SkippedAnnotation{
+		{Site: "svc.Send", Kind: "UnresolvedCall", Present: []string{"ExternalBoundaryCall"}},
+	}}
+	warnSkippedAnnotations(&buf, g)
+	out := buf.String()
+	for _, want := range []string{"warning", "svc.Send", "UnresolvedCall", "rta", "ExternalBoundaryCall", "algorithm-dependent", "vta"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("skip warning missing %q:\n%s", want, out)
+		}
+	}
+
+	// A build with nothing skipped is silent — no warning noise on the common path.
+	buf.Reset()
+	warnSkippedAnnotations(&buf, &graphio.Graph{Algo: "rta"})
+	if buf.Len() != 0 {
+		t.Errorf("a clean build must emit no warning, got: %s", buf.String())
+	}
+}
 
 // TestLoadIngestConfigReadsServiceDir: ingest's canon config (e.g. the
 // messagingShortHexIDs opt-in) is read from --service-dir's .flowmap.yaml; with no

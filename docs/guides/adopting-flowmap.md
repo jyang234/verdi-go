@@ -263,6 +263,24 @@ graph's `annotations` section as context, nothing more. An annotation whose
 drift, refused — never silently attached to a vanished site), so the context
 cannot rot out of sync with the code.
 
+One exception keeps a *documentation* note from breaking a build: the
+`UnresolvedCall`/`ConcurrentDispatch` kinds are **algorithm-dependent** — a
+func-value seam can surface under `--algo vta` but not the default `rta`. An
+annotation naming one of those kinds at a site that still carries *another* blind
+spot (so it is an `--algo` skew, not a stale FQN) is **warn-and-skipped** with a
+stderr warning, never failed. Keep `--algo` consistent between how you author the
+annotation (the MCP `annotate` tool flags an algorithm-dependent kind, and returns
+guidance rather than rejecting one that is absent under the server's current
+`--algo`) and how you build (pin `--algo vta` everywhere if you use it). A mismatch
+on the stable `ExternalBoundaryCall` kind, or any orphan site, still fails closed.
+
+The skip protects a site only while it stays **live** — if the algorithm-dependent
+kind was the site's *only* blind spot, the site has nothing left under the other
+`--algo` and is indistinguishable from a stale FQN, so it **fails the build** like
+any orphan. That is the safe direction (it would otherwise hide a real typo); the
+fix is to pin `--algo`, not to rely on the skip. In practice this is why the
+Makefile pins `--algo vta` everywhere.
+
 **HTTP routers.** Root discovery recognizes stdlib `ServeMux` and go-chi (so
 oapi-codegen's chi *and* std-net/http servers work out of the box). For another
 method-named router — echo, or a custom one where each registration function is
