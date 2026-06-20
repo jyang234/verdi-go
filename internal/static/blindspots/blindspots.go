@@ -234,9 +234,9 @@ const (
 	// SeverityTrivial tags pure-compute / framework / stdlib plumbing — disclosed for
 	// completeness but not the effect surface. For an ExternalBoundaryCall it is the
 	// known-benign dependency set (HintSet.IsExternalBoundaryTrivial: a built-in default
-	// plus any static.externalBoundaryTrivial prefixes); for a func() dispatch seam it
-	// is a recognized benign stdlib func type (blindspots.benignFuncValueType:
-	// context.CancelFunc — stdlib context teardown that reaches no first-party code).
+	// plus any static.externalBoundaryTrivial prefixes); for a func() dispatch seam it is
+	// a recognized benign stdlib func type (features.NamedTypeIs against context.CancelFunc
+	// — stdlib context teardown that reaches no first-party code).
 	SeverityTrivial Severity = "trivial"
 )
 
@@ -444,16 +444,26 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 			if len(resolved[call]) != 0 {
 				continue
 			}
+			// Resolve the func value's DEFINED type once (alias-safe: under Go 1.24
+			// gotypesalias=1 a CancelFunc reached through a type alias presents as
+			// *types.Alias, so unwrap before the *types.Named assertion). This single
+			// resolution feeds both the disclosure name and the benign tier, so the two
+			// cannot derive the type differently.
+			named, _ := types.Unalias(cc.Value.Type()).(*types.Named)
 			sig := ""
-			if name := funcValueTypeName(cc); name != "" {
+			if name := funcValueTypeName(named, cc.Signature()); name != "" {
 				sig = " of type " + name
 			}
-			// A recognized benign stdlib func value (context.CancelFunc) is plumbing-tier
+			// A recognized benign stdlib func value (context.CancelFunc — stdlib context
+			// teardown that reaches no first-party code, bears no effect) is plumbing-tier
 			// noise; everything else stays unclassified (the signal a census keeps). Keyed
 			// on the value's defined type, which is named in Detail above, so equal
-			// (Kind, Site, Detail) implies equal Severity (determinism).
+			// (Kind, Site, Detail) implies equal Severity (determinism). The tier is
+			// disclosure-only — a pathologically reassigned CancelFunc holding a
+			// first-party func would be mis-tiered, but the spot still rides the manifest,
+			// so the only effect is attention ordering (same trust class as the EBC tier).
 			sev := Severity("")
-			if benignFuncValueType(cc.Value.Type()) {
+			if features.NamedTypeIs(named, "context", "CancelFunc") {
 				sev = SeverityTrivial
 			}
 			if features.IsConcurrentSite(call) {
@@ -477,43 +487,21 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 }
 
 // funcValueTypeName names the static type of a func-value call's callee for disclosure:
-// the DEFINED (named) type when the value has one — e.g. "context.CancelFunc" — else the
-// bare signature "func()". Naming the defined type (not just its underlying signature)
-// is what lets benignFuncValueType recognize a known stdlib func and what puts that
-// distinction into Detail, so the Severity tier stays a pure function of the sort key.
-// The unnamed case is byte-identical to the bare signature, so an ordinary func() seam
-// reads exactly as before.
-func funcValueTypeName(cc *ssa.CallCommon) string {
-	if named, ok := cc.Value.Type().(*types.Named); ok {
+// the resolved DEFINED type when the value has one — e.g. "context.CancelFunc" — else the
+// bare signature "func()". named is the value's already-resolved *types.Named (nil for an
+// unnamed func value, computed once at the call site so naming and tiering share it); sig
+// is the fallback signature. Naming the defined type (not just its underlying signature)
+// is what puts the benign-tier key into Detail, so the Severity tier stays a pure function
+// of the sort key. The unnamed case is byte-identical to the bare signature, so an
+// ordinary func() seam reads exactly as before.
+func funcValueTypeName(named *types.Named, sig *types.Signature) string {
+	if named != nil {
 		return named.String()
 	}
-	if s := cc.Signature(); s != nil {
-		return s.String()
+	if sig != nil {
+		return sig.String()
 	}
 	return ""
-}
-
-// benignFuncValueType reports whether a func-value type is a recognized benign stdlib
-// func whose invocation reaches no first-party code and bears no effect — currently only
-// context.CancelFunc, the cleanup handle returned by context.With{Cancel,Timeout,Deadline}.
-// Calling it tears down a context: pure stdlib state change, no callee inside the analyzed
-// module, no external effect. Matched by DEFINED type (package "context", name "CancelFunc"),
-// so a user-defined func type that merely shares the name does not qualify.
-//
-// Soundness boundary: this drives ONLY the Severity disclosure tier, never a drop, a count,
-// an edge, the frontier severance, or any pole (see the Severity type) — a CancelFunc seam
-// is still detected and counted, just tagged plumbing. A pathologically reassigned
-// CancelFunc holding a first-party func would be mis-tiered to trivial, but the spot still
-// rides the manifest, so the only effect is attention ordering — the same trust class as
-// the ExternalBoundaryCall trivial tier.
-func benignFuncValueType(t types.Type) bool {
-	named, ok := t.(*types.Named)
-	if !ok {
-		return false
-	}
-	obj := named.Obj()
-	return obj != nil && obj.Pkg() != nil &&
-		obj.Pkg().Path() == "context" && obj.Name() == "CancelFunc"
 }
 
 // isExternalBoundary reports whether a call to callee is an ExternalBoundaryCall:
