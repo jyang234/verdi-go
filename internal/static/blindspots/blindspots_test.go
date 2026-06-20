@@ -94,6 +94,29 @@ func TestKindBoundaryClassification(t *testing.T) {
 	}
 }
 
+// TestAlgoFragileClassification pins the §22 algorithm-fragility partition: exactly
+// the two func-value-resolution kinds (UnresolvedCall and its `go`-statement sibling
+// ConcurrentDispatch) flip with --algo, so only they earn the annotation merge's
+// warn-and-skip. Every OTHER recognized kind — crucially ExternalBoundaryCall, the
+// known external leaf verified present under both rta and vta — must stay STABLE, so
+// a mismatch on it still fails the build (relaxing it would swallow a real typo).
+func TestAlgoFragileClassification(t *testing.T) {
+	fragile := map[blindspots.Kind]bool{
+		blindspots.UnresolvedCall:     true,
+		blindspots.ConcurrentDispatch: true,
+	}
+	for _, k := range blindspots.Kinds() {
+		if got, want := blindspots.AlgoFragile(k), fragile[k]; got != want {
+			t.Errorf("AlgoFragile(%q) = %v, want %v", k, got, want)
+		}
+	}
+	// Belt-and-suspenders on the load-bearing stable kind: a stable mismatch must
+	// fail closed, so ExternalBoundaryCall must never be fragile.
+	if blindspots.AlgoFragile(blindspots.ExternalBoundaryCall) {
+		t.Error("ExternalBoundaryCall must be algo-stable (verified present under both rta and vta)")
+	}
+}
+
 // TestDetectGraphCompletenessDisclosures builds a synthetic module exercising the
 // non-gated graph-completeness categories: a widely-implemented interface (high
 // fan-out), an unsafe import, and a //go:linkname directive. They must surface in

@@ -7,6 +7,7 @@
 package graphio
 
 import (
+	"errors"
 	"fmt"
 	"go/types"
 	"path/filepath"
@@ -109,10 +110,25 @@ type Graph struct {
 	// static.annotations), keyed by (Site, Kind) to the manifest above. A
 	// disclosure-only channel: no verdict, count, or reachability computation reads
 	// it; it explains a blind spot the machine cannot close, it never closes one.
-	// Each is matched to a detected blind spot at build time (an unmatched one fails
-	// the build — drift, not a silent drop). Omitted when none, so an annotation-free
-	// service emits a byte-identical graph.
+	// Each is matched to a detected blind spot at build time. An unmatched one fails
+	// the build (drift, not a silent drop) EXCEPT the one tolerable case: an
+	// annotation naming an algorithm-fragile kind (blindspots.AlgoFragile) absent
+	// from this build's --algo manifest at an otherwise-live site is warn-and-skipped
+	// into SkippedAnnotations instead (§22), since a hard build failure on a skewed
+	// disclosure-only note is worse than the lost note. Omitted when none, so an
+	// annotation-free service emits a byte-identical graph.
 	Annotations []Annotation `json:"annotations,omitempty"`
+
+	// SkippedAnnotations records config annotations the merge DROPPED because their
+	// (Site, Kind) named an algorithm-fragile blind-spot kind absent from THIS build's
+	// manifest while the Site stayed live (an --algo/flag skew, not a stale FQN — §22).
+	// It is in-memory only (json:"-"): it never serializes, so no golden churns and the
+	// graph stays byte-identical per --algo, but the CLI boundary reads it to warn the
+	// operator that a disclosure-only note was skipped rather than the build hard-failing.
+	// Exported (not unexported like foldSQL) precisely so that cross-package CLI surface
+	// can read it. Disclosure-only by construction — a dropped annotation changes no
+	// count, edge, or verdict.
+	SkippedAnnotations []SkippedAnnotation `json:"-"`
 
 	// foldSQL records whether this graph was built with the SQL const-fold
 	// (--reclaim-sql / WithSQLFold). Unexported, so it never serializes (no golden
@@ -253,6 +269,17 @@ type Annotation struct {
 	Claim string `json:"claim,omitempty"`
 }
 
+// SkippedAnnotation records one config annotation the merge dropped because its
+// (Site, Kind) named an algorithm-fragile blind-spot kind (blindspots.AlgoFragile)
+// absent from THIS build's manifest, while the Site stayed live — it still carries
+// the Present kinds, so this is an --algo/flag skew, not a stale FQN (§22). It is
+// disclosure context for the build operator, never a verdict input.
+type SkippedAnnotation struct {
+	Site    string
+	Kind    string
+	Present []string
+}
+
 // annotationLess is the total intrinsic order used to break dedup ties on a
 // colliding (site, kind): compare Note, then By, then Claim. Totality matters —
 // falling back to arrival order on equal notes would make the kept by/claim depend
@@ -276,9 +303,20 @@ func annotationLess(a, b Annotation) bool {
 // a site with several requires the kind, so context can never attach to the wrong
 // shape. The match is against the graph's blind-spot subset (the manifest a
 // consumer sees) — the gated boundary disclosures live in their own channel.
-func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]Annotation, error) {
+//
+// The ONE tolerated mismatch (§22): when the requested kind is absent at an
+// otherwise-LIVE site (config.KindAbsentError, so the FQN still resolves to a
+// detected blind spot — it is not a stale-FQN orphan) AND that kind is
+// algorithm-fragile (blindspots.AlgoFragile — its presence flips with --algo, e.g.
+// an UnresolvedCall that fires under vta but not the CLI-default rta), the
+// disclosure-only annotation is WARN-AND-SKIPPED into the returned skip list rather
+// than failing the build. A hard build failure on an --algo/flag skew is worse than
+// the lost note, and an annotation never moves a count or a verdict. Every other
+// error — an orphan site, an ambiguous multi-kind site, or a mismatch on an
+// algo-STABLE kind (a real typo) — still fails closed.
+func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]Annotation, []SkippedAnnotation, error) {
 	if cfg == nil || len(cfg.Static.Annotations) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Index the manifest: the kinds present at each site (deduped by the resolver).
 	kindsAt := map[string][]string{}
@@ -286,12 +324,26 @@ func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]An
 		kindsAt[b.Site] = append(kindsAt[b.Site], string(b.Kind))
 	}
 	byKey := map[[2]string]Annotation{}
+	var skipped []SkippedAnnotation
 	for i, a := range cfg.Static.Annotations {
 		// The binding rule lives in config.ResolveAnnotationKind so the producer here
 		// and the read-only MCP `annotate` proposer cannot drift (parity test below).
 		kind, err := config.ResolveAnnotationKind(a.Site, a.Kind, kindsAt[a.Site])
 		if err != nil {
-			return nil, fmt.Errorf("flowmap config: static.annotations[%d]: %w", i, err)
+			// A live site whose requested kind is merely absent under THIS --algo, and
+			// the kind is algorithm-fragile: skip the disclosure-only note (recorded for
+			// the CLI to warn), do not abort the build. AlgoFragile is consulted on the
+			// REQUESTED kind (a.Kind), the one that was not found — not on what is present.
+			var ka *config.KindAbsentError
+			if errors.As(err, &ka) && blindspots.AlgoFragile(blindspots.Kind(ka.RequestedKind)) {
+				skipped = append(skipped, SkippedAnnotation{
+					Site:    ka.Site,
+					Kind:    ka.RequestedKind,
+					Present: append([]string(nil), ka.Present...),
+				})
+				continue
+			}
+			return nil, nil, fmt.Errorf("flowmap config: static.annotations[%d]: %w", i, err)
 		}
 		// Collapse duplicate (site, kind) annotations to the lexically-smallest
 		// (Note, By, Claim) — a TOTAL intrinsic tie-break, never arrival order: two
@@ -313,7 +365,15 @@ func mergeAnnotations(manifest []blindspots.BlindSpot, cfg *config.Config) ([]An
 		}
 		return out[i].Kind < out[j].Kind
 	})
-	return out, nil
+	// Sort the skip list on the same intrinsic (Site, Kind) key so the CLI warning
+	// order — and any test over it — is byte-identical across runs.
+	sort.Slice(skipped, func(i, j int) bool {
+		if skipped[i].Site != skipped[j].Site {
+			return skipped[i].Site < skipped[j].Site
+		}
+		return skipped[i].Kind < skipped[j].Kind
+	})
+	return out, skipped, nil
 }
 
 // Build renders the full first-party graph of res. If entry is non-empty, the
@@ -381,12 +441,17 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 	g.BlindSpots = merged
 	// Bind human/AI context to the finalized manifest (detected + declared). An
 	// annotation that matches no blind spot fails the build — a disclosure-only
-	// channel still fails closed on drift, never attaching context to a vanished site.
-	annots, err := mergeAnnotations(g.BlindSpots, res.Config)
+	// channel still fails closed on drift, never attaching context to a vanished site
+	// — EXCEPT an algorithm-fragile kind absent at a live site, which is skipped (not
+	// failed) and recorded for the CLI to warn on (§22). Build stays pure: the skip
+	// list rides the in-memory Graph (json:"-"), so a given --algo regenerates
+	// byte-identically; the warning is emitted at the CLI boundary, not here.
+	annots, skipped, err := mergeAnnotations(g.BlindSpots, res.Config)
 	if err != nil {
 		return nil, err
 	}
 	g.Annotations = annots
+	g.SkippedAnnotations = skipped
 	rootFns := rootFuncSet(res)
 	if entry == "" {
 		for _, r := range res.Roots.Roots {

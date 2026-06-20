@@ -151,6 +151,42 @@ func (k Kind) Ratified() bool {
 	return false
 }
 
+// algoFragileKinds are the categories whose PRESENCE at a site depends on the
+// call-graph CONSTRUCTION ALGORITHM (rta/vta/cha), not on the source alone. Both
+// are emitted by the same unresolvedFuncValueCalls branch — a func-value call site
+// the algorithm resolved to NO callee — and that resolution map IS the algorithm's:
+// a more precise algorithm resolves a different set of func values, so the SAME
+// site can carry the kind under one --algo and not another (measured: a func-value
+// UnresolvedCall at (*outbound.Dispatcher).persistSent fires under vta, absent under
+// rta). ConcurrentDispatch is the `go`-statement sibling of UnresolvedCall born of
+// the identical resolution gate, so it is fragile by the same mechanism even though
+// the §22 measurement only happened to exercise UnresolvedCall.
+//
+// The set is kept MINIMAL on purpose — the fail-closed direction. AlgoFragile only
+// ever RELAXES the annotation merge (warn-and-skip instead of hard-fail), so a kind
+// wrongly listed here would let a genuine typo pass silently; a kind that is in fact
+// algo-STABLE (ExternalBoundaryCall — a KNOWN external leaf, verified present under
+// both rta and vta) must stay OUT so a mismatch on it still fails the build. A new
+// fragile kind is added here once; AlgoFragile derives from it.
+func algoFragileKinds() []Kind { return []Kind{UnresolvedCall, ConcurrentDispatch} }
+
+// AlgoFragile reports whether kind k's presence at a site can flip with the
+// call-graph algorithm (--algo) — membership in algoFragileKinds. The annotation
+// merge (graphio.mergeAnnotations) consults it to warn-and-skip, rather than fail
+// the build, a config annotation whose fragile kind is absent from THIS build's
+// manifest while its site stays live (an --algo/flag skew, not a stale FQN — §22);
+// the MCP `annotate` proposer consults it to flag a proposed fragile-kind annotation
+// as algo-specific. Disclosure-only: it never changes a count, an edge, or a verdict
+// — only whether a missing disclosure-only note aborts the build.
+func AlgoFragile(k Kind) bool {
+	for _, f := range algoFragileKinds() {
+		if k == f {
+			return true
+		}
+	}
+	return false
+}
+
 // Boundary reports whether a blind spot belongs to the GATED boundary subset.
 // Only the categories that describe an inter-service boundary surface gate: a
 // dynamically-named boundary effect and an unresolved entry-point registration.

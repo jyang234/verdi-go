@@ -50,6 +50,10 @@ func TestAnnotateTool(t *testing.T) {
 	if !strings.Contains(txt, "writes nothing") {
 		t.Errorf("annotate must disclose that it writes nothing:\n%s", txt)
 	}
+	// ExternalBoundaryCall is algo-STABLE: no algorithm-dependence flag on its card.
+	if strings.Contains(txt, "algorithm-dependent") {
+		t.Errorf("a stable-kind annotation must NOT be flagged algorithm-dependent:\n%s", txt)
+	}
 
 	// Orphan site is refused (fail closed, even for a disclosure-only channel).
 	if txt, isErr := toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Ghost", Note: "x"})); !isErr {
@@ -67,9 +71,16 @@ func TestAnnotateTool(t *testing.T) {
 		}
 	}
 
-	// With the kind supplied, the same multi-kind site binds.
-	if txt, isErr := toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Mixed", Kind: "ConcurrentDispatch", Note: "the worker"})); isErr {
+	// With the kind supplied, the same multi-kind site binds. ConcurrentDispatch is
+	// algo-FRAGILE, so the card flags it as algorithm-dependent (§22): the binding
+	// holds under this graph's rta but a build under a different --algo would
+	// warn-and-skip it. The proposer still succeeds — it never fails the build.
+	txt, isErr = toolResult(t, srv.call("annotate", toolArgs{Site: "svc.Mixed", Kind: "ConcurrentDispatch", Note: "the worker"}))
+	if isErr {
 		t.Errorf("disambiguated annotate must succeed, got error: %s", txt)
+	}
+	if !strings.Contains(txt, "algorithm-dependent") {
+		t.Errorf("a fragile-kind (ConcurrentDispatch) annotation must be flagged algorithm-dependent:\n%s", txt)
 	}
 
 	// A missing note is refused (the schema requires it; defense in depth).

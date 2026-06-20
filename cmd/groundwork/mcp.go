@@ -21,6 +21,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 	"github.com/jyang234/golang-code-graph/internal/impeach"
+	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 	"github.com/jyang234/golang-code-graph/ir"
 
 	"github.com/jyang234/golang-code-graph/capture"
@@ -973,6 +974,13 @@ func annotateCard(ix *graph.Index, a toolArgs) map[string]any {
 	fmt.Fprintf(&b, "✓ binds the %s blind spot at %s\n", kind, a.Site)
 	if detail != "" {
 		fmt.Fprintf(&b, "  %s\n", detail)
+	}
+	// Flag an algorithm-fragile kind (§22): its presence at a site flips with --algo,
+	// so this binding holds under THIS graph's algo but a flowmap build under a
+	// different --algo will warn-and-skip the annotation (never fail). Disclosure-only,
+	// so the caller is told to pin --algo, not that anything is wrong.
+	if blindspots.AlgoFragile(blindspots.Kind(kind)) {
+		fmt.Fprintf(&b, "⚠ %s is algorithm-dependent: present under this graph's --algo %s but a build under a different --algo would warn-and-skip this annotation (it never fails the build). Author it against — and build with — a consistent --algo (e.g. vta).\n", kind, ix.Algo())
 	}
 	b.WriteString("\nThis tool writes nothing. Add to .flowmap.yaml (merge under an existing static.annotations if present) and rebuild the graph:\n\n")
 	b.WriteString(buf.String())
