@@ -112,6 +112,126 @@ func TestMermaidRootedCarriesAnnotationsAndBoundaryLabel(t *testing.T) {
 	}
 }
 
+// dispatcherSampleGraph models a pure dispatcher root: Publish is a plumbing-tier
+// (tier 3) decode-and-switch shim with no effect of its own, fanning out to two
+// branches that each emit a boundary effect (so the branches are kept by the
+// effect-emitter rule even under tier collapse). Without pinning the root, rooting at
+// Publish collapses it and orphans the branches — the defect this fixes.
+func dispatcherSampleGraph() *Graph {
+	const (
+		publish      = "(example.com/svc/internal/outbox.Publisher).Publish"
+		publishTopic = "(example.com/svc/internal/outbox.Publisher).publishTopic"
+		publishQueue = "(example.com/svc/internal/outbox.Publisher).publishQueue"
+	)
+	return &Graph{
+		Algo: "rta",
+		Nodes: []Node{
+			{FQN: publish, Tier: 3},
+			{FQN: publishTopic, Tier: 3},
+			{FQN: publishQueue, Tier: 3},
+		},
+		Edges: []Edge{
+			{From: publish, To: publishTopic, Tier: 3},
+			{From: publish, To: publishQueue, Tier: 3},
+			{From: publishTopic, To: "boundary:bus PUBLISH provision.topic", Tier: 1, Boundary: "outbound-async"},
+			{From: publishQueue, To: "boundary:bus PUBLISH provision.queue", Tier: 1, Boundary: "outbound-async"},
+		},
+		Entrypoints: []Entrypoint{{Kind: "event", Name: "outbox.provision", Fn: publish}},
+	}
+}
+
+// TestMermaidRootedPinsPlumbingTierRoot pins the fix: rooting at a pure dispatcher
+// (plumbing-tier, no effect of its own) keeps the root in view so its branches are not
+// orphaned, and discloses the pin in a header note.
+func TestMermaidRootedPinsPlumbingTierRoot(t *testing.T) {
+	const publish = "(example.com/svc/internal/outbox.Publisher).Publish"
+	g := dispatcherSampleGraph()
+	out, ok := g.MermaidRootedAt(publish, MermaidOptions{MaxTier: 2})
+	if !ok {
+		t.Fatal("expected the dispatcher FQN to resolve as root")
+	}
+	// The root is drawn (it would collapse as tier-3 plumbing without the pin).
+	if !strings.Contains(out, "outbox.Publisher.Publish") {
+		t.Errorf("the explicit --root must be drawn, not collapsed:\n%s", out)
+	}
+	// Its branches attach to it: an edge whose endpoints are both shown draws.
+	if !strings.Contains(out, "outbox.Publisher.publishTopic") || !strings.Contains(out, "outbox.Publisher.publishQueue") {
+		t.Errorf("the dispatched branches should be present:\n%s", out)
+	}
+	// The pin is disclosed honestly.
+	if !strings.Contains(out, "pinned into view") {
+		t.Errorf("a rescued plumbing-tier root must disclose the pin:\n%s", out)
+	}
+}
+
+// TestMermaidRootedDoesNotPinWholeGraph guards against the pin leaking into the
+// whole-graph render: the same dispatcher graph rendered with no --root collapses the
+// dispatcher as before (no pin, no note), since pinRoot is set only by MermaidRootedAt.
+func TestMermaidRootedDoesNotPinWholeGraph(t *testing.T) {
+	g := dispatcherSampleGraph()
+	out := g.Mermaid(MermaidOptions{MaxTier: 2})
+	if strings.Contains(out, "outbox.Publisher.Publish") {
+		t.Errorf("whole-graph render must still collapse the plumbing dispatcher:\n%s", out)
+	}
+	if strings.Contains(out, "pinned into view") {
+		t.Errorf("whole-graph render must not emit the pin note:\n%s", out)
+	}
+}
+
+// TestMermaidRootedEffectBearingPlumbingRootNoMisfire pins the load-bearing subtlety:
+// a tier-3 root that ITSELF emits an effect is already kept by the effect-emitter rule,
+// so the pin is a no-op and the "pinned into view" note must NOT fire — keying the note
+// on keepNode(..., nil) (would it be kept without the pin) is what prevents the misfire.
+func TestMermaidRootedEffectBearingPlumbingRootNoMisfire(t *testing.T) {
+	const dispatch = "(example.com/svc/internal/outbound.Dispatcher).Dispatch"
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: dispatch, Tier: 3}},
+		Edges: []Edge{
+			{From: dispatch, To: "boundary:external POST customer.io", Tier: 1, Boundary: "outbound-sync"},
+		},
+		Entrypoints: []Entrypoint{{Kind: "event", Name: "outbound.send", Fn: dispatch}},
+	}
+	out, ok := g.MermaidRootedAt(dispatch, MermaidOptions{MaxTier: 2})
+	if !ok {
+		t.Fatal("expected the dispatcher FQN to resolve as root")
+	}
+	if !strings.Contains(out, "outbound.Dispatcher.Dispatch") {
+		t.Errorf("an effect-bearing root is kept regardless:\n%s", out)
+	}
+	if strings.Contains(out, "pinned into view") {
+		t.Errorf("the pin note must not misfire for an already-kept effect-bearing root:\n%s", out)
+	}
+}
+
+// TestMermaidRootedNonPlumbingRootByteIdentical pins that the --root pin is inert for a
+// root tier-collapse keeps anyway (a tier-1 handler at/under MaxTier): rendering the
+// SAME rooted sub-graph with the pin set is byte-identical to rendering it with the pin
+// cleared, and emits no rescue note. Only a plumbing-tier root the pin actually rescues
+// may differ (TestMermaidRootedPinsPlumbingTierRoot). Rendering the one sub-graph both
+// ways — rather than asserting only that the note is absent — is what proves byte-identity.
+func TestMermaidRootedNonPlumbingRootByteIdentical(t *testing.T) {
+	g := rootedSampleGraph()
+	sub, notes, rootFn, ok := g.rootedSubgraph("POST /create")
+	if !ok {
+		t.Fatal("expected POST /create to resolve")
+	}
+
+	pinned := MermaidOptions{MaxTier: 2, pinRoot: rootFn}
+	unpinned := MermaidOptions{MaxTier: 2}
+	// Independent note copies so an append into a shared backing array cannot make the
+	// two renders differ for a reason other than the pin (the property under test).
+	withPin := sub.mermaid(pinned, append([]string(nil), notes...))
+	withoutPin := sub.mermaid(unpinned, append([]string(nil), notes...))
+
+	if withPin != withoutPin {
+		t.Errorf("the pin must be inert for a non-plumbing root, but the bytes differ:\nwith pin:\n%s\nwithout pin:\n%s", withPin, withoutPin)
+	}
+	if strings.Contains(withPin, "pinned into view") {
+		t.Errorf("a non-plumbing root must not emit the pin note:\n%s", withPin)
+	}
+}
+
 func TestMermaidRootedFailsClosedOnUnknownRoot(t *testing.T) {
 	g := rootedSampleGraph()
 	if _, ok := g.MermaidRootedAt("DELETE /nope", MermaidOptions{MaxTier: 2}); ok {
