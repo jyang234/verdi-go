@@ -45,6 +45,7 @@ func TestRollupCompositionRootWiringEndToEnd(t *testing.T) {
 		root   = "example.com/eventbussvc"
 		api    = "example.com/eventbussvc/api"
 		server = "example.com/eventbussvc/server"
+		store  = "example.com/eventbussvc/store"
 	)
 
 	var rootComp *graphio.Component
@@ -60,7 +61,12 @@ func TestRollupCompositionRootWiringEndToEnd(t *testing.T) {
 		t.Errorf("component %q Role = %q, want %q", root, rootComp.Role, graphio.RollupRoot)
 	}
 
-	var sawWiring, sawDomainCall bool
+	// Edge classes the fixture must exercise. The DOMAIN surface (server's bus
+	// publish and its store→db write) is asserted too, so the fixture's store/bus
+	// packages are intentionally exercised rather than decorative: the point of the
+	// test is that the api→root wiring edge is split apart from these real
+	// dependencies and effects, not just that one wiring edge exists.
+	var sawWiring, sawDomainCall, sawServerStore, sawStoreDB, sawServerBus bool
 	for _, e := range r.Edges {
 		switch {
 		case e.From == api && e.To == root:
@@ -73,6 +79,21 @@ func TestRollupCompositionRootWiringEndToEnd(t *testing.T) {
 				t.Errorf("api->server domain edge Kind = %q, want %q (call): %+v", e.Kind, graphio.RollupCall, e)
 			}
 			sawDomainCall = true
+		case e.From == server && e.To == store:
+			if e.Kind != graphio.RollupCall {
+				t.Errorf("server->store domain edge Kind = %q, want %q (call): %+v", e.Kind, graphio.RollupCall, e)
+			}
+			sawServerStore = true
+		case e.From == store && e.To == "db":
+			if e.Kind != graphio.RollupEffect {
+				t.Errorf("store->db edge Kind = %q, want %q (effect): %+v", e.Kind, graphio.RollupEffect, e)
+			}
+			sawStoreDB = true
+		case e.From == server && e.To == "bus":
+			if e.Kind != graphio.RollupEffect {
+				t.Errorf("server->bus edge Kind = %q, want %q (effect): %+v", e.Kind, graphio.RollupEffect, e)
+			}
+			sawServerBus = true
 		}
 		// No edge may read as a CODE call INTO the composition root — that is the
 		// architecture inversion the wiring class exists to prevent.
@@ -85,5 +106,8 @@ func TestRollupCompositionRootWiringEndToEnd(t *testing.T) {
 	}
 	if !sawDomainCall {
 		t.Errorf("expected an api->server domain call; rollup edges = %+v", r.Edges)
+	}
+	if !sawServerStore || !sawStoreDB || !sawServerBus {
+		t.Errorf("expected the domain effect surface (server->store call, store->db effect, server->bus effect); rollup edges = %+v", r.Edges)
 	}
 }

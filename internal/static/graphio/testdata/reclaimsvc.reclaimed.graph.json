@@ -89,5 +89,8 @@
       "name": "POST /admin",
       "fn": "(*example.com/reclaimsvc.wrapper).Admin"
     }
+  ],
+  "composition_roots": [
+    "example.com/reclaimsvc"
   ]
 }

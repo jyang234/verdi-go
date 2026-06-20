@@ -953,6 +953,9 @@
       "fn": "example.com/obligsvc.main$1"
     }
   ],
+  "composition_roots": [
+    "example.com/obligsvc"
+  ],
   "effect_order": [
     {
       "fn": "example.com/obligsvc.main",

@@ -103,11 +103,17 @@ func rollupMermaidDiff(base, branch *PackageRollup, caveats []string) string {
 	var b strings.Builder
 	b.WriteString("flowchart LR\n")
 	b.WriteString("    %% component (C3) rollup diff — base → branch (a view, never a gate)\n")
-	b.WriteString("    %% solid = code (call/effect); dashed = disclosed effect; ＋ added, − removed\n")
+	b.WriteString("    %% solid = code (call/effect); dashed = disclosed effect; dashed \"wires\" = composition-root wiring; ＋ added, − removed\n")
 	for _, c := range caveats {
 		b.WriteString("    %% ⚠ " + comment(c) + "\n")
 	}
 	writeLegend(&b)
+
+	// The composition-root packages (Role marker), for labeling the root box. A diff
+	// node already carries one delta-state class (added/removed/kept), so it cannot
+	// ALSO take the :::root class the non-diff view uses; the label suffix is how the
+	// assembly point stays identifiable in the diff.
+	roots := diffRootPackages(base, branch)
 
 	// Component nodes in union order, colored by membership state.
 	baseComp := componentSet(base)
@@ -117,7 +123,11 @@ func rollupMermaidDiff(base, branch *PackageRollup, caveats []string) string {
 		id := ids.get("comp_" + pkg)
 		compID[pkg] = id
 		st := stateOf(baseComp[pkg], branchComp[pkg])
-		b.WriteString("    " + id + `["` + prefixFor(st) + mermaidText(shortPkg(pkg)) + `"]:::` + classFor(st) + "\n")
+		label := prefixFor(st) + mermaidText(shortPkg(pkg))
+		if roots[pkg] {
+			label += " " + mermaidText("(root)")
+		}
+		b.WriteString("    " + id + `["` + label + `"]:::` + classFor(st) + "\n")
 	}
 
 	// External nodes in union edge order, colored by membership state.
@@ -174,10 +184,40 @@ func rollupDiffEdgeLine(from, to string, e RollupEdge, s diffState) string {
 	if !e.Resolved() || e.Wiring() {
 		arrow = "-.->"
 	}
+	// The label carries the delta state (±) AND, for a wiring back-edge, a "wires"
+	// tag. Both wiring and disclosed edges are dashed, and the delta COLOR is shared
+	// across classes, so without the tag a kept wiring edge and a kept disclosed edge
+	// would render byte-identically — losing the code-vs-wiring distinction the JSON
+	// diff keeps. (A second linkStyle for the wiring class is not available: the edge
+	// index already carries its delta-state linkStyle.)
+	var parts []string
 	if p := strings.TrimSpace(prefixFor(s)); p != "" {
-		return from + " " + arrow + "|" + p + "| " + to
+		parts = append(parts, p)
+	}
+	if e.Wiring() {
+		parts = append(parts, "wires")
+	}
+	if len(parts) > 0 {
+		return from + " " + arrow + "|" + mermaidText(strings.Join(parts, " ")) + "| " + to
 	}
 	return from + " " + arrow + " " + to
+}
+
+// diffRootPackages is the set of composition-root packages across either side of a
+// rollup diff — read from the Component.Role marker each side already carries.
+func diffRootPackages(base, branch *PackageRollup) map[string]bool {
+	roots := map[string]bool{}
+	for _, c := range base.Components {
+		if c.Role == RollupRoot {
+			roots[c.Package] = true
+		}
+	}
+	for _, c := range branch.Components {
+		if c.Role == RollupRoot {
+			roots[c.Package] = true
+		}
+	}
+	return roots
 }
 
 // rollupEndpointID resolves an edge's To to a node id: a component for a call, an

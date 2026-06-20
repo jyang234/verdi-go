@@ -40,12 +40,17 @@ const (
 	// component does not depend on main. A composition-root package CANNOT be imported,
 	// so EVERY edge whose target is a composition root is necessarily such an injected
 	// func value (there is no other way for first-party code to reach a function
-	// defined in `package main`) — which is what makes the classification sound rather
-	// than a heuristic. Carried apart from RollupCall so the C3 view is not inverted by
-	// assembly wiring and the rollup diff does not file an injected-closure swap under
-	// the code bin (see PackageRollupDiff). CODE-adjacent and solid-by-default, but its
-	// own class: External() is false (the target is a first-party component) yet it is
-	// not a domain call.
+	// defined in `package main`) — which is what makes the reclassification sound. That
+	// soundness rests on identifying the composition root AUTHORITATIVELY: it is the
+	// SSA main-package set the graph carries in CompositionRoots (roots.KindMain), not
+	// an FQN guess, so a non-main package that merely declares a `func main` is never
+	// treated as a root. (compositionRootSet falls back to an FQN heuristic only for a
+	// legacy graph that predates the field, where that one residual ambiguity is
+	// bounded and documented.) Carried apart from RollupCall so the C3 view is not
+	// inverted by assembly wiring and the rollup diff does not file an injected-closure
+	// swap under the code bin (see PackageRollupDiff). CODE-adjacent and solid-by-
+	// default, but its own class: External() is false (the target is a first-party
+	// component) yet it is not a domain call.
 	RollupWiring = "wiring"
 	// RollupEffect is a component→external-system effect: a resolved typed boundary
 	// edge (a DB op, a bus publish/consume, an outbound peer call). Solid.
@@ -119,6 +124,36 @@ func (e RollupEdge) Resolved() bool { return e.Kind != RollupDisclosed }
 // out of the diff's code bin and a consumer can fold it.
 func (e RollupEdge) Wiring() bool { return e.Kind == RollupWiring }
 
+// compositionRootSet is the set of composition-root packages (the `package main`
+// commands) for the rollup. It PREFERS the graph's authoritative CompositionRoots
+// — the SSA main-package set recorded at build (graphio.compositionRoots, from
+// roots.KindMain), exact and not an FQN guess. It falls back to recognizing a
+// package-level `func main` by FQN ONLY for a legacy graph built before that field
+// existed (e.g. an old base passed to --diff), so such a graph still classifies
+// wiring instead of reading every injected back-edge as a code dependency and
+// churning the diff. The fallback is a compatibility shim, not a second source of
+// truth: it is deliberately stricter than groundwork/fitness.proposeLayers's
+// `strings.HasSuffix(fqn, ".main")` — it requires FQN == Package+".main", so a
+// method named main ("(*pkg.T).main") is excluded — and it carries the residual
+// ambiguity that a non-main package declaring a package-level `func main` is
+// mistaken for a root. A graph built by this flowmap never reaches the fallback, so
+// that ambiguity cannot arise on a current graph; it is bounded to legacy input.
+func compositionRootSet(g *Graph) map[string]bool {
+	roots := make(map[string]bool, len(g.CompositionRoots))
+	if len(g.CompositionRoots) > 0 {
+		for _, pkg := range g.CompositionRoots {
+			roots[pkg] = true
+		}
+		return roots
+	}
+	for _, n := range g.Nodes {
+		if n.Package != "" && n.FQN == n.Package+".main" {
+			roots[n.Package] = true
+		}
+	}
+	return roots
+}
+
 // RollupByPackage computes the component view. Pure function of g; every list is
 // sorted on intrinsic keys so the result is byte-identical across runs.
 func (g *Graph) RollupByPackage() *PackageRollup {
@@ -126,26 +161,14 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	// (empty Package) is not a component and anchors no edge.
 	pkgOf := make(map[string]string, len(g.Nodes))
 	counts := map[string]int{}
-	roots := map[string]bool{} // composition-root packages (those declaring `func main`)
 	for _, n := range g.Nodes {
 		if n.Package == "" {
 			continue
 		}
 		pkgOf[n.FQN] = n.Package
 		counts[n.Package]++
-		// The composition root is the package declaring `func main`. We recognize it
-		// from the node FQN — the same `.main` convention groundwork/fitness.proposeLayers
-		// keys composition roots on (one shared convention; parity guarded by
-		// TestRollupMarksCompositionRoot here and TestProposeLayersMultipleRoots there).
-		// FQN == Package+".main" is the PRECISE form: it matches a package-level `func
-		// main` only, never a method named main (whose FQN is "(*pkg.T).main", not
-		// "pkg.main"). A non-main package that declared its own package-level `func main`
-		// (legal Go, but dead code / a smell) is the one residual ambiguity, the same one
-		// the proposeLayers heuristic carries.
-		if n.FQN == n.Package+".main" {
-			roots[n.Package] = true
-		}
 	}
+	roots := compositionRootSet(g)
 
 	components := make([]Component, 0, len(counts))
 	for pkg, c := range counts {

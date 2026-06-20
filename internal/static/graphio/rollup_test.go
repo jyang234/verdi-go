@@ -123,9 +123,50 @@ func TestRollupMarksCompositionRoot(t *testing.T) {
 	}
 }
 
-// TestRollupMethodNamedMainIsNotARoot pins the precision of the recognition rule: a
-// METHOD named main ("(*pkg.T).main") is not a package `func main`, so its package is
-// not a composition root and an edge into it stays a plain call.
+// TestRollupCompositionRootsFieldIsAuthoritative pins that when the graph carries the
+// authoritative CompositionRoots field (set at build from roots.KindMain), the rollup
+// trusts it and does NOT fall back to the FQN heuristic — so a non-main package that
+// merely declares a package-level `func main` is correctly NOT a composition root, and
+// a real call into it stays a domain `call` rather than being misclassified as wiring.
+// This is the soundness fix: the FQN heuristic alone would mark `util` a root here.
+func TestRollupCompositionRootsFieldIsAuthoritative(t *testing.T) {
+	g := &Graph{
+		CompositionRoots: []string{"ex.com/svc/cmd/svc"}, // authoritative: only this is main
+		Nodes: []Node{
+			{FQN: "ex.com/svc/cmd/svc.main", Package: "ex.com/svc/cmd/svc"},
+			{FQN: "ex.com/svc/util.main", Package: "ex.com/svc/util"}, // a non-main pkg with func main (a smell, but importable)
+			{FQN: "ex.com/svc/app.Run", Package: "ex.com/svc/app"},
+		},
+		Edges: []Edge{
+			{From: "ex.com/svc/app.Run", To: "ex.com/svc/util.main"}, // a REAL call into util — must stay a call
+		},
+	}
+	r := g.RollupByPackage()
+	for _, c := range r.Components {
+		switch c.Package {
+		case "ex.com/svc/cmd/svc":
+			if c.Role != RollupRoot {
+				t.Errorf("the listed main package must be the composition root, got Role=%q", c.Role)
+			}
+		case "ex.com/svc/util":
+			if c.Role != "" {
+				t.Errorf("a non-main package with a func main must NOT be a root when CompositionRoots is authoritative: %+v", c)
+			}
+		}
+	}
+	for _, e := range r.Edges {
+		if e.From == "ex.com/svc/app" && e.To == "ex.com/svc/util" && e.Kind != RollupCall {
+			t.Errorf("a real call into util must stay a domain call, not wiring: %+v", e)
+		}
+	}
+}
+
+// TestRollupMethodNamedMainIsNotARoot pins the precision of the legacy FALLBACK
+// recognition (a graph with no CompositionRoots field, e.g. a base built before the
+// field existed): a METHOD named main ("(*pkg.T).main") is not a package `func main`,
+// so its package is not a composition root and an edge into it stays a plain call. The
+// fallback is intentionally stricter than groundwork/fitness.proposeLayers, which would
+// over-match this case.
 func TestRollupMethodNamedMainIsNotARoot(t *testing.T) {
 	g := &Graph{
 		Nodes: []Node{

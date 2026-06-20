@@ -301,6 +301,9 @@
       "fn": "(*example.com/impeachsvc/internal/handler.App).Create"
     }
   ],
+  "composition_roots": [
+    "example.com/impeachsvc"
+  ],
   "effect_order": [
     {
       "fn": "(*example.com/impeachsvc/internal/admin.Admin).PurgeLedger",

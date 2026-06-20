@@ -88,6 +88,24 @@ type Graph struct {
 	// other level-2 slices it rides unscoped builds only.
 	Entrypoints []Entrypoint `json:"entrypoints,omitempty"`
 
+	// CompositionRoots are the import paths of this unit's COMPOSITION-ROOT
+	// packages — the `package main` commands, taken from the authoritative root set
+	// (roots.KindMain / ssautil.MainPackages), sorted and deduped. It is the
+	// trustworthy answer to "which package assembles the program": a `package main`
+	// cannot be imported, so no first-party package can make a named call into it —
+	// every graph edge whose TARGET is a composition root is therefore a
+	// dependency-injected func value (a closure or method value main passed into a
+	// component and that component later invokes), never a domain dependency. The C3
+	// rollup reads this to mark the composition-root component and reclassify those
+	// back-edges as wiring. Derived from SSA, NOT from an FQN string heuristic, so a
+	// non-main package that merely declares a package-level `func main` (legal Go, a
+	// smell) is never mistaken for one. Disclosure-only — same trust class as
+	// Node.Package: no verdict, count, edge, tier, or reachability computation reads
+	// it. Omitted when the unit builds no command (a library), so those graphs stay
+	// byte-identical. A whole-program fact like Entrypoints: it rides unscoped builds
+	// only (the rollup that consumes it refuses an --entry scope).
+	CompositionRoots []string `json:"composition_roots,omitempty"`
+
 	// EffectOrder is the partial-effect disclosure (incident-triage plan IT-3):
 	// for each function holding both a committed external effect (bus publish,
 	// DB mutation) and a fallible call, whether the effect can — or always
@@ -492,6 +510,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 			}
 			return a.Fn < b.Fn
 		})
+		g.CompositionRoots = compositionRoots(res)
 	}
 	base := ""
 	if entry == "" {

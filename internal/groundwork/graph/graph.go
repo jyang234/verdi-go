@@ -70,6 +70,15 @@ type Graph struct {
 	EffectOrder []EffectOrderFact `json:"effect_order,omitempty"`
 	Entrypoints []Entrypoint      `json:"entrypoints,omitempty"`
 
+	// CompositionRoots are the import paths of the producer's `package main`
+	// commands (flowmap's authoritative main-package set). groundwork decodes it on
+	// its own side of the trust boundary — DisallowUnknownFields would reject the
+	// graph otherwise — and round-trips it. It is a disclosure: no groundwork verdict
+	// reads it today (the layering proposer still derives roots structurally from the
+	// node set), but it is carried so a consumer that wants the assembly point need
+	// not re-derive it. Omitted for a library (no command).
+	CompositionRoots []string `json:"composition_roots,omitempty"`
+
 	// Frontier is the producer's classification of where static reachability stops
 	// (flowmap's frontier section). groundwork decodes it on its own side of the
 	// trust boundary — like every other graph-carried section — so a consumer can
