@@ -2,6 +2,7 @@
 flowchart LR
     %% static call graph — scope: whole graph; algo: rta
     %% 5 first-party nodes above tier 2 hidden as plumbing; pass --show-plumbing to include
+    %% 4 blind spot/markers on hidden plumbing omitted; pass --all-blind-spots to include
     bus_Bus_Publish["bus.Bus.Publish ⚠"]:::fallible
     handler_Server_Create["handler.Server.Create"]
     handler_Server_Publish["handler.Server.Publish"]
@@ -10,11 +11,7 @@ flowchart LR
     blindsvc_main["blindsvc.main"]
     bus_bus_PUBLISH_user_created{{"bus PUBLISH user.created"}}:::bus
     bus_bus_PUBLISH__dynamic_{{"bus PUBLISH &lt;dynamic&gt;"}}:::bus
-    blind_reflect(["⊥ reflect<br/>blind spot"]):::blind
-    blind_unsafe(["⊥ unsafe<br/>blind spot"]):::blind
     frontier_dynamic_bus(["⌖ dynamic-bus<br/>frontier A"]):::blind
-    frontier_reflect(["⌖ reflect<br/>frontier A"]):::blind
-    frontier_unsafe(["⌖ unsafe<br/>frontier A"]):::blind
     handler_Server_Create --> notify_Notifier_Created
     handler_Server_Publish --> notify_Notifier_Emit
     notify_Notifier_Created -. async .-> bus_bus_PUBLISH_user_created

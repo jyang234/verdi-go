@@ -128,6 +128,7 @@ func cmdGraph(args []string) error {
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
+	allBlindSpots := fs.Bool("all-blind-spots", false, "with --mermaid, draw every blind-spot/frontier disclosure node (trivial boundaries and those orphaned onto collapsed plumbing) instead of rolling the plumbing-tier ones into a counted header note; restores the full honesty channel without un-collapsing plumbing nodes")
 	diffBase := fs.String("diff", "", "with --mermaid, render the delta from this BASE graph JSON to the analyzed branch (added/removed nodes and edges colored); a view, never a gate")
 	rootAt := fs.String("root", "", `with --mermaid, scope to one entry point at RENDER time (e.g. "POST /loan-application") — unlike --entry this keeps the frontier markers in the per-handler view`)
 	maxNodes := fs.Int("max-nodes", 300, "with --mermaid, cap how many nodes a diagram draws; above the cap it renders an index of entry points to --root at instead of an illegible hairball (0 = uncapped)")
@@ -163,7 +164,7 @@ func cmdGraph(args []string) error {
 		if *showPlumbing {
 			maxTier = 0
 		}
-		opts := graphio.MermaidOptions{MaxTier: maxTier, MaxNodes: *maxNodes}
+		opts := graphio.MermaidOptions{MaxTier: maxTier, MaxNodes: *maxNodes, ShowAllBlindSpots: *allBlindSpots}
 		if *rootAt != "" && *diffBase != "" {
 			return fmt.Errorf("graph --root and --diff are mutually exclusive: --root renders one handler's reach, --diff renders a base→branch delta; a rooted diff is not supported")
 		}

@@ -60,16 +60,25 @@ func TestMermaidOverCapRendersIndex(t *testing.T) {
 }
 
 // TestMermaidOverCapPreservesDisclosures is the trust guard: the over-cap index must
-// still draw the blind-spot and frontier disclosures, so a large graph never silently
-// launders its "where the analysis goes dark" markers into clean reachability.
+// still account for every blind-spot and frontier disclosure, so a large graph never
+// silently launders its "where the analysis goes dark" markers into clean reachability.
+// In the index the disclosure nodes have no drawn first-party caller to attach to, so
+// rather than dumping a pile of caller-less floating boxes they are rolled into ONE
+// counted summary node — the COUNT is disclosed (never silently dropped) and each
+// disclosure is drawn attached to its caller in the --root views the index steers to.
 func TestMermaidOverCapPreservesDisclosures(t *testing.T) {
 	g := bigGraph(500)
 	out := g.Mermaid(MermaidOptions{MaxNodes: 200})
-	if !strings.Contains(out, "⊥ reflect") {
-		t.Errorf("over-cap index dropped the blind-spot disclosure (honesty channel):\n%s", clip(out))
+	// bigGraph carries one blind spot (reflect) and one frontier marker (dynamic-bus);
+	// the summary must disclose both counts.
+	if !strings.Contains(out, "1 blind spot,") {
+		t.Errorf("over-cap index dropped the blind-spot count (honesty channel):\n%s", clip(out))
 	}
-	if !strings.Contains(out, "⌖ dynamic-bus") {
-		t.Errorf("over-cap index dropped the frontier disclosure:\n%s", clip(out))
+	if !strings.Contains(out, "1 frontier marker") {
+		t.Errorf("over-cap index dropped the frontier-marker count:\n%s", clip(out))
+	}
+	if !strings.Contains(out, ":::blind") {
+		t.Errorf("the disclosure summary must carry the blind class:\n%s", clip(out))
 	}
 }
 

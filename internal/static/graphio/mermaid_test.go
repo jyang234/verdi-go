@@ -116,6 +116,36 @@ func TestMermaidCollapsesPlumbingByDefault(t *testing.T) {
 	}
 }
 
+// TestMermaidAllBlindSpotsRestoresOrphans pins the --all-blind-spots escape hatch: the
+// denoised default rolls plumbing-tier disclosures (trivial boundaries and those
+// orphaned onto collapsed plumbing) into a counted header note, but ShowAllBlindSpots
+// must draw every disclosure node back in WITHOUT un-collapsing the plumbing nodes.
+func TestMermaidAllBlindSpotsRestoresOrphans(t *testing.T) {
+	// An orphaned disclosure: a reflect blind spot at a package-level site with no
+	// first-party node to attach to, so the default denoise drops + counts it.
+	g := &Graph{
+		Algo:       "rta",
+		Nodes:      []Node{{FQN: "example.com/svc/internal/handler.H", Tier: 1}},
+		BlindSpots: []blindspots.BlindSpot{{Kind: blindspots.Reflect, Site: "example.com/svc/internal/rawmem"}},
+	}
+
+	denoised := g.Mermaid(MermaidOptions{MaxTier: 2})
+	if strings.Contains(denoised, "⊥ reflect") {
+		t.Errorf("default denoise should drop the orphaned reflect disclosure into a count:\n%s", denoised)
+	}
+	if !strings.Contains(denoised, "on hidden plumbing omitted; pass --all-blind-spots to include") {
+		t.Errorf("the dropped disclosure must be disclosed in a counted note naming the escape hatch:\n%s", denoised)
+	}
+
+	full := g.Mermaid(MermaidOptions{MaxTier: 2, ShowAllBlindSpots: true})
+	if !strings.Contains(full, "⊥ reflect") {
+		t.Errorf("--all-blind-spots must draw the orphaned reflect disclosure back in:\n%s", full)
+	}
+	if strings.Contains(full, "on hidden plumbing omitted") {
+		t.Errorf("with every disclosure shown there is nothing to omit, so no count note:\n%s", full)
+	}
+}
+
 // TestMermaidNeverHidesEffectEmitter pins the soundness rule: a node that emits a
 // boundary effect is shown even when its tier would otherwise collapse it, so the
 // denoised view can never silently drop an effect.
