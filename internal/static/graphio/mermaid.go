@@ -69,10 +69,17 @@ func (g *Graph) Mermaid(opts MermaidOptions) string {
 
 // bnode is a typed boundary effect node (DB / bus / external leaf). disc is a
 // disclosure node (a blind spot or frontier marker, the honesty channel); from is the
-// id of the first-party node it attaches to, or "" when that node is not drawn.
+// id of the first-party node it attaches to, or "" when that node is not drawn. isMarker
+// records which channel a disc came from (a frontier marker vs a blind spot), set once at
+// construction in buildDiscs so a later consumer (the over-cap index summary) reads it
+// structurally instead of re-deriving it from the composed label prose — the one place
+// the blind-vs-marker distinction lives (CLAUDE.md: one source of truth).
 type (
 	bnode struct{ id, label, class string }
-	disc  struct{ id, label, from string }
+	disc  struct {
+		id, label, from string
+		isMarker        bool
+	}
 )
 
 // writeFlowchartHeader emits the shared header — the `flowchart LR` line and the
@@ -165,10 +172,13 @@ func shortPkg(path string) string {
 // would show. When hidePlumbing is set (the CLI's tier-collapse default), two classes of
 // plumbing-tier noise are dropped — but COUNTED in the returned (hiddenTrivial,
 // hiddenOrphan) so the caller can disclose them in a header note and recover them with
-// --all-blind-spots (or --show-plumbing): never a silent drop. Effect-bearing blind-spot
-// sites are force-kept
-// upstream (collectEffectBearingBlindSites), so the dropped set is only trivial
-// boundaries and severity-less disclosures whose caller already collapsed.
+// --all-blind-spots (or --show-plumbing): never a silent drop. An effect-bearing blind
+// spot is NEVER in the dropped set (the orphan guard below exempts its severity), so the
+// drop set is only trivial boundaries and severity-less disclosures whose caller
+// collapsed. Its site is force-kept upstream (collectEffectBearingBlindSites folds it
+// into the keep set), so when that site is a drawn node — which an EBC site, a first-party
+// function, always is — the disclosure attaches; were the site somehow not drawn it would
+// still be emitted (caller-less) rather than dropped, fail-open toward disclosure.
 func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string, hidePlumbing bool) (discs []disc, hiddenTrivial, hiddenOrphan int) {
 	annotated := map[[2]string]bool{}
 	for _, a := range g.Annotations {
@@ -199,7 +209,7 @@ func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string, hidePlumbing b
 			// header notes (mermaid), keeping the node label legible.
 			label += " 🗒"
 		}
-		discs = append(discs, disc{id: id, label: label, from: from})
+		discs = append(discs, disc{id: id, label: label, from: from, isMarker: false})
 	}
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
@@ -212,7 +222,7 @@ func buildDiscs(g *Graph, ids *idAlloc, nodeID map[string]string, hidePlumbing b
 			}
 			id := ids.get("frontier_" + m.Kind)
 			label := "⌖ " + mermaidText(m.Kind) + "<br/>frontier " + mermaidText(string(m.Bin))
-			discs = append(discs, disc{id: id, label: label, from: from})
+			discs = append(discs, disc{id: id, label: label, from: from, isMarker: true})
 		}
 	}
 	return discs, hiddenTrivial, hiddenOrphan
@@ -251,9 +261,10 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// A node that emits a boundary effect is load-bearing: hiding it would drop the
 	// effect from the diagram, which the trust model forbids (keepNode enforces this).
 	// The SITE of an effect-bearing blind spot (the AWS/SNS/SQS send, the CustomerIO
-	// send, the outbox) is load-bearing for the SAME reason — hiding it orphans an
-	// effect-bearing boundary into a caller-less floating disclosure node. Fold
-	// both into one load-bearing set; trivial boundaries (uuid, framework) are excluded.
+	// send, the outbox) is load-bearing for the SAME reason — collapsing it would orphan
+	// an effect-bearing boundary into a caller-less floating disclosure node. An EBC site
+	// is always a first-party graph node, so folding it into the keep set keeps it drawn
+	// and its disclosure attached; trivial boundaries (uuid, framework) are excluded.
 	emitsEffect := collectEmitsEffect(g.Edges)
 	for site := range collectEffectBearingBlindSites(g) {
 		emitsEffect[site] = true
@@ -430,7 +441,7 @@ func (g *Graph) overview(opts MermaidOptions, ids *idAlloc, drawn int, discs []d
 	if len(discs) > 0 {
 		var blinds, markers int
 		for _, d := range discs {
-			if strings.HasPrefix(d.label, "⌖") {
+			if d.isMarker {
 				markers++
 			} else {
 				blinds++
