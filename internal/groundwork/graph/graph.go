@@ -70,6 +70,18 @@ type Graph struct {
 	EffectOrder []EffectOrderFact `json:"effect_order,omitempty"`
 	Entrypoints []Entrypoint      `json:"entrypoints,omitempty"`
 
+	// CompositionRoots are the import paths of the producer's `package main`
+	// commands (flowmap's authoritative main-package set, roots.KindMain).
+	// groundwork decodes it on its own side of the trust boundary —
+	// DisallowUnknownFields would reject the graph otherwise — and round-trips it.
+	// It is a disclosure (no verdict reads it), but the layering proposer
+	// (fitness.proposeLayers) PREFERS it over its structural `.main` heuristic to
+	// pick the composition roots it exempts, so the assembly point is the one the
+	// producer's SSA identified rather than an FQN guess. Omitted for a library (no
+	// command) or a graph from a pre-field flowmap, where the proposer falls back to
+	// the heuristic.
+	CompositionRoots []string `json:"composition_roots,omitempty"`
+
 	// Frontier is the producer's classification of where static reachability stops
 	// (flowmap's frontier section). groundwork decodes it on its own side of the
 	// trust boundary — like every other graph-carried section — so a consumer can

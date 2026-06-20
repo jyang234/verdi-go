@@ -1,11 +1,14 @@
 package graphio
 
 import (
+	"sort"
+
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	cg "github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
+	"github.com/jyang234/golang-code-graph/internal/static/roots"
 )
 
 // firstPartyScope is the set of all reachable first-party functions, EXCLUDING
@@ -37,6 +40,29 @@ func rootFuncSet(res *analyze.Result) map[*ssa.Function]bool {
 		s[r.Func] = true
 	}
 	return s
+}
+
+// compositionRoots returns the sorted, deduped import paths of this unit's
+// composition-root packages — the defining packages of the KindMain roots
+// (ssautil.MainPackages). It is the AUTHORITATIVE main-package set: keyed on the
+// root kind the loader assigned, never on an FQN string shape, so a non-main
+// package that declares a package-level `func main` is not among them. Empty for a
+// unit with no command (a library). The rollup serializes this on the Graph and
+// reads it to classify composition-root wiring; see graphio.Graph.CompositionRoots.
+func compositionRoots(res *analyze.Result) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range res.Roots.Roots {
+		if r.Kind != roots.KindMain {
+			continue
+		}
+		if pkg := features.PkgPath(r.Func); pkg != "" && !seen[pkg] {
+			seen[pkg] = true
+			out = append(out, pkg)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // rootByName returns the root function registered under name (a route or topic).

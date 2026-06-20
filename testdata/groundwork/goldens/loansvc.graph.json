@@ -532,6 +532,9 @@
       "fn": "(*example.com/loansvc/internal/handler.App).Create"
     }
   ],
+  "composition_roots": [
+    "example.com/loansvc"
+  ],
   "effect_order": [
     {
       "fn": "(*example.com/loansvc/internal/origination.Evaluator).Evaluate",

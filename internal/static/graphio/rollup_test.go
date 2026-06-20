@@ -64,6 +64,175 @@ func TestRollupByPackage(t *testing.T) {
 	}
 }
 
+// compositionRootGraph models the DI-back-edge pattern the wiring class exists for: a
+// `cmd/<svc>` composition root (package main) that CONSTRUCTS a server (cmd→server, a
+// forward call) and INJECTS a closure into it that the server later invokes
+// (server→cmd via the closure literal `cmd/svc.newHandler$1`, a back-edge). The
+// composition root is recognized by its package-level `main` node (FQN == pkg+".main").
+func compositionRootGraph() *Graph {
+	const (
+		mainFn  = "ex.com/svc/cmd/svc.main"
+		closure = "ex.com/svc/cmd/svc.newHandler$1"
+		newSrv  = "ex.com/svc/server.New"
+		serve   = "(*ex.com/svc/server.S).Serve"
+	)
+	return &Graph{
+		Nodes: []Node{
+			{FQN: mainFn, Package: "ex.com/svc/cmd/svc"},
+			{FQN: closure, Package: "ex.com/svc/cmd/svc"}, // a closure DEFINED in main
+			{FQN: newSrv, Package: "ex.com/svc/server"},
+			{FQN: serve, Package: "ex.com/svc/server"},
+		},
+		Edges: []Edge{
+			{From: mainFn, To: newSrv}, // cmd → server: constructor wiring (stays a call)
+			{From: serve, To: closure}, // server → cmd: injected-closure BACK-EDGE → wiring
+		},
+	}
+}
+
+// TestRollupMarksCompositionRoot pins both halves of the composition-root ask: the
+// `package main` component is flagged role="composition_root", and the X→cmd
+// injected-closure back-edge is classified "wiring" (not "call"), while the cmd→X
+// constructor edge stays a plain call. The recognition convention (FQN == pkg+".main")
+// is the parity partner of groundwork/fitness.proposeLayers.
+func TestRollupMarksCompositionRoot(t *testing.T) {
+	r := compositionRootGraph().RollupByPackage()
+
+	wantComponents := []Component{
+		{Package: "ex.com/svc/cmd/svc", Name: "svc", Nodes: 2, Role: RollupRoot},
+		{Package: "ex.com/svc/server", Name: "server", Nodes: 2},
+	}
+	if !reflect.DeepEqual(r.Components, wantComponents) {
+		t.Errorf("components =\n%+v\nwant\n%+v", r.Components, wantComponents)
+	}
+
+	wantEdges := []RollupEdge{
+		{From: "ex.com/svc/cmd/svc", To: "ex.com/svc/server", Kind: RollupCall},   // constructor wiring stays a call
+		{From: "ex.com/svc/server", To: "ex.com/svc/cmd/svc", Kind: RollupWiring}, // injected-closure back-edge
+	}
+	if !reflect.DeepEqual(r.Edges, wantEdges) {
+		t.Errorf("edges =\n%+v\nwant\n%+v", r.Edges, wantEdges)
+	}
+
+	// A wiring edge targets a first-party component, so it is NOT external (it must
+	// resolve to a component box, never a stadium node).
+	for _, e := range r.Edges {
+		if e.Kind == RollupWiring && e.External() {
+			t.Errorf("a wiring edge must not be External(): %+v", e)
+		}
+	}
+}
+
+// TestRollupCompositionRootsFieldIsAuthoritative pins that when the graph carries the
+// authoritative CompositionRoots field (set at build from roots.KindMain), the rollup
+// trusts it and does NOT fall back to the FQN heuristic — so a non-main package that
+// merely declares a package-level `func main` is correctly NOT a composition root, and
+// a real call into it stays a domain `call` rather than being misclassified as wiring.
+// This is the soundness fix: the FQN heuristic alone would mark `util` a root here.
+func TestRollupCompositionRootsFieldIsAuthoritative(t *testing.T) {
+	g := &Graph{
+		CompositionRoots: []string{"ex.com/svc/cmd/svc"}, // authoritative: only this is main
+		Nodes: []Node{
+			{FQN: "ex.com/svc/cmd/svc.main", Package: "ex.com/svc/cmd/svc"},
+			{FQN: "ex.com/svc/util.main", Package: "ex.com/svc/util"}, // a non-main pkg with func main (a smell, but importable)
+			{FQN: "ex.com/svc/app.Run", Package: "ex.com/svc/app"},
+		},
+		Edges: []Edge{
+			{From: "ex.com/svc/app.Run", To: "ex.com/svc/util.main"}, // a REAL call into util — must stay a call
+		},
+	}
+	r := g.RollupByPackage()
+	for _, c := range r.Components {
+		switch c.Package {
+		case "ex.com/svc/cmd/svc":
+			if c.Role != RollupRoot {
+				t.Errorf("the listed main package must be the composition root, got Role=%q", c.Role)
+			}
+		case "ex.com/svc/util":
+			if c.Role != "" {
+				t.Errorf("a non-main package with a func main must NOT be a root when CompositionRoots is authoritative: %+v", c)
+			}
+		}
+	}
+	for _, e := range r.Edges {
+		if e.From == "ex.com/svc/app" && e.To == "ex.com/svc/util" && e.Kind != RollupCall {
+			t.Errorf("a real call into util must stay a domain call, not wiring: %+v", e)
+		}
+	}
+}
+
+// TestRollupMethodNamedMainIsNotARoot pins the precision of the legacy FALLBACK
+// recognition (a graph with no CompositionRoots field, e.g. a base built before the
+// field existed): a METHOD named main ("(*pkg.T).main") is not a package `func main`,
+// so its package is not a composition root and an edge into it stays a plain call. The
+// fallback is intentionally stricter than groundwork/fitness.proposeLayers, which would
+// over-match this case.
+func TestRollupMethodNamedMainIsNotARoot(t *testing.T) {
+	g := &Graph{
+		Nodes: []Node{
+			{FQN: "(*ex.com/svc/widget.T).main", Package: "ex.com/svc/widget"},
+			{FQN: "ex.com/svc/caller.Run", Package: "ex.com/svc/caller"},
+		},
+		Edges: []Edge{{From: "ex.com/svc/caller.Run", To: "(*ex.com/svc/widget.T).main"}},
+	}
+	r := g.RollupByPackage()
+	for _, c := range r.Components {
+		if c.Role != "" {
+			t.Errorf("a method named main must not mark its package a composition root: %+v", c)
+		}
+	}
+	for _, e := range r.Edges {
+		if e.Kind != RollupCall {
+			t.Errorf("edge into a (method-named-main) package must be a plain call, got %+v", e)
+		}
+	}
+}
+
+// TestRollupDiffWiringNotCode pins the diff-pollution fix: swapping WHICH closure the
+// composition root injects (server→cmd back-edge target changes) lands in Wiring*, NOT
+// in Code*, so a pure re-wiring never reads as a domain dependency added/removed.
+func TestRollupDiffWiringNotCode(t *testing.T) {
+	base := compositionRootGraph().RollupByPackage()
+
+	// Branch: main injects a DIFFERENT closure ($2 instead of $1) — same back-edge at
+	// the COMPONENT altitude (server→cmd), so the collapsed edge is identical and there
+	// is no delta at all. To force a wiring DELTA, drop the back-edge entirely (the
+	// server no longer invokes any injected closure).
+	branchGraph := compositionRootGraph()
+	branchGraph.Edges = branchGraph.Edges[:1] // keep cmd→server, drop server→cmd wiring
+	branch := branchGraph.RollupByPackage()
+
+	d := diffRollups(base, branch)
+	if len(d.WiringRemoved) != 1 || d.WiringRemoved[0].Kind != RollupWiring {
+		t.Errorf("dropping the injected-closure back-edge must be ONE wiring removal, got %+v", d.WiringRemoved)
+	}
+	if len(d.CodeAdded)+len(d.CodeRemoved) != 0 {
+		t.Errorf("a wiring change must not pollute the code bin, got added=%+v removed=%+v", d.CodeAdded, d.CodeRemoved)
+	}
+
+	// Symmetry: base↔branch swap flips WiringRemoved into WiringAdded.
+	rev := diffRollups(branch, base)
+	if !reflect.DeepEqual(rev.WiringAdded, d.WiringRemoved) || !reflect.DeepEqual(rev.WiringRemoved, d.WiringAdded) {
+		t.Errorf("wiring diff is not symmetric under swap:\nfwd=%+v\nrev=%+v", d, rev)
+	}
+}
+
+// TestRollupCompositionRootMermaidValid pins that the composition-root rollup render —
+// which introduces the :::root component class and the dotted "wires" back-edge — is
+// structurally valid Mermaid (every referenced class is defined, no leaked labels) in
+// both the plain and diff views.
+func TestRollupCompositionRootMermaidValid(t *testing.T) {
+	g := compositionRootGraph()
+	if err := validateMermaid(g.RollupByPackage().Mermaid()); err != nil {
+		t.Errorf("composition-root rollup Mermaid invalid: %v", err)
+	}
+	branch := compositionRootGraph()
+	branch.Edges = branch.Edges[:1]
+	if err := validateMermaid(RollupMermaidDiff(g, branch)); err != nil {
+		t.Errorf("composition-root rollup diff Mermaid invalid: %v", err)
+	}
+}
+
 // TestRollupExcludesTrivialEBC pins that a trivial (plumbing-tier) ExternalBoundaryCall
 // is NOT a disclosed component edge — the component view's signal depends on the same
 // Severity split the func()-seam tiering uses.

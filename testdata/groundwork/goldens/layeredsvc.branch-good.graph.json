@@ -183,6 +183,9 @@
       "fn": "(*example.com/layeredsvc/internal/handler.Server).UpdateUser"
     }
   ],
+  "composition_roots": [
+    "example.com/layeredsvc"
+  ],
   "effect_order": [
     {
       "fn": "(*example.com/layeredsvc/internal/app.Service).UpdateProfile",

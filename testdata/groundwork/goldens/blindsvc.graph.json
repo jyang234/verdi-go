@@ -153,6 +153,9 @@
       "fn": "(*example.com/blindsvc/internal/handler.Server).Create"
     }
   ],
+  "composition_roots": [
+    "example.com/blindsvc"
+  ],
   "frontier": {
     "markers": [
       {
