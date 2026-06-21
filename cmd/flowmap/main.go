@@ -365,29 +365,49 @@ func cmdFrontier(args []string) error {
 func cmdSchemaDrift(args []string) error {
 	fs := flag.NewFlagSet("schema-drift", flag.ContinueOnError)
 	graphPath := fs.String("graph", "", "path to an emitted graph JSON (recommend the --reclaim-sql graph)")
-	migrationsDir := fs.String("migrations", "", "directory of SQL migrations defining the schema")
-	libraryOwned := fs.String("library-owned", "", "comma-separated tables a library auto-migrates (outbox/inbox), folded into the defined schema")
+	migrationsDir := fs.String("migrations", "", "directory of SQL migrations (overrides static.schemaCheck.migrationsDir)")
+	libraryOwned := fs.String("library-owned", "", "comma-separated tables a library auto-migrates (outbox/inbox), folded into the defined schema (overrides static.schemaCheck.libraryOwnedTables)")
 	asJSON := fs.Bool("json", false, "emit the report as canonical JSON")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir, err := dirArg(fs)
+	if err != nil {
 		return err
 	}
 	if *graphPath == "" {
 		return fmt.Errorf("schema-drift: --graph <graph.json> is required")
 	}
-	if *migrationsDir == "" {
-		return fmt.Errorf("schema-drift: --migrations <dir> is required")
+
+	// The optional [dir]'s .flowmap.yaml supplies the schema source (migrations dir,
+	// library-owned tables); flags override it. dirArg defaults dir to ".", so an
+	// absent config just yields the zero value and the flags stand alone.
+	cfg, err := config.LoadDir(dir)
+	if err != nil {
+		return err
+	}
+	migPath := *migrationsDir
+	if migPath == "" && cfg.Static.SchemaCheck.MigrationsDir != "" {
+		migPath = filepath.Join(dir, cfg.Static.SchemaCheck.MigrationsDir) // config path is relative to the service dir
+	}
+	if migPath == "" {
+		return fmt.Errorf("schema-drift: no migrations source — pass --migrations <dir> or set static.schemaCheck.migrationsDir in %s", filepath.Join(dir, config.FileName))
+	}
+	libOwned := splitList(*libraryOwned)
+	if len(libOwned) == 0 {
+		libOwned = cfg.Static.SchemaCheck.LibraryOwnedTables
 	}
 
 	g, err := loadGraphJSON(*graphPath)
 	if err != nil {
 		return err
 	}
-	files, err := schemadrift.LoadMigrations(*migrationsDir)
+	files, err := schemadrift.LoadMigrations(migPath)
 	if err != nil {
 		return err
 	}
 
-	rep := schemadrift.Check(graphEdges(g), files, splitList(*libraryOwned))
+	rep := schemadrift.Check(graphEdges(g), files, libOwned)
 	if *asJSON {
 		b, err := canonjson.Marshal(rep)
 		if err != nil {
@@ -1161,7 +1181,7 @@ commands:
   boundary [--check] [dir]   generate the gated boundary contract (--check: verify currency)
   graph [--entry R] [--algo A] [--mermaid] [--rollup package] [--reclaim] [--reclaim-sql] [dir]  print the non-gated call-graph view (--mermaid: flowchart; --rollup package: component/C3 view, with --diff a code-vs-disclosure delta; --reclaim* close sound seams/SQL labels)
   frontier [--algo A] [--reclaim] [--reclaim-sql] [--json] [dir]  classify the static frontier (A/B/B2/C) — measurement, not a gate
-  schema-drift --graph G --migrations D [--library-owned a,b] [--json]  cross-check code DB writes against migration-defined schema — measurement, not a gate
+  schema-drift --graph G [--migrations D] [--library-owned a,b] [--json] [dir]  cross-check code DB writes against the migration-defined schema (dir's .flowmap.yaml supplies static.schemaCheck) — measurement, not a gate
   diff <a.json> <b.json>     print the structural change set between two golden traces
   coverage [--flows D] [dir] boundary effects no committed flow exercises
   behavior ingest <traces>   map an OTLP/JSON trace export to boundary effects

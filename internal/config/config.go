@@ -161,6 +161,24 @@ type StaticConfig struct {
 	// none is a load-time error (a stale FQN is drift, fail closed), surfaced where
 	// the merge runs (graphio), not silently dropped.
 	Annotations []Annotation `yaml:"annotations,omitempty"`
+
+	// SchemaCheck declares the schema source for `flowmap schema-drift`, the
+	// deterministic cross-check of code DB-write labels against the migration-defined
+	// schema (docs/design/schema-drift-check-plan.md). CLI flags override it. It is
+	// DISCLOSURE-ONLY config: schema-drift is a measurement view, not a gate, so an
+	// entry here can only change what the check reads, never a verdict.
+	SchemaCheck SchemaCheckConfig `yaml:"schemaCheck,omitempty"`
+}
+
+// SchemaCheckConfig is the per-service schema-drift configuration. MigrationsDir is
+// resolved RELATIVE to the service directory. LibraryOwnedTables names the tables a
+// library auto-migrates (the outbox/inbox pattern) that no migration script creates;
+// they are folded into the defined schema so they do not false-fire as drift — the
+// load-bearing COMPLETENESS condition (a drift flag is sound only against a complete
+// schema set).
+type SchemaCheckConfig struct {
+	MigrationsDir      string   `yaml:"migrationsDir,omitempty"`
+	LibraryOwnedTables []string `yaml:"libraryOwnedTables,omitempty"`
 }
 
 // Annotation is one piece of human/AI context on a detected blind spot. Site is
