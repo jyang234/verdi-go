@@ -188,11 +188,17 @@ type FrontierSection struct {
 	Coverage          string            `json:"coverage,omitempty"`
 }
 
-// Entrypoint is one named root: an HTTP route or a consumed topic, with the
-// function registered to handle it.
+// Entrypoint is one named root: a discovered HTTP route or consumed topic, or a
+// DECLARED callback/worker (config.entrypoints), with the function that handles it.
 type Entrypoint struct {
-	Kind string `json:"kind"` // "http" or "consumer"
-	Name string `json:"name"` // "POST /loan-application", "/transfer", "payment.settled"
+	// Kind is "http" or "consumer" for a discovered route, or "callback"/"worker"
+	// for an author-declared root call-resolution could not reach — the kind is the
+	// provenance: declared roots are asserted, not discovered.
+	Kind string `json:"kind"`
+	// Name is the route/topic for a discovered root ("POST /loan-application",
+	// "payment.settled"); for a declared root it is the "import/path#Symbol"
+	// reference it was asserted from (no route or event name is statically known).
+	Name string `json:"name"`
 	Fn   string `json:"fn"`
 }
 
@@ -496,7 +502,12 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 			if r.Name == "" || !scope[r.Func] {
 				continue
 			}
-			if r.Kind == roots.KindHTTP || r.Kind == roots.KindConsumer {
+			switch r.Kind {
+			case roots.KindHTTP, roots.KindConsumer, roots.KindCallback, roots.KindWorker:
+				// "callback"/"worker" are DECLARED roots: the kind itself carries the
+				// provenance (author-vouched, not discovered), and their Name is the
+				// config reference they were asserted from, so a reader can tell a
+				// declared entry from a discovered route.
 				g.Entrypoints = append(g.Entrypoints, Entrypoint{Kind: string(r.Kind), Name: r.Name, Fn: r.FQN()})
 			}
 		}
@@ -687,6 +698,31 @@ func frontierSection(g *Graph) *FrontierSection {
 // shows detail the committed section deliberately keeps as an aggregate.
 func ClassifyFrontier(g *Graph) *frontier.Result { return frontier.Classify(frontierInput(g)) }
 
+// isRouteEntrypoint reports whether an entrypoint kind is a DISCOVERED route — an
+// HTTP route or a consumed event — the universe the frontier's route-severance
+// analysis (and its attribution_loss ratio) is defined over. Declared callbacks
+// and workers (KindCallback/KindWorker) are EXCLUDED: they are author-asserted
+// entries, not discovered routes, and a declared worker may be legitimately
+// effect-less (a logging-only reconcile loop), so admitting them would manufacture
+// false "starved-entrypoint" severances and dilute the attribution_loss denominator.
+func isRouteEntrypoint(kind string) bool {
+	return kind == string(roots.KindHTTP) || kind == string(roots.KindConsumer)
+}
+
+// RouteEntrypointCount is the number of DISCOVERED route entrypoints (HTTP routes
+// plus consumed events) — the denominator the frontier's attribution_loss is
+// defined over. It excludes declared callbacks/workers so the numerator (severed
+// routes) and denominator share one universe; see isRouteEntrypoint.
+func (g *Graph) RouteEntrypointCount() int {
+	n := 0
+	for _, ep := range g.Entrypoints {
+		if isRouteEntrypoint(ep.Kind) {
+			n++
+		}
+	}
+	return n
+}
+
 // frontierInput adapts the assembled graph into the classifier's serialization-free
 // input view (frontier imports nothing of graphio; graphio adapts to it). The fold
 // state comes from g.foldSQL — the actual build flag, NOT inferred from tagged
@@ -710,6 +746,9 @@ func frontierInput(g *Graph) *frontier.Input {
 		in.BlindSpots = append(in.BlindSpots, frontier.InBlindSpot{Kind: string(b.Kind), Site: b.Site})
 	}
 	for _, ep := range g.Entrypoints {
+		if !isRouteEntrypoint(ep.Kind) {
+			continue // declared callbacks/workers are not routes; see isRouteEntrypoint
+		}
 		in.Entrypoints = append(in.Entrypoints, frontier.InEntry{Fn: ep.Fn, Name: ep.Name})
 	}
 	return in

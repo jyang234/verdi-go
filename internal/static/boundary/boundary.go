@@ -90,6 +90,14 @@ func Extract(res *analyze.Result) *Contract {
 			tier, _ := ext.Classify(ext.Inbound(r.Name, false))
 			c.EntryPoints.Consumers = append(c.EntryPoints.Consumers, Event{Event: r.Name, Tier: tier})
 			c.Consumed = append(c.Consumed, Event{Event: r.Name, Tier: tier})
+			// KindCallback / KindWorker (declared roots) are intentionally not added
+			// to the named-event surface: their Name is a config FQN, not a route or
+			// event, so listing it would pollute the gated contract with a non-event.
+			// Their VALUE is that rooting them makes their effect cone reachable, so the
+			// publishes and external deps they reach DO enter the contract below through
+			// the normal reachable-node traversal — the recovered boundary surface,
+			// without a fabricated entry name. (Their DB writes become reachable in the
+			// GRAPH, not in this contract, which excludes DB by design — see below.)
 		}
 	}
 
