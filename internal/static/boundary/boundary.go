@@ -94,9 +94,10 @@ func Extract(res *analyze.Result) *Contract {
 			// to the named-event surface: their Name is a config FQN, not a route or
 			// event, so listing it would pollute the gated contract with a non-event.
 			// Their VALUE is that rooting them makes their effect cone reachable, so the
-			// publishes / external deps / DB writes they reach DO enter the contract
-			// below through the normal reachable-node traversal — the recovered surface,
-			// without a fabricated entry name.
+			// publishes and external deps they reach DO enter the contract below through
+			// the normal reachable-node traversal — the recovered boundary surface,
+			// without a fabricated entry name. (Their DB writes become reachable in the
+			// GRAPH, not in this contract, which excludes DB by design — see below.)
 		}
 	}
 

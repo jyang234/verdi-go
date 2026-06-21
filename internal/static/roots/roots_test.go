@@ -468,6 +468,53 @@ func main() { reg.Register[int]("GET /a", handle) }
 	}
 }
 
+// TestDiscoverDeclaredGenericMatches pins the parity with Ask 3 on the DECLARED
+// path: a callback declared on a generic function matches its instantiations
+// (whose own Name() is "Handle[int]" with an empty package) via the shared
+// origin-normalization, roots the instantiation(s), and does NOT report the valid
+// declaration as stale.
+func TestDiscoverDeclaredGenericMatches(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module dyn\n\ngo 1.24\n")
+	write(t, dir, "h/h.go", `package h
+func Handle[T any](v T) {}
+`)
+	write(t, dir, "main.go", `package main
+import "dyn/h"
+func main() {
+	h.Handle[int](1)
+	h.Handle[string]("a")
+}
+`)
+	svc, err := loader.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	prog, err := ssabuild.Build(svc)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	res := roots.Discover(prog, nil, roots.DeclaredEntrypoint{
+		PkgPath: "dyn/h", Symbol: "Handle", Kind: roots.KindCallback, Ref: "dyn/h#Handle",
+	})
+
+	rooted := 0
+	for _, r := range res.Roots {
+		if r.Kind == roots.KindCallback && r.Name == "dyn/h#Handle" {
+			rooted++
+		}
+	}
+	if rooted == 0 {
+		t.Fatalf("declared generic callback rooted no instantiation (origin normalization missing): %+v", res.Roots)
+	}
+	for _, bs := range res.BlindSpots {
+		if bs.Registrar == "dyn/h#Handle" {
+			t.Errorf("valid generic declaration wrongly reported stale: %+v", bs)
+		}
+	}
+}
+
 func write(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	p := filepath.Join(dir, rel)

@@ -331,7 +331,7 @@ func cmdFrontier(args []string) error {
 	}
 	// The committed section keeps the unconfirmed routes as an aggregate count; the
 	// on-demand view shows them per-route, so classify for the full result here.
-	rep := frontier.Summarize(graphio.ClassifyFrontier(g), len(g.Entrypoints))
+	rep := frontier.Summarize(graphio.ClassifyFrontier(g), g.RouteEntrypointCount())
 	rep.Algo = g.Algo // carry the call-graph algorithm into the --json provenance
 	if *asJSON {
 		b, err := canonjson.Marshal(rep)

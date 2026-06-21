@@ -116,16 +116,21 @@ type Result struct {
 }
 
 // DiscoveredRootCount is the number of distinct DISCOVERED entry-point functions —
-// mains, HTTP handlers, bus consumers, and library exports. It EXCLUDES package
-// initializers: init runs universally before main and is seeded into RTA only to
-// recover addresses taken during initialization (the registration idiom), so it is
-// an implicit analysis seed, not a discovered service entry point. The call-graph
-// provenance caveat counts these, so the number is the service's real entry surface
-// and stays stable whether or not a package happens to carry an init.
+// mains, HTTP handlers, bus consumers, and library exports. It EXCLUDES two kinds.
+// Package initializers: init runs universally before main and is seeded into RTA
+// only to recover addresses taken during initialization (the registration idiom),
+// so it is an implicit analysis seed, not a discovered service entry point.
+// Declared callbacks/workers (config entrypoints): these are author-ASSERTED, not
+// discovered — they are disclosed separately as declared entrypoints — so counting
+// them here would mislabel asserted roots as discovered in the call-graph
+// provenance caveat ("rta from N discovered root(s)"). Both still seed RTA via
+// Funcs; this count is the DISCOVERED entry surface only, stable whether or not a
+// package carries an init or the author declares a callback.
 func (r *Result) DiscoveredRootCount() int {
 	seen := make(map[*ssa.Function]bool, len(r.Roots))
 	for _, rt := range r.Roots {
-		if rt.Kind == KindInit {
+		switch rt.Kind {
+		case KindInit, KindCallback, KindWorker:
 			continue
 		}
 		seen[rt.Func] = true
@@ -280,18 +285,40 @@ func Discover(prog *ssabuild.Program, registrars []Registrar, declared ...Declar
 	// a declaration matching nothing is disclosed as a blind spot, not dropped. This
 	// runs before the library-fallback gate so a service whose only entry is a
 	// declared callback/worker does not collapse into exported-surface mode.
-	for _, d := range declared {
-		matched := false
+	//
+	// Matching is keyed on the generic ORIGIN's (package, symbol) — the same
+	// normalization calleeKey applies to registrar calls — so a declaration on a
+	// generic function/method matches its instantiations (whose own Name() carries
+	// the "[T]" suffix and an empty package); the instantiation is what gets rooted,
+	// so each concrete cone is seen. ssautil.AllFunctions is walked ONCE for the
+	// whole declared set (the symbols are indexed first), not once per declaration.
+	if len(declared) > 0 {
+		type pkgSym struct{ pkg, sym string }
+		wanted := make(map[pkgSym][]DeclaredEntrypoint, len(declared))
+		for _, d := range declared {
+			k := pkgSym{d.PkgPath, d.Symbol}
+			wanted[k] = append(wanted[k], d)
+		}
+		matched := make(map[pkgSym]bool, len(wanted))
 		for fn := range ssautil.AllFunctions(prog.Prog) {
-			if fn.Pkg == nil || !prog.IsFirstParty(fn.Pkg) {
+			key := normalizedFunc(fn)
+			if key.Pkg == nil || !prog.IsFirstParty(key.Pkg) {
 				continue
 			}
-			if pkgPath(fn) == d.PkgPath && fn.Name() == d.Symbol {
+			k := pkgSym{pkgPath(key), key.Name()}
+			ds, ok := wanted[k]
+			if !ok {
+				continue
+			}
+			matched[k] = true
+			for _, d := range ds {
 				add(fn, d.Kind, d.Ref)
-				matched = true
 			}
 		}
-		if !matched {
+		for _, d := range declared {
+			if matched[pkgSym{d.PkgPath, d.Symbol}] {
+				continue
+			}
 			res.BlindSpots = append(res.BlindSpots, BlindSpot{
 				Registrar: d.Ref,
 				Detail:    "declared entrypoint resolves to no first-party function (stale reference or moved code)",
@@ -301,10 +328,9 @@ func Discover(prog *ssabuild.Program, registrars []Registrar, declared ...Declar
 
 	// Library fallback: no PRIMARY entry point (main, HTTP handler, bus consumer, or
 	// declared callback/worker) to root from, so root at every exported function.
-	// Init roots are
-	// excluded from this test — every package has a synthesized init, so counting
-	// them would permanently suppress the fallback and leave a pure library's
-	// exported surface unrooted.
+	// Init and export roots are excluded from the primary test — every package has a
+	// synthesized init, so counting init would permanently suppress the fallback and
+	// leave a pure library's exported surface unrooted.
 	if !hasPrimaryRoot(res.Roots) {
 		for _, p := range prog.ServicePkgs {
 			for _, m := range p.Members {
@@ -354,11 +380,7 @@ func calleeKey(cc *ssa.CallCommon) (pkg, name string, recvOffset int, ok bool) {
 		// Normalize a generic instantiation to its origin before deriving the key:
 		// an instantiated `Register[T]` reports Name() == "Register[pkg.Type]" and an
 		// empty package, so it never matches a registrar keyed on (pkgPath, "Register").
-		// Origin() yields the declared generic (pkg, name); it is nil for a
-		// non-generic function, so this is a no-op off the generic path.
-		if orig := callee.Origin(); orig != nil {
-			callee = orig
-		}
+		callee = normalizedFunc(callee)
 		off := 0
 		if callee.Signature.Recv() != nil {
 			off = 1
@@ -550,6 +572,21 @@ func sortResult(res *Result) {
 		}
 		return a.Detail < b.Detail
 	})
+}
+
+// normalizedFunc returns fn's generic ORIGIN when fn is an instantiation, else fn
+// unchanged. It is the single source of truth for the generic-instantiation
+// normalization used to match a function by (package, name): an instantiation
+// reports Name() == "Foo[pkg.Type]" with an empty package, so both the registrar
+// matcher (calleeKey) and the declared-entrypoint resolver key on the origin's
+// (pkg, name) instead. Origin() is nil for a non-generic function, so this is a
+// no-op off the generic path. Parity between the two callers is guarded by
+// TestDiscoverGenericRegistrarMatches and TestDiscoverDeclaredGenericMatches.
+func normalizedFunc(fn *ssa.Function) *ssa.Function {
+	if orig := fn.Origin(); orig != nil {
+		return orig
+	}
+	return fn
 }
 
 // pkgPath returns the import path of fn's package, or "" for synthetic functions

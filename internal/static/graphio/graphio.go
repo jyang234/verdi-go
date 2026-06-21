@@ -698,6 +698,31 @@ func frontierSection(g *Graph) *FrontierSection {
 // shows detail the committed section deliberately keeps as an aggregate.
 func ClassifyFrontier(g *Graph) *frontier.Result { return frontier.Classify(frontierInput(g)) }
 
+// isRouteEntrypoint reports whether an entrypoint kind is a DISCOVERED route — an
+// HTTP route or a consumed event — the universe the frontier's route-severance
+// analysis (and its attribution_loss ratio) is defined over. Declared callbacks
+// and workers (KindCallback/KindWorker) are EXCLUDED: they are author-asserted
+// entries, not discovered routes, and a declared worker may be legitimately
+// effect-less (a logging-only reconcile loop), so admitting them would manufacture
+// false "starved-entrypoint" severances and dilute the attribution_loss denominator.
+func isRouteEntrypoint(kind string) bool {
+	return kind == string(roots.KindHTTP) || kind == string(roots.KindConsumer)
+}
+
+// RouteEntrypointCount is the number of DISCOVERED route entrypoints (HTTP routes
+// plus consumed events) — the denominator the frontier's attribution_loss is
+// defined over. It excludes declared callbacks/workers so the numerator (severed
+// routes) and denominator share one universe; see isRouteEntrypoint.
+func (g *Graph) RouteEntrypointCount() int {
+	n := 0
+	for _, ep := range g.Entrypoints {
+		if isRouteEntrypoint(ep.Kind) {
+			n++
+		}
+	}
+	return n
+}
+
 // frontierInput adapts the assembled graph into the classifier's serialization-free
 // input view (frontier imports nothing of graphio; graphio adapts to it). The fold
 // state comes from g.foldSQL — the actual build flag, NOT inferred from tagged
@@ -721,6 +746,9 @@ func frontierInput(g *Graph) *frontier.Input {
 		in.BlindSpots = append(in.BlindSpots, frontier.InBlindSpot{Kind: string(b.Kind), Site: b.Site})
 	}
 	for _, ep := range g.Entrypoints {
+		if !isRouteEntrypoint(ep.Kind) {
+			continue // declared callbacks/workers are not routes; see isRouteEntrypoint
+		}
 		in.Entrypoints = append(in.Entrypoints, frontier.InEntry{Fn: ep.Fn, Name: ep.Name})
 	}
 	return in
