@@ -37,29 +37,34 @@ func TestRollupEdgeLabelEscapesStructuralChars(t *testing.T) {
 	// The diff render carries the same note on a kept disclosed edge.
 	assertValidMermaid(t, RollupMermaidDiff(g, g, RollupMermaidOptions{}))
 
-	// The note's text survives, not truncated at the pipe: the data pipe is carried as its
-	// &#124; entity (not a bare pipe that would terminate the label early).
+	// The note's text survives, not truncated at the pipe: the data pipe is neutralized
+	// (folded by the shared edgeLabelSafe), so no bare pipe terminates the label early.
 	out := g.RollupMermaid(RollupMermaidOptions{})
-	if !strings.Contains(out, "&#124;") {
-		t.Errorf("expected the data pipe to be carried as an entity, got:\n%s", out)
-	}
 	if strings.Contains(out, "GET /debug | events") {
 		t.Errorf("a raw pipe leaked into the edge label (would terminate it early):\n%s", out)
+	}
+	if !strings.Contains(out, "GET /debug / events") {
+		t.Errorf("expected the data pipe folded to '/' by edgeLabelSafe, got:\n%s", out)
 	}
 }
 
 // TestRollupEdgeLabelHelper pins the quoting contract directly: the label is wrapped in
-// quotes and the structural characters are escaped/neutralized, so a downstream pipe count
-// stays balanced.
+// quotes (the C3-specific defense for parens in a note) over the shared edgeLabelSafe core
+// (which neutralizes the '|' delimiter), so a downstream pipe count stays balanced.
 func TestRollupEdgeLabelHelper(t *testing.T) {
 	got := rollupEdgeLabel("a|b(c)")
 	if !strings.HasPrefix(got, `|"`) || !strings.HasSuffix(got, `"|`) {
 		t.Errorf("edge label must be quoted, got %q", got)
 	}
-	// Exactly two structural pipes (the delimiters); the data pipe is HTML-escaped, so it
-	// is not a third bare pipe that would unbalance the label.
+	// Exactly two structural pipes (the delimiters); the data pipe was neutralized by
+	// edgeLabelSafe, so it is not a third bare pipe that would unbalance the label.
 	if n := strings.Count(got, "|"); n != 2 {
-		t.Errorf("edge label has %d pipes, want 2 (data pipe must be escaped): %q", n, got)
+		t.Errorf("edge label has %d pipes, want 2 (data pipe must be neutralized): %q", n, got)
+	}
+	// The shared core is edgeLabelSafe — the same helper the C4 renderer uses — so the
+	// pipe folds to '/' (one source of truth, no second escaping strategy to drift).
+	if want := `|"a/b(c)"|`; got != want {
+		t.Errorf("rollupEdgeLabel(%q) = %q, want %q", "a|b(c)", got, want)
 	}
 }
 

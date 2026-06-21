@@ -99,8 +99,10 @@ func TestRollupBandedLanesAndRootOutside(t *testing.T) {
 }
 
 // TestRollupBandsOffByDefault pins that banding is strictly opt-in: the zero-value option
-// renders the flat layout (no subgraph lanes), so the default output is byte-identical to
-// the pre-band render and a host that dislikes subgraphs is unaffected.
+// renders the flat layout — NO subgraph lanes at all — so a host that dislikes subgraphs is
+// unaffected, and bands-on does emit them. (Scope: the presence of lanes, not full byte
+// equality — the substrate line and quoted edge labels legitimately differ from the
+// original pre-band bytes; this guards only that the option gates the subgraph grouping.)
 func TestRollupBandsOffByDefault(t *testing.T) {
 	r := bandedSampleGraph().RollupByPackage()
 	flat := r.Mermaid(RollupMermaidOptions{})

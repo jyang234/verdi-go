@@ -22,11 +22,11 @@ type RollupMermaidOptions struct {
 	// Bands, when set, groups the component boxes into architectural BAND subgraph lanes
 	// (transport / application / provisioning / storage / infrastructure / tests) read
 	// from Component.Band, with the composition root drawn OUTSIDE the lanes. The zero
-	// value renders the flat (dagre-scattered) layout — banding is opt-in (the CLI's
-	// --rollup-bands), so the default render is byte-identical to the pre-band output and
-	// a Mermaid host that dislikes subgraphs is unaffected. A VIEW grouping, NEVER a
-	// gate: it reads the same name-derived band the JSON carries and changes only the
-	// box LAYOUT, never the edges/topology.
+	// value renders the flat (dagre-scattered) layout — no subgraph lanes at all — so
+	// banding is opt-in (the CLI's --rollup-bands) and a Mermaid host that dislikes
+	// subgraphs is unaffected (pinned by TestRollupBandsOffByDefault). A VIEW grouping,
+	// NEVER a gate: it reads the same name-derived band the JSON carries and changes only
+	// the box LAYOUT (which lane a box sits in), never the edges/topology.
 	Bands bool
 }
 
@@ -171,20 +171,17 @@ func (r *PackageRollup) mermaid(opts RollupMermaidOptions, substrate string) str
 
 // rollupEdgeLabel renders a Mermaid edge-label segment `|"text"|` that is safe for an
 // arbitrary human ANNOTATION note. A disclosed edge carries the note as its label, which
-// can contain the Mermaid-flowchart-structural characters mermaidText does NOT escape —
-// `|` (the edge-label delimiter: an unquoted label terminates at the first pipe), `(`, and
-// `)` — any of which breaks the rendered C3 (a Customer.io note with surrounding parens
-// did, in the Mermaid version we render with). Two defenses, both prescribed by the field
-// report: the label is QUOTED, so the parser reads the rest as literal text (neutralizing
-// the parens); and the pipe — the hardest delimiter, the one a parser may split on even
-// inside quotes — is additionally replaced with its `&#124;` entity, so no bare pipe can
-// terminate the label regardless of how the host treats the quotes. mermaidText runs
-// first (escaping the HTML set including the quote → &quot;, so the label's quotes stay
-// balanced), then the pipe entity is substituted (its own `&` is already past escaping, so
-// it is not double-encoded). The rooted C4 render is unaffected — it emits annotations as
-// `%%` comment lines, not edge labels — so this fix is rollup-renderer-specific.
+// can contain Mermaid-flowchart-structural characters that break the render: `|` (the
+// edge-label delimiter — an unquoted label terminates at the first pipe), `(`, and `)` (a
+// Customer.io note with surrounding parens broke the C3, in the Mermaid version we render
+// with). Two layers: the pipe is neutralized by the SHARED edgeLabelSafe — the one
+// source of truth for "make text safe in a `-->|...|` label", reused from the C4 renderer
+// so the two cannot drift — and the label is additionally QUOTED here, the extra defense
+// an arbitrary note needs (the parser then reads the parens as literal text) that C4's
+// controlled provenance tags (go/async/via) do not. C4 leaves its labels unquoted; only
+// the C3 disclosed/wiring note needs the quotes, so they live here, not in edgeLabelSafe.
 func rollupEdgeLabel(text string) string {
-	return `|"` + strings.ReplaceAll(mermaidText(text), "|", "&#124;") + `"|`
+	return `|"` + edgeLabelSafe(text) + `"|`
 }
 
 // componentNode is one component's Mermaid node declaration (id + label + optional

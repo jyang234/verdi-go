@@ -340,22 +340,28 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 
 	// Disclose the over-approximate fan-out: an edge OUT of a HighFanOut node is an upper
 	// bound (a points-to merge at a shared higher-order function makes spurious targets
-	// look reachable), so it is drawn amber-dashed below and counted here. The node-level
-	// blind spot already marks the merge POINT; carrying it onto the out-edges (and the
-	// effects beneath them) is what makes the over-approximation self-evident rather than
-	// something a reader must infer. Same predicate (fanout + drawnEdge) as the styling
-	// pass, so the disclosed count and the styled set cannot disagree.
+	// look reachable), so it is drawn amber-dashed (styled below) and counted in the
+	// header. The node-level blind spot already marks the merge POINT; carrying it onto the
+	// out-edges (and the effects beneath them) is what makes the over-approximation self-
+	// evident rather than something a reader must infer. fanOutIdx — the link indices of
+	// the drawn fan-out edges, in emission order — is computed ONCE here and reused for
+	// both the count and the linkStyle, so the disclosed count and the styled set are the
+	// same list by construction. The indices key on the edge loop below, which emits in
+	// this same g.Edges order under the same drawnEdge predicate.
 	fanout := fanOutSites(g)
-	nFanOut := 0
+	var fanOutIdx []int
+	edgeIdx := 0
 	for _, e := range g.Edges {
-		if fanout[e.From] {
-			if _, _, ok := drawnEdge(e, nodeID, bIDs); ok {
-				nFanOut++
-			}
+		if _, _, ok := drawnEdge(e, nodeID, bIDs); !ok {
+			continue
 		}
+		if fanout[e.From] {
+			fanOutIdx = append(fanOutIdx, edgeIdx)
+		}
+		edgeIdx++
 	}
-	if nFanOut > 0 {
-		notes = append(notes, plural(nFanOut, "fan-out edge")+" drawn amber-dashed (over-approximate: a HighFanOut merge resolves to many callees, so a shown target may be spurious — discount it)")
+	if len(fanOutIdx) > 0 {
+		notes = append(notes, plural(len(fanOutIdx), "fan-out edge")+" drawn amber-dashed (over-approximate: a HighFanOut merge resolves to many callees, so a shown target may be spurious — discount it)")
 	}
 
 	// Cap on the FULL drawn-node count — first-party + boundary effects + disclosures.
@@ -409,20 +415,14 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	}
 
 	// Edges, in canonical Edge order. A boundary edge draws to its effect node; a
-	// first-party edge draws only when both endpoints are shown (drawnEdge). An edge out
-	// of a HighFanOut node has its link index collected so it is styled amber-dashed below.
-	edgeIdx := 0
-	var fanOutIdx []int
+	// first-party edge draws only when both endpoints are shown (drawnEdge) — emitted in
+	// the same order the fanOutIdx pre-pass indexed, so those indices address these links.
 	for _, e := range g.Edges {
 		from, to, ok := drawnEdge(e, nodeID, bIDs)
 		if !ok {
 			continue
 		}
 		b.WriteString("    " + edgeLine(from, to, e) + "\n")
-		if fanout[e.From] {
-			fanOutIdx = append(fanOutIdx, edgeIdx)
-		}
-		edgeIdx++
 	}
 	// Disclosure attachments: a dashed link from the attributed node to its blind
 	// spot / frontier marker, so the reviewer reads it as "here the graph goes dark".
@@ -432,9 +432,9 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 		}
 		b.WriteString("    " + d.from + " -. blind .-> " + d.id + "\n")
 	}
-	// Style the over-approximate fan-out edges. Their indices were collected above (the
-	// first links in the diagram, numbered from 0), so they stay correct regardless of the
-	// attachment links that follow — Mermaid counts links in source order from 0.
+	// Style the over-approximate fan-out edges (indices from the pre-pass — the first links
+	// in the diagram, numbered from 0; the attachment links above keep higher indices, so
+	// the indices stay correct — Mermaid counts links in source order from 0).
 	writeLinkStyle(&b, fanOutIdx, fanOutLinkStyle)
 
 	b.WriteString(classDefs)
