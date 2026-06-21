@@ -78,6 +78,7 @@ decision record; a few are still in flight.
 |---|---|---|
 | [`correctness-expansion-plan.md`](design/correctness-expansion-plan.md) | `ACTIVE` | The correctness (CX) expansion; the CX-5 gate is the one phase still awaiting implementation. |
 | [`behavioral-impeachment-plan.md`](design/behavioral-impeachment-plan.md) | `PROPOSAL` | Joining the static graph with captured behavior to find counterexamples to the analyzer's own negatives (the impeachment cell); fully designed (incl. a recorded pressure test), not built. |
+| [`flowmap-capability-headroom.md`](design/flowmap-capability-headroom.md) | `PROPOSAL` | Headroom pass on flowmap's *scope* (not its soundness): schema-drift cross-check (prototyped), effect-kind recognizers, value-flow/taint (PoC). Ranked by soundness × utility; substrate claims verified against pin `85ca0a9`. |
 | [`correctness-field-run.md`](design/correctness-field-run.md) | `DESIGN RECORD` | Protocol for the 2026-06-12 field measurement run. |
 | [`cx5-chains-surface.md`](design/cx5-chains-surface.md) | `DESIGN RECORD` | The shipped cross-service chain surface (observational; the gate is unbuilt). |
 | [`cx5-inputs-response.md`](design/cx5-inputs-response.md) | `DESIGN RECORD` | The field response feeding CX-5, recorded and independently verified. |
