@@ -33,6 +33,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 	"github.com/jyang234/golang-code-graph/internal/static/graphio"
 	"github.com/jyang234/golang-code-graph/internal/static/schemadrift"
+	"github.com/jyang234/golang-code-graph/internal/static/taint"
 	"github.com/jyang234/golang-code-graph/internal/syscontext"
 	"github.com/jyang234/golang-code-graph/ir"
 )
@@ -66,6 +67,8 @@ func run(args []string) error {
 		return cmdFrontier(args[1:])
 	case "schema-drift":
 		return cmdSchemaDrift(args[1:])
+	case "taint":
+		return cmdTaint(args[1:])
 	case "diff":
 		return cmdDiff(args[1:])
 	case "coverage":
@@ -459,6 +462,65 @@ func schemaDriftEdges(graphPath, dir, algo string, reclaimSQL bool) ([]schemadri
 	}
 	warnSkippedAnnotations(os.Stderr, g)
 	return graphEdges(g), dir, nil
+}
+
+// cmdTaint runs the forward value-flow analysis (docs/design/flowmap-capability-
+// headroom.md §3) over a service: it reports whether declared sensitive SOURCES can
+// flow to declared SINK arguments, as a sound trichotomy — FLOW (candidate),
+// NO-FLOW (proven), or ABSTAIN (taint escaped a modeled construct, so no-flow cannot
+// be proven). A false NO-FLOW would be a false SATISFIED, so it abstains at every
+// frontier. Default is a measurement (exit 0); --gate makes a FLOW a non-zero exit
+// (the must-not-flow gate). Sources/sinks come from the dir's .flowmap.yaml taint
+// section.
+func cmdTaint(args []string) error {
+	fs := flag.NewFlagSet("taint", flag.ContinueOnError)
+	algo := fs.String("algo", "", `call-graph algorithm: "rta" (default), "vta", "cha"`)
+	gate := fs.Bool("gate", false, "exit non-zero on a FLOW finding (the must-not-flow gate)")
+	asJSON := fs.Bool("json", false, "emit the report as canonical JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir, err := dirArg(fs)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadDir(dir)
+	if err != nil {
+		return err
+	}
+	tc, err := taint.FromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if tc.Empty() {
+		return fmt.Errorf("taint: no sources/sinks declared — set taint.{sourceFuncs,sourceFields,sinks} in %s", filepath.Join(dir, config.FileName))
+	}
+	opt, err := algoOption(*algo)
+	if err != nil {
+		return err
+	}
+	res, err := analyze.Analyze(dir, opt)
+	if err != nil {
+		return err
+	}
+	rep := taint.Analyze(res.Program, tc)
+	if *asJSON {
+		b, err := canonjson.Marshal(rep)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stdout.Write(b); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(taint.Render(dir, rep))
+	}
+	// --gate fails on a proven could-flow. ABSTAIN stays a disclosure (a strict
+	// fail-closed mode that also fails on abstain is a follow-up).
+	if *gate && rep.Verdict == taint.Flow {
+		return fmt.Errorf("taint: %d source→sink flow(s) found (must-not-flow gate)", len(rep.Flows))
+	}
+	return nil
 }
 
 // graphEdges adapts the emitted graph's edges to the schemadrift Edge view (From/To
@@ -1229,6 +1291,7 @@ commands:
   graph [--entry R] [--algo A] [--mermaid] [--rollup package] [--reclaim] [--reclaim-sql] [--reclaim-topic] [dir]  print the non-gated call-graph view (--mermaid: flowchart; --rollup package: component/C3 view, with --diff a code-vs-disclosure delta; --reclaim* close sound seams/SQL/bus labels)
   frontier [--algo A] [--reclaim] [--reclaim-sql] [--reclaim-topic] [--json] [dir]  classify the static frontier (A/B/B2/C) — measurement, not a gate
   schema-drift [--graph G] [--migrations D] [--library-owned a,b] [--reclaim-sql] [--gate] [--json] [dir]  cross-check code DB writes against the migration-defined schema (omit --graph to build fresh from dir; dir's .flowmap.yaml supplies static.schemaCheck; --gate: non-zero exit on drift)
+  taint [--gate] [--json] [dir]  forward value-flow: do declared sensitive sources reach declared sinks? FLOW/NO-FLOW/ABSTAIN (dir's .flowmap.yaml supplies taint.{sourceFuncs,sourceFields,sinks}; --gate: non-zero exit on FLOW)
   diff <a.json> <b.json>     print the structural change set between two golden traces
   coverage [--flows D] [dir] boundary effects no committed flow exercises
   behavior ingest <traces>   map an OTLP/JSON trace export to boundary effects

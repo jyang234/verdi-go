@@ -52,6 +52,19 @@ type Config struct {
 	// Obligation layer (path-obligations plan): domain lifecycle rules evaluated
 	// over each function's SSA control-flow graph.
 	Obligations []ObligationRule `yaml:"obligations"`
+
+	// Value-flow / taint layer (headroom §3): the declared sensitive sources and
+	// must-not-receive sinks the `flowmap taint` analysis runs against.
+	Taint TaintConfig `yaml:"taint"`
+}
+
+// TaintConfig declares the sources and sinks for the forward value-flow analysis.
+// SourceFuncs and Sinks are "importpath#Name" (the classify-hint shape); SourceFields
+// is "importpath#Type.Field" — a sensitive struct field whose reads are sources.
+type TaintConfig struct {
+	SourceFuncs  []string `yaml:"sourceFuncs"`
+	SourceFields []string `yaml:"sourceFields"`
+	Sinks        []string `yaml:"sinks"`
 }
 
 // ObligationRule declares one path obligation, keyed to our named functions —

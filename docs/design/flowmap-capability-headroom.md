@@ -147,6 +147,26 @@ annotation + a `must-not-flow` gate. `go/pointer` is an **optional later tier** 
 frontier — explicitly not needed for v1. The use case that justifies it: a sound *"this PII field
 cannot reach this log/boundary sink"* gate, enforcing the no-log-PII rule.
 
+> **Shipped (the v1 sound core + measurement command).** `internal/static/taint` +
+> `flowmap taint [--gate]`. It implements the trichotomy above with **all three gaps closed**:
+> interprocedural return-flow (gap 2) and declared field-read sources (gap 3) are in; struct fields
+> use the global (type,field) set; sources/sinks are declared in `.flowmap.yaml`
+> (`taint.{sourceFuncs,sourceFields,sinks}`). Soundness is enforced by construction — the analysis
+> descends only into first-party bodies and treats **every** unmodeled construct (map/interface/
+> channel/closure/external call) as an *escape* that downgrades a would-be NO-FLOW to ABSTAIN, so a
+> false NO-FLOW (a false SATISFIED) cannot be emitted; the `testdata/fixtures/taintsvc` test suite
+> pins the map case as ABSTAIN precisely to guard that. `--gate` fails on FLOW (the must-not-flow gate).
+>
+> **Honest remaining gaps (gap 1 + scope notes), deferred by design:**
+> - *Precision on real multi-instance code is unmeasured* — the field-set is type+index-global, so
+>   could-flow will over-fire on services with many instances of a struct. Measure before wiring as a
+>   hard gate; flow/instance-sensitive fields are the precision tier.
+> - *The escape flag is per-analysis* — one escape downgrades the whole no-flow claim. Per-source (or
+>   per-path) escape localization is a precision improvement.
+> - *Closures escape* (conservative) rather than threading taint through free vars; `go/pointer` for
+>   the map/interface frontier remains the optional later tier. `--gate` fails on FLOW only; a
+>   strict mode that also fails on ABSTAIN (fully fail-closed) is a follow-up.
+
 ## The one true boundary (no sound headroom)
 
 Resolving genuine **runtime values** — which LaunchDarkly flag or env-driven branch actually executes —
