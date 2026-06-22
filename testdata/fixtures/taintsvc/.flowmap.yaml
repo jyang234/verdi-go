@@ -1,9 +1,17 @@
 service: taintsvc
+# Several sources are declared at once (the no-log-PII shape). The aggregate verdict is
+# a single FLOW that MASKS the other sources; `taint`'s per-source decomposition
+# (AnalyzeBySource) reports each independently — a FLOW (sourceDirect / Recipient.Secret),
+# an ABSTAIN (sourceMap escapes into a map) and a NO-FLOW (sourceClean) side by side.
 taint:
   sourceFuncs:
     - "example.com/taintsvc#sourceDirect"
+    - "example.com/taintsvc#sourceMap"
+    - "example.com/taintsvc#sourceClean"
   sourceFields:
     - "example.com/taintsvc#Recipient.Secret"
   sinks:
     - "example.com/taintsvc#sinkDirect"
     - "example.com/taintsvc#sinkFieldRead"
+    - "example.com/taintsvc#sinkMap"
+    - "example.com/taintsvc#sinkClean"

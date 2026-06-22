@@ -21,6 +21,9 @@ use (
 	./testdata/fixtures/topicfoldsvc
 	./testdata/fixtures/blobsvc
 	./testdata/fixtures/taintsvc
+	./testdata/fixtures/txrunnersvc
+	./testdata/fixtures/unionsvc
+	./testdata/fixtures/escapemodessvc
 	./testdata/groundwork/blindsvc
 	./testdata/groundwork/layeredsvc
 	./testdata/groundwork/obligsvc

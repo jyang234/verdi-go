@@ -133,6 +133,7 @@ func cmdGraph(args []string) error {
 	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers (opt-in; adds provenance-tagged edges that close the strict-server seam)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
 	reclaimTopicFlag := fs.Bool("reclaim-topic", false, "apply the bus const-topic label reclaimer (opt-in; recovers PUBLISH/CONSUME targets from constant-set topics, tagging them via=topic-constfold)")
+	rebindFlag := fs.Bool("rebind", false, "EXPERIMENTAL: de-union shared higher-order runners — rebind each command to its OWN confined closure (adds via=rebind edges) and REMOVE the runner→closure union edges. The only pass that removes edges; opt-in, not for default gating")
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
 	allBlindSpots := fs.Bool("all-blind-spots", false, "with --mermaid, draw every blind-spot/frontier disclosure node (trivial boundaries and those orphaned onto collapsed plumbing) instead of rolling the plumbing-tier ones into a counted header note; restores the full honesty channel without un-collapsing plumbing nodes")
@@ -164,6 +165,9 @@ func cmdGraph(args []string) error {
 	warnSkippedAnnotations(os.Stderr, g)
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
+	}
+	if *rebindFlag {
+		graphio.ApplyRebind(g, res)
 	}
 	if *rollup != "" {
 		return cmdGraphRollup(*rollup, g, *asMermaid, *diffBase, *rootAt, *entry, *rollupBands)
@@ -504,8 +508,18 @@ func cmdTaint(args []string) error {
 		return err
 	}
 	rep := taint.Analyze(res.Program, tc)
+	// Per-source decomposition rides alongside the aggregate (additive): the aggregate
+	// verdict and --gate are unchanged, but one source's FLOW no longer masks the
+	// others' status. AnalyzeBySource's per-source runs union back to exactly `rep`.
+	bySource := taint.AnalyzeBySource(res.Program, tc)
 	if *asJSON {
-		b, err := canonjson.Marshal(rep)
+		// Embed the aggregate Report (its fields promote to top level) and append the
+		// additive BySource array — the Report type itself is unchanged.
+		out := struct {
+			taint.Report
+			BySource []taint.SourceReport
+		}{Report: rep, BySource: bySource}
+		b, err := canonjson.Marshal(out)
 		if err != nil {
 			return err
 		}
@@ -514,6 +528,7 @@ func cmdTaint(args []string) error {
 		}
 	} else {
 		fmt.Print(taint.Render(dir, rep))
+		fmt.Print(taint.RenderBySource(bySource))
 	}
 	// --gate fails on a proven could-flow. ABSTAIN stays a disclosure (a strict
 	// fail-closed mode that also fails on abstain is a follow-up).
