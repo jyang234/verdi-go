@@ -274,6 +274,71 @@ func TestReachSurfacesBlindSpotTierAndAnnotation(t *testing.T) {
 	}
 }
 
+// TestReachDisclosesForwardHighFanOut pins the A2 disclosure: when the FORWARD reach
+// crosses a HighFanOut dispatch seam (the context-insensitive graph fans one dispatch
+// site onto every closure that flows to it), the CLI's effect count is an upper bound
+// that may include sibling-closure effects — so reach must say so, mirroring the
+// cover-side disclosure and the MCP lens. A clean query whose forward cone never
+// crosses such a seam must stay silent (no false caveat).
+func TestReachDisclosesForwardHighFanOut(t *testing.T) {
+	// Handle → RunInTx (a HighFanOut seam) → two sibling closures, each writing. From
+	// Handle the forward reach fans onto BOTH closures' writes (the union over-report).
+	// Read → readRow is a clean forward cone with one effect and no dispatch seam.
+	const g = `{
+  "algo":"rta",
+  "nodes":[
+    {"fqn":"pkg.Handle","sig":"func()","tier":1},
+    {"fqn":"pkg.RunInTx","sig":"func()","tier":1},
+    {"fqn":"pkg.closeA","sig":"func()","tier":1},
+    {"fqn":"pkg.closeB","sig":"func()","tier":1},
+    {"fqn":"pkg.Read","sig":"func()","tier":1},
+    {"fqn":"pkg.readRow","sig":"func()","tier":1}
+  ],
+  "edges":[
+    {"from":"pkg.Handle","to":"pkg.RunInTx","tier":1},
+    {"from":"pkg.RunInTx","to":"pkg.closeA","tier":1},
+    {"from":"pkg.RunInTx","to":"pkg.closeB","tier":1},
+    {"from":"pkg.closeA","to":"boundary:db INSERT a","tier":1,"boundary":"outbound-sync"},
+    {"from":"pkg.closeB","to":"boundary:db INSERT b","tier":1,"boundary":"outbound-sync"},
+    {"from":"pkg.Read","to":"pkg.readRow","tier":1},
+    {"from":"pkg.readRow","to":"boundary:db SELECT r","tier":1,"boundary":"outbound-sync"}
+  ],
+  "blind_spots":[{"kind":"HighFanOut","site":"pkg.RunInTx","detail":"dispatch resolved to many callees"}]
+}`
+	path := filepath.Join(t.TempDir(), "g.json")
+	if err := os.WriteFile(path, []byte(g), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The over-reporter: forward reach crosses the HighFanOut, so the effect count is
+	// disclosed as an upper bound that may include sibling-closure effects.
+	over := captureStdout(t, func() {
+		if err := run([]string{"reach", path, "pkg.Handle"}); err != nil {
+			t.Fatalf("reach Handle: %v", err)
+		}
+	})
+	if !strings.Contains(over, "reachable external effects: 2 ≤ (over-approx via dispatch") {
+		t.Errorf("reach must disclose the forward HighFanOut over-approx on effects:\n%s", over)
+	}
+	if !strings.Contains(over, "sibling-closure effects past a HighFanOut seam") {
+		t.Errorf("reach must name the sibling-closure cause:\n%s", over)
+	}
+
+	// The clean read query: forward cone never crosses a dispatch seam, so the effect
+	// count must carry NO caveat (no false disclosure).
+	clean := captureStdout(t, func() {
+		if err := run([]string{"reach", path, "pkg.Read"}); err != nil {
+			t.Fatalf("reach Read: %v", err)
+		}
+	})
+	if !strings.Contains(clean, "reachable external effects: 1\n") {
+		t.Errorf("clean read query effect count should be bare (no caveat):\n%s", clean)
+	}
+	if strings.Contains(clean, "over-approx via dispatch") {
+		t.Errorf("clean read query must not emit a HighFanOut caveat:\n%s", clean)
+	}
+}
+
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
 // wrote.
 func captureStdout(t *testing.T, fn func()) string {
