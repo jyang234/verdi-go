@@ -7,6 +7,8 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/jyang234/golang-code-graph/internal/effectkind"
+
 	"github.com/jyang234/golang-code-graph/internal/config"
 )
 
@@ -176,11 +178,11 @@ func (hs *HintSet) IsRPC(fn *ssa.Function) bool { return anyMatch(hs.rpc, fn) }
 func (hs *HintSet) MethodNamedOutboundKind(fn *ssa.Function) (string, bool) {
 	switch {
 	case hs.IsObjectStore(fn):
-		return "blob", true
+		return effectkind.Blob, true
 	case hs.IsCache(fn):
-		return "cache", true
+		return effectkind.Cache, true
 	case hs.IsRPC(fn):
-		return "rpc", true
+		return effectkind.RPC, true
 	}
 	return "", false
 }

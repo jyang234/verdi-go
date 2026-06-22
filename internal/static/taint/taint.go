@@ -255,8 +255,8 @@ func (a *analysis) propagate(v ssa.Value) {
 		case *ssa.Store:
 			a.handleStore(r, v)
 		case *ssa.MapUpdate:
-			if r.Value == v {
-				a.escape(r) // value into a map — contents not tracked
+			if r.Value == v || r.Key == v {
+				a.escape(r) // value OR key into a map — contents not tracked
 			}
 		case *ssa.Send:
 			if r.X == v {
@@ -266,6 +266,15 @@ func (a *analysis) propagate(v ssa.Value) {
 			a.handleReturn(r, v)
 		case ssa.CallInstruction:
 			a.handleCall(r, v)
+		default:
+			// SOUNDNESS BACKSTOP: any taint-carrying referrer kind not modeled above
+			// (indexing a tainted slice via *ssa.IndexAddr, ranging a tainted
+			// map/slice via *ssa.Range/*ssa.Next, *ssa.Lookup, *ssa.Select, …) must
+			// FAIL CLOSED — escape, never silently drop. Without this, an unhandled
+			// kind would propagate no taint AND set no escape, so the verdict could be
+			// a false NO-FLOW (a false SATISFIED, the worst outcome). Escaping only
+			// ever downgrades NO-FLOW to ABSTAIN; it can never hide a real flow.
+			a.escape(ref)
 		}
 	}
 }
@@ -392,8 +401,15 @@ func (a *analysis) isSource(fn *ssa.Function) bool { return matchAny(a.cfg.Sourc
 func (a *analysis) isSink(fn *ssa.Function) bool { return matchAny(a.cfg.Sinks, fn) }
 
 func (a *analysis) isSourceField(k fieldKey) bool {
-	path := k.named.Obj().Pkg().Path()
-	name := k.named.Obj().Name()
+	obj := k.named.Obj()
+	// A named type's TypeName can be package-less (a universe/builtin or a
+	// synthesized type reachable through go/ssa); guard the Pkg() deref explicitly
+	// (fail closed — such a type cannot match a declared importpath#Type.Field source).
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	path := obj.Pkg().Path()
+	name := obj.Name()
 	st, ok := k.named.Underlying().(*types.Struct)
 	if !ok || k.idx >= st.NumFields() {
 		return false

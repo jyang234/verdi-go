@@ -113,11 +113,13 @@ func forwardOrdered(files []MigrationFile) []MigrationFile {
 }
 
 // isRollback reports whether a file is a rollback (undo) script — excluded from the
-// forward replay. A rollback's DROP must not apply as if it were forward, so we
-// drop any .sql whose base name contains "rollback" (the documented "*_rollback.sql"
-// convention, matched loosely so a variant spelling still fails closed to exclusion).
+// forward replay so its DROP does not apply as if it were forward. It matches the
+// documented "*_rollback.sql" convention by SUFFIX, not a loose substring: a
+// substring match would wrongly exclude a legitimate FORWARD migration whose
+// description merely contains the word (e.g. V12__add_rollback_audit_table.sql),
+// dropping its CREATE from the defined-schema set and manufacturing false drift.
 func isRollback(name string) bool {
-	return strings.Contains(strings.ToLower(name), "rollback")
+	return strings.HasSuffix(strings.ToLower(name), "_rollback.sql")
 }
 
 // parseVersion extracts the numeric version components from a "V<version>__" name,
@@ -168,33 +170,98 @@ type ddlOp struct {
 }
 
 var (
-	// createRe matches "CREATE TABLE [IF NOT EXISTS] <name>", capturing a bare,
-	// quoted, or schema-qualified name (cleanName normalizes it).
-	createRe = regexp.MustCompile("(?is)\\bCREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(\"[^\"]+\"|`[^`]+`|[a-zA-Z_][\\w$.]*)")
-	// dropRe matches "DROP TABLE [IF EXISTS] <list>" up to the statement terminator;
-	// the captured list is comma-split into individual names.
+	// createRe matches "CREATE [GLOBAL|LOCAL] [TEMP|TEMPORARY|UNLOGGED] TABLE
+	// [IF NOT EXISTS] <name>", capturing a bare, quoted, or schema-qualified name
+	// (cleanName normalizes it). The optional qualifiers matter: an UNLOGGED table is
+	// a real persistent table, so missing it would drop it from the defined set and
+	// manufacture false drift; TEMP tables are included for the same completeness-
+	// favoring reason (a write to one must not read as drift).
+	createRe = regexp.MustCompile("(?is)\\bCREATE\\s+(?:(?:GLOBAL|LOCAL)\\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(\"[^\"]+\"|`[^`]+`|[a-zA-Z_][\\w$.]*)")
+	// dropRe matches "DROP TABLE [IF EXISTS] <list>"; scanDDL runs it per statement
+	// (the SQL is split on ';' after stripSQL), so the comma-split list cannot bleed
+	// across a statement boundary even when a DROP lacks a trailing semicolon.
 	dropRe = regexp.MustCompile(`(?is)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^;]+)`)
 	// alterRenameRe detects "ALTER TABLE ... RENAME TO ...", a table rename the
 	// create/drop scan cannot follow — surfaced as a fail-closed caveat.
 	alterRenameRe = regexp.MustCompile(`(?is)\bALTER\s+TABLE\b.*?\bRENAME\s+TO\b`)
 )
 
+// stripSQL removes SQL line comments (-- … EOL), block comments (/* … */), and
+// single-quoted string literals (honoring ” escapes), replacing each with a space.
+// Without this the DDL regexes would match a CREATE/DROP that appears inside a
+// comment or a literal — a phantom CREATE masks real drift (a false "no drift", the
+// unsound direction), a phantom DROP manufactures it. Double-quoted text is KEPT: in
+// SQL "…" is a quoted IDENTIFIER (a table name), not a string literal, so stripping
+// it would lose real table names.
+func stripSQL(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], "--"):
+			if j := strings.IndexByte(s[i:], '\n'); j >= 0 {
+				i += j // keep the newline (written on the next iteration)
+			} else {
+				i = len(s)
+			}
+			b.WriteByte(' ')
+		case strings.HasPrefix(s[i:], "/*"):
+			if j := strings.Index(s[i+2:], "*/"); j >= 0 {
+				i += j + 4
+			} else {
+				i = len(s)
+			}
+			b.WriteByte(' ')
+		case s[i] == '\'':
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
 // scanDDL returns the CREATE/DROP table operations in one migration's SQL, in
-// textual order, so the replay nets create-then-drop correctly within a file.
+// textual order, so the replay nets create-then-drop correctly within a file. It
+// strips comments/literals first and scans per ';'-delimited statement so a DROP
+// list cannot swallow a following statement.
 func scanDDL(sqlText string) []ddlOp {
+	var out []ddlOp
+	for _, stmt := range strings.Split(stripSQL(sqlText), ";") {
+		out = append(out, scanStatement(stmt)...)
+	}
+	return out
+}
+
+// scanStatement recovers the CREATE/DROP table ops within one statement, in
+// textual order.
+func scanStatement(stmt string) []ddlOp {
 	type positioned struct {
 		pos int
 		op  ddlOp
 	}
 	var ms []positioned
-	for _, idx := range createRe.FindAllStringSubmatchIndex(sqlText, -1) {
-		name := cleanName(sqlText[idx[2]:idx[3]])
+	for _, idx := range createRe.FindAllStringSubmatchIndex(stmt, -1) {
+		name := cleanName(stmt[idx[2]:idx[3]])
 		if name != "" {
 			ms = append(ms, positioned{pos: idx[0], op: ddlOp{create: true, name: name}})
 		}
 	}
-	for _, idx := range dropRe.FindAllStringSubmatchIndex(sqlText, -1) {
-		for _, name := range splitDropList(sqlText[idx[2]:idx[3]]) {
+	for _, idx := range dropRe.FindAllStringSubmatchIndex(stmt, -1) {
+		for _, name := range splitDropList(stmt[idx[2]:idx[3]]) {
 			if name != "" {
 				ms = append(ms, positioned{pos: idx[0], op: ddlOp{create: false, name: name}})
 			}

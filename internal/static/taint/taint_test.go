@@ -1,6 +1,7 @@
 package taint_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -95,5 +96,44 @@ func TestCleanIsNoFlow(t *testing.T) {
 	})
 	if r.Verdict != taint.NoFlow {
 		t.Fatalf("clean case: verdict = %s, want NO-FLOW (escaped=%v flows=%v sites=%v)", r.Verdict, r.Escaped, r.Flows, r.EscapeSites)
+	}
+}
+
+// Indexing a tainted slice is an unmodeled frontier, so the propagate switch's
+// default-escape backstop must fire: ABSTAIN, never a (false) NO-FLOW. This is the
+// soundness regression guard for the missing-default bug.
+func TestSliceIndexEscapesToAbstain(t *testing.T) {
+	r := run(t, taint.Config{
+		SourceFuncs: []taint.FuncSpec{src("sourceSlice")},
+		Sinks:       []taint.FuncSpec{sink("sinkSlice")},
+	})
+	if r.Verdict != taint.Abstain {
+		t.Fatalf("slice-index case: verdict = %s, want ABSTAIN (a false NO-FLOW here is the missing-default soundness bug)", r.Verdict)
+	}
+	if !r.Escaped {
+		t.Errorf("slice-index case must set escaped")
+	}
+}
+
+// The report must be byte-identical across repeated runs: Go randomizes map-iteration
+// order per range, so an unsorted EscapeSites/Flows collection would surface here.
+func TestDeterministic(t *testing.T) {
+	cfg := taint.Config{
+		SourceFuncs: []taint.FuncSpec{src("sourceMap"), src("sourceDirect")},
+		Sinks:       []taint.FuncSpec{sink("sinkMap"), sink("sinkDirect")},
+	}
+	prog := analyzeFixture(t).Program
+	want, err := json.Marshal(taint.Analyze(prog, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 25; i++ {
+		got, err := json.Marshal(taint.Analyze(prog, cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("taint report not deterministic across runs:\n want %s\n got  %s", want, got)
+		}
 	}
 }

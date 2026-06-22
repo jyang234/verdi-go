@@ -70,6 +70,17 @@ func caseClean() {
 	sinkClean("constant")
 }
 
+// 8. Slice index: a source returns a slice, indexed and passed to a sink. Indexing a
+// tainted slice (*ssa.IndexAddr) is the analysis frontier, so this must be ABSTAIN —
+// it is the soundness backstop guard: without the default-escape it would have been a
+// false NO-FLOW.
+func sourceSlice() []string { return []string{"pii"} }
+func sinkSlice(string)      {}
+func caseSliceIndex() {
+	xs := sourceSlice()
+	sinkSlice(xs[0])
+}
+
 func main() {
 	caseDirect()
 	caseRelay()
@@ -78,4 +89,5 @@ func main() {
 	caseFieldRead(&Recipient{})
 	caseMap()
 	caseClean()
+	caseSliceIndex()
 }
