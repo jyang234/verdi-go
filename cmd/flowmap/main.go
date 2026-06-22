@@ -133,6 +133,7 @@ func cmdGraph(args []string) error {
 	reclaimFlag := fs.Bool("reclaim", false, "apply sound dispatch-seam reclaimers (opt-in; adds provenance-tagged edges that close the strict-server seam)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
 	reclaimTopicFlag := fs.Bool("reclaim-topic", false, "apply the bus const-topic label reclaimer (opt-in; recovers PUBLISH/CONSUME targets from constant-set topics, tagging them via=topic-constfold)")
+	rebindFlag := fs.Bool("rebind", false, "EXPERIMENTAL: de-union shared higher-order runners — rebind each command to its OWN confined closure (adds via=rebind edges) and REMOVE the runner→closure union edges. The only pass that removes edges; opt-in, not for default gating")
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
 	allBlindSpots := fs.Bool("all-blind-spots", false, "with --mermaid, draw every blind-spot/frontier disclosure node (trivial boundaries and those orphaned onto collapsed plumbing) instead of rolling the plumbing-tier ones into a counted header note; restores the full honesty channel without un-collapsing plumbing nodes")
@@ -164,6 +165,9 @@ func cmdGraph(args []string) error {
 	warnSkippedAnnotations(os.Stderr, g)
 	if *reclaimFlag {
 		graphio.ApplyReclaimers(g, res)
+	}
+	if *rebindFlag {
+		graphio.ApplyRebind(g, res)
 	}
 	if *rollup != "" {
 		return cmdGraphRollup(*rollup, g, *asMermaid, *diffBase, *rootAt, *entry, *rollupBands)

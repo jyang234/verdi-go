@@ -141,7 +141,7 @@ func TxClosure(res *analyze.Result) []Edge {
 					continue
 				}
 				for i, arg := range common.Args {
-					closure := closureFn(arg)
+					closure := ClosureFn(arg)
 					if closure == nil {
 						continue
 					}
@@ -161,24 +161,50 @@ func TxClosure(res *analyze.Result) []Edge {
 	return edges
 }
 
-// closureFn returns the anonymous function behind a closure value passed as a call
+// ClosureFn returns the anonymous function behind a closure value passed as a call
 // argument — a *ssa.MakeClosure, optionally behind the type conversions a func-value
 // argument can carry — or nil if the argument is not a closure. It deliberately matches
 // only MakeClosure (the orphaned-closure case), not a bare *ssa.Function: a top-level
 // func passed as a value is address-taken and already resolved by the call-graph builder.
-func closureFn(v ssa.Value) *ssa.Function {
+// Exported as the one source of truth for "is this call argument a closure", shared by
+// the TxClosure reclaimer and the experimental rebind de-union pass.
+func ClosureFn(v ssa.Value) *ssa.Function {
 	switch x := v.(type) {
 	case *ssa.MakeClosure:
 		fn, _ := x.Fn.(*ssa.Function)
 		return fn
 	case *ssa.ChangeType:
-		return closureFn(x.X)
+		return ClosureFn(x.X)
 	case *ssa.Convert:
-		return closureFn(x.X)
+		return ClosureFn(x.X)
 	case *ssa.MakeInterface:
-		return closureFn(x.X)
+		return ClosureFn(x.X)
 	}
 	return nil
+}
+
+// DirectlyInvokesParam reports whether fn invokes its idx-th parameter DIRECTLY — i.e.
+// there is a call whose callee VALUE is that parameter (`fn(args…)` where fn is the
+// parameter). This is precisely the shape under which the call graph carries a concrete
+// fn→closure union edge AT fn's own call site (the shared-runner `RunInTx`'s fn(exec)),
+// so it is the predicate the experimental rebind de-union pass keys on to know which
+// union edge it may rebind. It does NOT consider the generic-wrapper / forwarding cases
+// invokesParam handles — those fan at a deeper, non-fn site, so their union is not a
+// single removable fn→closure edge. One source of truth for the direct-invoker test.
+func DirectlyInvokesParam(fn *ssa.Function, idx int) bool {
+	if fn == nil || idx < 0 || idx >= len(fn.Params) {
+		return false
+	}
+	p := fn.Params[idx]
+	for _, ref := range referrers(p) {
+		if call, ok := ref.(ssa.CallInstruction); ok {
+			c := call.Common()
+			if c.Value == p && !c.IsInvoke() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // invKey identifies the query "does fn invoke its idx-th parameter".

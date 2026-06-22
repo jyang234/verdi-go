@@ -25,6 +25,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 	"github.com/jyang234/golang-code-graph/internal/static/obligations"
+	"github.com/jyang234/golang-code-graph/internal/static/rebind"
 	"github.com/jyang234/golang-code-graph/internal/static/reclaim"
 	"github.com/jyang234/golang-code-graph/internal/static/roots"
 	"github.com/jyang234/golang-code-graph/internal/static/signatures"
@@ -808,6 +809,60 @@ func ApplyReclaimers(g *Graph, res *analyze.Result) int {
 		}
 	}
 	return added
+}
+
+// ApplyRebind runs the EXPERIMENTAL de-union pass (rebind package) over res and folds
+// the result into g: it ADDs each command's precise enclosing-fn→closure edge (tagged
+// via=rebind) and REMOVEs the shared runner→closure union edges. It is the ONLY graph
+// mutation that removes edges (the soundness-dangerous direction), so it is opt-in and
+// experimental (`flowmap graph --rebind`): Build never calls it, and the default graph —
+// every committed golden — is unchanged. The removal is sound because the rebind pass
+// abstains (keeps the union) on any closure that escapes its parent. Only BASE union
+// edges (no Via) are removed, so a reclaimed or already-rebound edge is never dropped.
+// Returns the counts of edges added and removed; re-sorts and re-classifies like
+// ApplyReclaimers when anything changed.
+func ApplyRebind(g *Graph, res *analyze.Result) (added, removed int) {
+	plan := rebind.Compute(res)
+	nodes := g.nodeSet()
+
+	existing := make(map[[2]string]bool, len(g.Edges))
+	for _, e := range g.Edges {
+		existing[[2]string{e.From, e.To}] = true
+	}
+	for _, e := range plan.Add {
+		if !nodes[e.From] || !nodes[e.To] || existing[[2]string{e.From, e.To}] {
+			continue
+		}
+		g.Edges = append(g.Edges, Edge{From: e.From, To: e.To, Tier: 2, Via: rebind.Via})
+		existing[[2]string{e.From, e.To}] = true
+		added++
+	}
+
+	remove := make(map[[2]string]bool, len(plan.Remove))
+	for _, p := range plan.Remove {
+		remove[p] = true
+	}
+	if len(remove) > 0 {
+		kept := g.Edges[:0]
+		for _, e := range g.Edges {
+			// Drop only BASE union edges (Via empty) that the plan targets; a reclaimed
+			// or rebound edge is never removed.
+			if e.Via == "" && remove[[2]string{e.From, e.To}] {
+				removed++
+				continue
+			}
+			kept = append(kept, e)
+		}
+		g.Edges = kept
+	}
+
+	if added > 0 || removed > 0 {
+		sortGraph(g)
+		if g.Entrypoint == "" {
+			g.Frontier = frontierSection(g)
+		}
+	}
+	return added, removed
 }
 
 // obligationSummaries hands the engine its production inputs (CX-2): the
