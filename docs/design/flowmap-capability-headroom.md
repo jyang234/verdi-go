@@ -88,8 +88,15 @@ declared boundary in the same shape as the existing five hints, with zero soundn
 > discipline — and is *safer* than the SQL fold: the topic is a verdict-neutral target name, so it
 > can never move a pole. Sound-or-abstain; off by default. Fixture: `testdata/fixtures/topicfoldsvc`.
 
-The remaining recognizers (object storage, cache, non-HTTP RPC) stay additive pattern work — low
-effort, no risk, not yet built.
+> **Shipped (the recognizers).** Object storage (`blob`), cache (`cache`), and non-HTTP RPC (`rpc`)
+> are now typed boundary kinds — declared via `classify.{objectStore,cache,rpc}` (method-narrowable
+> like the other hints). They share one "method-named outbound" path (`HintSet.MethodNamedOutboundKind`):
+> the operation is the callee method name, they tier as outbound-sync IO, and — the part the headroom
+> framing understated — promotion is wired through the *whole* lifecycle so nothing is silently
+> dropped: they appear in the gated **contract** as external dependencies (so the disclosure that was
+> an `ExternalBoundaryCall` blind spot is not lost), and their write-ness is **disclosed as
+> budget-unenforceable** rather than guessed from a method name (the same fail-closed treatment as a
+> non-constant DB call — no occasionally-wrong heuristic). Fixture: `testdata/fixtures/blobsvc`.
 
 ## 3 · Value-flow / taint — spiked (PoC built); feasible medium build, precision-gated
 

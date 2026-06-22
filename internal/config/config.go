@@ -360,6 +360,16 @@ type ClassifyHints struct {
 	// three string arguments are the peer, method, and route template, read by the
 	// boundary extractor to name the external dependency.
 	HTTP []string `yaml:"http"`
+	// ObjectStore, Cache, and RPC name the "method-named outbound" effect kinds: an
+	// object-store/blob SDK (kind `blob`), a cache client (kind `cache`), and a
+	// non-HTTP RPC peer (kind `rpc`). Unlike HTTP they carry no readable
+	// peer/method/route triple, so the operation is the callee method name and their
+	// write-ness is NOT inferred from it (a method-name heuristic could be silently
+	// wrong) — it is disclosed as a budget-unenforceable effect, the same fail-closed
+	// treatment as a non-constant DB call.
+	ObjectStore []string `yaml:"objectStore"`
+	Cache       []string `yaml:"cache"`
+	RPC         []string `yaml:"rpc"`
 }
 
 // EntrypointHints declares the entry points root discovery cannot reach by

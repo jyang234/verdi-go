@@ -879,11 +879,26 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 			edges = append(edges, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent, Via: via})
 		}
 		return edges
+	case methodNamedOutboundKind(hints, callee) != "":
+		// A method-named outbound kind (blob/cache/rpc) carries no readable
+		// peer/op/target triple, so the operation is the callee method name
+		// (sinkMethodName — the same opaque label db falls back to), e.g.
+		// "boundary:blob PutObject", "boundary:cache Get", "boundary:rpc Charge".
+		kind := methodNamedOutboundKind(hints, callee)
+		return []Edge{{From: from, To: "boundary:" + kind + " " + sinkMethodName(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case scope[callee]:
 		return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
 	default:
 		return nil // a call into unhinted stdlib/third-party code; not part of the view
 	}
+}
+
+// methodNamedOutboundKind returns the blob/cache/rpc kind token for callee, or ""
+// if it is not a method-named outbound effect. A thin string-returning wrapper over
+// the hint helper so the edgeOf switch can both test and use the kind in one place.
+func methodNamedOutboundKind(hints *features.HintSet, callee *ssa.Function) string {
+	kind, _ := hints.MethodNamedOutboundKind(callee)
+	return kind
 }
 
 // busEdges builds the boundary edge(s) for a bus PUBLISH/CONSUME site. The topic
