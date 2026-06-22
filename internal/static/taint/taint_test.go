@@ -99,6 +99,22 @@ func TestCleanIsNoFlow(t *testing.T) {
 	}
 }
 
+// A sensitive field read located only inside a pointer-receiver (*T) method must
+// still be seeded: MethodSet(T) omits *T methods, so firstPartyFuncs must walk both
+// method sets. Before the fix this returned a false NO-FLOW (sources seeded: 0).
+func TestPointerReceiverFieldSourceIsSeeded(t *testing.T) {
+	r := run(t, taint.Config{
+		SourceFields: []taint.FieldSpec{{Pkg: pkg, Type: "PtrCarrier", Field: "Token"}},
+		Sinks:        []taint.FuncSpec{sink("sinkPtr")},
+	})
+	if r.Verdict != taint.Flow {
+		t.Fatalf("pointer-receiver field source: verdict = %s, want FLOW (escaped=%v sources=%d) — a *T-method read must be seeded, not silently proven safe", r.Verdict, r.Escaped, r.Sources)
+	}
+	if r.Sources == 0 {
+		t.Error("the *T-method field read was never seeded (MethodSet(T) omits pointer methods)")
+	}
+}
+
 // Indexing a tainted slice is an unmodeled frontier, so the propagate switch's
 // default-escape backstop must fire: ABSTAIN, never a (false) NO-FLOW. This is the
 // soundness regression guard for the missing-default bug.

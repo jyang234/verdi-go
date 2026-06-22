@@ -6,7 +6,7 @@
 // func-value argument of each to a concrete function — a synthetic root tagged
 // with its route or topic.
 //
-//	roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (library) exports
+//	roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (library) exported funcs & methods
 //
 // A registration whose handler cannot be resolved to a concrete function is not
 // dropped: it is recorded as a blind spot, mirroring the rest of the static
@@ -33,7 +33,7 @@ const (
 	KindInit     Kind = "init"     // a package initializer (always runs before main)
 	KindHTTP     Kind = "http"     // an HTTP handler registered on a router
 	KindConsumer Kind = "consumer" // a bus consumer registered via subscribe
-	KindExport   Kind = "export"   // an exported function (library fallback)
+	KindExport   Kind = "export"   // an exported function or method of an exported type (library fallback)
 	// KindCallback and KindWorker are DECLARED roots (config entrypoints), asserted
 	// by FQN because call-resolution provably cannot reach them: a callback's
 	// handler value threads through a value-flow chain root discovery runs before
@@ -192,7 +192,7 @@ func chiRegistrars() []Registrar {
 // Discover finds the synthetic roots of prog given the registration hints and any
 // author-declared entrypoints (callbacks and workers call-resolution cannot
 // reach). When the unit has no mains and no registered or declared handlers, it
-// falls back to the unit's exported functions (library mode).
+// falls back to the unit's exported functions and exported methods (library mode).
 func Discover(prog *ssabuild.Program, registrars []Registrar, declared ...DeclaredEntrypoint) *Result {
 	res := &Result{}
 	// Identity is the full (fn, kind, name) triple, not the function alone: two
@@ -327,15 +327,41 @@ func Discover(prog *ssabuild.Program, registrars []Registrar, declared ...Declar
 	}
 
 	// Library fallback: no PRIMARY entry point (main, HTTP handler, bus consumer, or
-	// declared callback/worker) to root from, so root at every exported function.
+	// declared callback/worker) to root from, so root at every exported function AND
+	// every exported method of an exported type (the API surface a library consumer
+	// can call).
 	// Init and export roots are excluded from the primary test — every package has a
 	// synthesized init, so counting init would permanently suppress the fallback and
 	// leave a pure library's exported surface unrooted.
 	if !hasPrimaryRoot(res.Roots) {
 		for _, p := range prog.ServicePkgs {
 			for _, m := range p.Members {
-				if fn, ok := m.(*ssa.Function); ok && fn.Object() != nil && fn.Object().Exported() {
-					add(fn, KindExport, "")
+				switch x := m.(type) {
+				case *ssa.Function:
+					if x.Object() != nil && x.Object().Exported() {
+						add(x, KindExport, "")
+					}
+				case *ssa.Type:
+					// Exported METHODS are part of a library's API surface too, but
+					// methods are NOT package-level SSA members — they live only in the
+					// type's method sets. MethodSet(T) omits pointer-receiver (*T)
+					// methods, so walk BOTH the value and pointer sets; the dominant *T
+					// idiom (a *Store/*Client API) would otherwise be unrooted and its
+					// forward cone invisible — a false "no path"/NEVER absence proof.
+					// add() dedups the value-receiver overlap. Only EXPORTED methods of
+					// EXPORTED types are an API entry.
+					if !x.Object().Exported() {
+						continue // unexported type: not an API entry
+					}
+					for _, recv := range []types.Type{x.Type(), types.NewPointer(x.Type())} {
+						ms := prog.Prog.MethodSets.MethodSet(recv)
+						for i := 0; i < ms.Len(); i++ {
+							fn := prog.Prog.MethodValue(ms.At(i))
+							if fn != nil && fn.Object() != nil && fn.Object().Exported() {
+								add(fn, KindExport, "")
+							}
+						}
+					}
 				}
 			}
 		}

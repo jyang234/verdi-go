@@ -48,11 +48,12 @@ func TestCompareAddRemoveBreaking(t *testing.T) {
 	if c := find(d, "-", "consume", "c1"); c == nil || !c.Breaking {
 		t.Errorf("removed consume must be breaking: %v", c)
 	}
-	// Dependency movement is reported but never breaking.
-	if c := find(d, "~", "dependency", "peer1"); c == nil || c.Breaking {
+	// Dependency movement is reported but never breaking. The change name carries the
+	// kind so a peer reached by two kinds renders as two distinct lines.
+	if c := find(d, "~", "dependency", "peer1 (http)"); c == nil || c.Breaking {
 		t.Errorf("changed dependency should be ~ and non-breaking: %v", c)
 	}
-	if c := find(d, "+", "dependency", "peer2"); c == nil || c.Breaking {
+	if c := find(d, "+", "dependency", "peer2 (http)"); c == nil || c.Breaking {
 		t.Errorf("added dependency should be + and non-breaking: %v", c)
 	}
 	if !d.Breaking() {
@@ -90,5 +91,22 @@ func TestLoadGolden(t *testing.T) {
 	}
 	if find(d, "+", "route", "GET /healthz") == nil {
 		t.Errorf("expected the added healthz route in the diff: %v", d.Changes)
+	}
+}
+
+// A peer reached by two kinds must render as two distinct, kind-labeled dependency
+// changes — not collapse to one (the prior peer-only keying dropped the second).
+func TestDiffDepsSamePeerTwoKinds(t *testing.T) {
+	base := &Contract{Service: "svc"}
+	branch := &Contract{Service: "svc", ExternalDeps: []ExternalDep{
+		{Peer: "acme", Kind: "http", Ops: []string{"GET /x"}},
+		{Peer: "acme", Kind: "blob", Ops: []string{"PutObject"}},
+	}}
+	d := Compare(base, branch)
+	if c := find(d, "+", "dependency", "acme (http)"); c == nil {
+		t.Errorf("missing http dependency change for acme: %+v", d.Changes)
+	}
+	if c := find(d, "+", "dependency", "acme (blob)"); c == nil {
+		t.Errorf("missing blob dependency change for acme (must not collapse with http): %+v", d.Changes)
 	}
 }

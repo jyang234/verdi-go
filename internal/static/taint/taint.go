@@ -34,6 +34,7 @@ import (
 	"sort"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/ssabuild"
@@ -481,34 +482,21 @@ func structNamed(t types.Type) *types.Named {
 	return n
 }
 
-// firstPartyFuncs collects every first-party SSA function (package-level and nested
-// anonymous), the descent scope of the analysis.
+// firstPartyFuncs collects every first-party SSA function — package-level funcs,
+// value- AND pointer-receiver methods, synthetic wrappers, and nested closures — as
+// the descent/seeding scope. It uses ssautil.AllFunctions (the complete whole-program
+// walk) rather than a hand-rolled pkg.Members / MethodSet(T) walk: MethodSet(T) omits
+// pointer-receiver (*T) methods, and a source/sink read located only inside a *T
+// method that went un-indexed is a false NO-FLOW — the one verdict this analysis must
+// never emit (CLAUDE.md "Sound scope — collect functions completely").
 func firstPartyFuncs(prog *ssabuild.Program) []*ssa.Function {
 	var out []*ssa.Function
-	seen := map[*ssa.Function]bool{}
-	var add func(fn *ssa.Function)
-	add = func(fn *ssa.Function) {
-		if fn == nil || seen[fn] || fn.Blocks == nil {
-			return
+	for fn := range ssautil.AllFunctions(prog.Prog) {
+		if fn.Blocks == nil {
+			continue // no body (external or abstract) — nothing to scan
 		}
-		seen[fn] = true
-		out = append(out, fn)
-		for _, anon := range fn.AnonFuncs {
-			add(anon)
-		}
-	}
-	for _, pkg := range prog.ServicePkgs {
-		for _, m := range pkg.Members {
-			switch x := m.(type) {
-			case *ssa.Function:
-				add(x)
-			case *ssa.Type:
-				// Methods of named types in this package.
-				ms := prog.Prog.MethodSets.MethodSet(x.Type())
-				for i := 0; i < ms.Len(); i++ {
-					add(prog.Prog.MethodValue(ms.At(i)))
-				}
-			}
+		if fn.Pkg != nil && prog.IsFirstParty(fn.Pkg) {
+			out = append(out, fn)
 		}
 	}
 	return out

@@ -238,12 +238,29 @@ func nonMutatingDBControl(op string) bool {
 
 // methodNamedEffect reports whether the boundary-label fields name a method-named
 // outbound effect (blob/cache/rpc, per the shared effectkind set) — a kind token
-// followed by exactly the callee method name, i.e. EXACTLY two fields. The two-field
-// shape is load-bearing: an outbound HTTP edge is "<peer> <METHOD> <route>" (three
-// fields), so requiring len==2 keeps an HTTP peer that happens to be NAMED "blob"/
-// "cache"/"rpc" from colliding with a kind token and being mis-dropped from the
-// write surface. The kind set itself lives in internal/effectkind (one source of
-// truth with the static labeler that produces these labels).
+// followed by exactly the callee method name, i.e. EXACTLY two fields. The kind set
+// lives in internal/effectkind (one source of truth with the static labeler).
+//
+// The two-field shape distinguishes these from the COMMON outbound-HTTP label
+// "<peer> <METHOD> <route>" (three fields). It does NOT fully disambiguate a
+// DEGENERATE HTTP call whose route arg is the empty constant: that collapses to two
+// fields "<peer> <METHOD>", so if such a peer is literally named "blob"/"cache"/"rpc"
+// its mutating method would be mis-read as a method-named effect and dropped from the
+// write surface. This residual is irreducible at the label layer — a blob method
+// genuinely named "Delete" ("blob Delete") is structurally identical to an
+// empty-route "blob DELETE" — and is shared with the pre-existing peer/kind overlap
+// for "db"/"bus" peers.
+//
+// The tempting "real fix" — namespace HTTP labels with an "http" token like every
+// other kind — was PRESSURE-TESTED and rejected: HTTP's peer-first label shape is a
+// load-bearing convention, not an accident. boundaryPeer (rollup.go) reads the first
+// token as the C3 external-system identity, so each HTTP peer is its own component;
+// an "http" prefix collapses every external service into one "http" box (verified on
+// loansvc: credit-bureau + payment-gw → "http"). impact.ResolvePeer keys "who calls
+// peer X" off the same peer-first prefix and would silently return nothing. So the
+// prefix trades a pathological collision (a peer named exactly after a kind AND an
+// empty route) for a real C3/triage regression plus new compensating special-cases —
+// the cure is worse than the disease. The residual stays documented, not "fixed".
 func methodNamedEffect(f []string) bool {
 	return len(f) == 2 && effectkind.IsMethodNamed(f[0])
 }
