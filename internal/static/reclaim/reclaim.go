@@ -349,13 +349,22 @@ func (p *txProbe) allImplsInvokeParam(common *ssa.CallCommon, paramIdx int) bool
 }
 
 // implementations resolves the interface method called by common to the concrete
-// *ssa.Function implementations over the program's runtime type set (CHA). It iterates
+// implementations over p.prog. A thin wrapper over the exported Implementations (one
+// source of truth, shared with the rebind de-union pass).
+func (p *txProbe) implementations(common *ssa.CallCommon) []*ssa.Function {
+	return Implementations(p.prog, common)
+}
+
+// Implementations resolves the interface method called by common to the concrete
+// *ssa.Function implementations over prog's runtime type set (CHA). It iterates
 // prog.RuntimeTypes() — the actual dynamic types that flow into interfaces, pointer types
 // included — so it does not hand-roll a MethodSet(T) walk that would omit pointer-receiver
-// (*T) methods (CLAUDE.md "collect functions completely").
-func (p *txProbe) implementations(common *ssa.CallCommon) []*ssa.Function {
+// (*T) methods (CLAUDE.md "collect functions completely"). Returns nil for a non-invoke
+// call. The result order follows prog.RuntimeTypes(); callers that need a canonical order
+// sort the FQNs they derive.
+func Implementations(prog *ssa.Program, common *ssa.CallCommon) []*ssa.Function {
 	meth := common.Method
-	if meth == nil || p.prog == nil {
+	if meth == nil || prog == nil {
 		return nil
 	}
 	iface, ok := common.Value.Type().Underlying().(*types.Interface)
@@ -363,15 +372,15 @@ func (p *txProbe) implementations(common *ssa.CallCommon) []*ssa.Function {
 		return nil
 	}
 	var out []*ssa.Function
-	for _, T := range p.prog.RuntimeTypes() {
+	for _, T := range prog.RuntimeTypes() {
 		if !types.Implements(T, iface) {
 			continue
 		}
-		sel := p.prog.MethodSets.MethodSet(T).Lookup(meth.Pkg(), meth.Name())
+		sel := prog.MethodSets.MethodSet(T).Lookup(meth.Pkg(), meth.Name())
 		if sel == nil {
 			continue
 		}
-		if fn := p.prog.MethodValue(sel); fn != nil {
+		if fn := prog.MethodValue(sel); fn != nil {
 			out = append(out, fn)
 		}
 	}
