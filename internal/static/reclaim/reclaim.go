@@ -9,6 +9,7 @@ package reclaim
 
 import (
 	"go/token"
+	"go/types"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -145,7 +146,7 @@ func TxClosure(res *analyze.Result) []Edge {
 					if closure == nil {
 						continue
 					}
-					if !newTxProbe().invokesParam(callee, i) {
+					if !newTxProbe(f.Prog).invokesParam(callee, i) {
 						continue
 					}
 					key := [2]string{n.FQN, closure.RelString(nil)}
@@ -218,14 +219,17 @@ type invKey struct {
 // A revisit returns false — conservatively "not proven via this path", which can only
 // lose precision (miss a reclaimable closure), never soundness (invent an edge); and
 // adding edges is the safe direction regardless. One probe per top-level query keeps the
-// result a pure function of the SSA, so TxClosure is deterministic.
+// result a pure function of the SSA, so TxClosure is deterministic. prog is the program
+// the SSA belongs to, used to resolve interface-dispatched runner calls to their concrete
+// implementations (the dominant real shape: the unit-of-work is an interface).
 type txProbe struct {
+	prog  *ssa.Program
 	param map[invKey]bool
 	val   map[ssa.Value]bool
 }
 
-func newTxProbe() *txProbe {
-	return &txProbe{param: map[invKey]bool{}, val: map[ssa.Value]bool{}}
+func newTxProbe(prog *ssa.Program) *txProbe {
+	return &txProbe{prog: prog, param: map[invKey]bool{}, val: map[ssa.Value]bool{}}
 }
 
 // invokesParam reports whether calling fn provably invokes the function value passed as
@@ -258,7 +262,17 @@ func (p *txProbe) valueInvoked(v ssa.Value, within *ssa.Function) bool {
 			if common.Value == v && !common.IsInvoke() {
 				return true // v is the callee value — directly invoked
 			}
-			if callee := common.StaticCallee(); callee != nil {
+			if common.IsInvoke() {
+				// Interface-dispatched call (the dominant real shape: u.RunInTx where u is
+				// an interface). No static callee, so resolve the interface method to its
+				// concrete implementations and recurse. common.Args EXCLUDES the receiver,
+				// so arg index i maps to an implementation's parameter i+1.
+				for i, arg := range common.Args {
+					if arg == v && p.allImplsInvokeParam(common, i+1) {
+						return true
+					}
+				}
+			} else if callee := common.StaticCallee(); callee != nil {
 				for i, arg := range common.Args {
 					if arg == v && p.invokesParam(callee, i) {
 						return true // forwarded to a callee that invokes that parameter
@@ -310,6 +324,58 @@ func (p *txProbe) allocCapturedAndInvoked(alloc *ssa.Alloc, within *ssa.Function
 		}
 	}
 	return false
+}
+
+// allImplsInvokeParam reports whether EVERY concrete implementation of the interface
+// method called by common provably invokes its paramIdx-th parameter. "Every" (not
+// "some") is what keeps the recovered edge unconditionally R2-sound: if every possible
+// dynamic implementation invokes the parameter, the closure is invoked no matter which
+// type the receiver holds, so the enclosing-fn→closure edge is one real execution can
+// always take — independent of how precisely the dispatch is resolved. If the interface
+// resolves to no implementation, or any implementation has no analyzable body, or any
+// implementation might not invoke the parameter, it abstains (the reclaimer refuses an
+// edge it cannot prove).
+func (p *txProbe) allImplsInvokeParam(common *ssa.CallCommon, paramIdx int) bool {
+	impls := p.implementations(common)
+	if len(impls) == 0 {
+		return false
+	}
+	for _, impl := range impls {
+		if len(impl.Blocks) == 0 || !p.invokesParam(impl, paramIdx) {
+			return false
+		}
+	}
+	return true
+}
+
+// implementations resolves the interface method called by common to the concrete
+// *ssa.Function implementations over the program's runtime type set (CHA). It iterates
+// prog.RuntimeTypes() — the actual dynamic types that flow into interfaces, pointer types
+// included — so it does not hand-roll a MethodSet(T) walk that would omit pointer-receiver
+// (*T) methods (CLAUDE.md "collect functions completely").
+func (p *txProbe) implementations(common *ssa.CallCommon) []*ssa.Function {
+	meth := common.Method
+	if meth == nil || p.prog == nil {
+		return nil
+	}
+	iface, ok := common.Value.Type().Underlying().(*types.Interface)
+	if !ok {
+		return nil
+	}
+	var out []*ssa.Function
+	for _, T := range p.prog.RuntimeTypes() {
+		if !types.Implements(T, iface) {
+			continue
+		}
+		sel := p.prog.MethodSets.MethodSet(T).Lookup(meth.Pkg(), meth.Name())
+		if sel == nil {
+			continue
+		}
+		if fn := p.prog.MethodValue(sel); fn != nil {
+			out = append(out, fn)
+		}
+	}
+	return out
 }
 
 // freeVarLoadInvoked reports whether loading the idx-th free var of fn (a *T captured by
