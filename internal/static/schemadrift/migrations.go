@@ -170,17 +170,23 @@ type ddlOp struct {
 }
 
 var (
-	// createRe matches "CREATE [GLOBAL|LOCAL] [TEMP|TEMPORARY|UNLOGGED] TABLE
-	// [IF NOT EXISTS] <name>", capturing a bare, quoted, or schema-qualified name
-	// (cleanName normalizes it). The optional qualifiers matter: an UNLOGGED table is
-	// a real persistent table, so missing it would drop it from the defined set and
-	// manufacture false drift; TEMP tables are included for the same completeness-
-	// favoring reason (a write to one must not read as drift).
-	createRe = regexp.MustCompile("(?is)\\bCREATE\\s+(?:(?:GLOBAL|LOCAL)\\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(\"[^\"]+\"|`[^`]+`|[a-zA-Z_][\\w$.]*)")
-	// dropRe matches "DROP TABLE [IF EXISTS] <list>"; scanDDL runs it per statement
-	// (the SQL is split on ';' after stripSQL), so the comma-split list cannot bleed
-	// across a statement boundary even when a DROP lacks a trailing semicolon.
-	dropRe = regexp.MustCompile(`(?is)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^;]+)`)
+	// createRe matches "CREATE [UNLOGGED] TABLE [IF NOT EXISTS] <name>", capturing a
+	// bare, quoted, or schema-qualified name (cleanName normalizes it). UNLOGGED is a
+	// real PERSISTENT table, so it must be in the defined set or a write to it reads as
+	// false drift. TEMP/TEMPORARY (and the GLOBAL/LOCAL that only qualify TEMPORARY)
+	// are deliberately NOT matched: a session-scoped temp table is not persistent
+	// schema, and a migration-created temp table sharing a name with a real, genuinely
+	// missing table would MASK that real drift (the unsound direction — a false
+	// "no drift"). Excluding them costs nothing real (a migration's temp table is gone
+	// after the migration, so no code path can persist-write it) and keeps the
+	// absence claim sound.
+	createRe = regexp.MustCompile("(?is)\\bCREATE\\s+(?:UNLOGGED\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(\"[^\"]+\"|`[^`]+`|[a-zA-Z_][\\w$.]*)")
+	// dropRe matches "DROP TABLE [IF EXISTS] <list>". scanDDL runs it per statement
+	// (splitStatements has already bounded statements on ';' outside quotes), so the
+	// capture can take the rest of the statement (.+) rather than stopping at the next
+	// ';' — which lets a quoted target name containing a ';' (e.g. "gone;too") survive,
+	// while still not bleeding across statements.
+	dropRe = regexp.MustCompile(`(?is)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(.+)`)
 	// alterRenameRe detects "ALTER TABLE ... RENAME TO ...", a table rename the
 	// create/drop scan cannot follow — surfaced as a fail-closed caveat.
 	alterRenameRe = regexp.MustCompile(`(?is)\bALTER\s+TABLE\b.*?\bRENAME\s+TO\b`)
@@ -240,10 +246,40 @@ func stripSQL(s string) string {
 // list cannot swallow a following statement.
 func scanDDL(sqlText string) []ddlOp {
 	var out []ddlOp
-	for _, stmt := range strings.Split(stripSQL(sqlText), ";") {
+	for _, stmt := range splitStatements(stripSQL(sqlText)) {
 		out = append(out, scanStatement(stmt)...)
 	}
 	return out
+}
+
+// splitStatements splits stripped SQL into ';'-delimited statements, treating a
+// semicolon INSIDE a double-quoted identifier as part of the name. stripSQL has
+// already removed comments and string literals, so double quotes are the only
+// quoting left — and they are KEPT because "..." is a table name, not a literal.
+// A plain strings.Split on ';' would break a quoted identifier like "weird;name"
+// across two statements, dropping the CREATE/DROP (false drift) — defeating the very
+// reason stripSQL preserves double quotes.
+func splitStatements(s string) []string {
+	var stmts []string
+	var b strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote // adjacent "" (escaped quote) toggles off-then-on; no ';' can sit between them
+			b.WriteByte(c)
+		case c == ';' && !inQuote:
+			stmts = append(stmts, b.String())
+			b.Reset()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	if b.Len() > 0 {
+		stmts = append(stmts, b.String())
+	}
+	return stmts
 }
 
 // scanStatement recovers the CREATE/DROP table ops within one statement, in
@@ -292,9 +328,11 @@ func splitDropList(list string) []string {
 
 // renameCaveat returns a fail-closed disclosure when a migration renames a table:
 // the renamed name may not appear as a CREATE, so the scan could miss it. Surfacing
-// it is preferable to silently producing (or hiding) drift.
+// it is preferable to silently producing (or hiding) drift. It scans stripSQL output
+// (not raw SQL) so a RENAME inside a comment or string literal does not raise a
+// spurious caveat — consistent with scanDDL.
 func renameCaveat(f MigrationFile) string {
-	if alterRenameRe.MatchString(f.SQL) {
+	if alterRenameRe.MatchString(stripSQL(f.SQL)) {
 		return fmt.Sprintf("%s: ALTER TABLE ... RENAME — a renamed table may be unseen by the CREATE/DROP scan", f.Name)
 	}
 	return ""

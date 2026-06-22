@@ -62,16 +62,45 @@ func TestScanDDLDropWithoutSemicolonDoesNotBleed(t *testing.T) {
 	}
 }
 
-// CREATE UNLOGGED / TEMPORARY TABLE (real persistent / session tables) must be
+// CREATE UNLOGGED TABLE (a real persistent table) and CREATE TABLE AS must be
 // recognized, or they'd be missing from the defined set and manufacture false drift.
-func TestScanDDLRecognizesTableQualifiers(t *testing.T) {
+// CREATE TEMP/TEMPORARY tables are session-scoped and must NOT enter the persistent
+// defined set — a migration temp table sharing a name with a real, genuinely missing
+// table would otherwise MASK that real drift (the unsound direction).
+func TestScanDDLRecognizesUnloggedExcludesTemp(t *testing.T) {
 	sqlText := `
 CREATE UNLOGGED TABLE u (id int);
-CREATE TEMPORARY TABLE t (id int);
+CREATE TEMP TABLE t (id int);
+CREATE TEMPORARY TABLE t2 (id int);
+CREATE GLOBAL TEMPORARY TABLE t3 (id int);
 CREATE TABLE plain AS SELECT 1;
 `
-	if got := ddlNames(scanDDL(sqlText), true); !eqSet(got, []string{"plain", "t", "u"}) {
-		t.Errorf("creates = %v, want [plain t u]", got)
+	if got := ddlNames(scanDDL(sqlText), true); !eqSet(got, []string{"plain", "u"}) {
+		t.Errorf("creates = %v, want [plain u] (UNLOGGED + AS recognized; TEMP/TEMPORARY excluded)", got)
+	}
+}
+
+// A semicolon inside a double-quoted identifier must not split the statement and
+// drop the CREATE/DROP (the quote-aware splitStatements guards this).
+func TestScanDDLQuotedIdentifierWithSemicolon(t *testing.T) {
+	create := scanDDL(`CREATE TABLE "weird;name" (id int);`)
+	if got := ddlNames(create, true); !eqSet(got, []string{"weird;name"}) {
+		t.Errorf("creates = %v, want [weird;name] (';' inside a quoted identifier must not split)", got)
+	}
+	drop := scanDDL(`DROP TABLE "gone;too";`)
+	if got := ddlNames(drop, false); !eqSet(got, []string{"gone;too"}) {
+		t.Errorf("drops = %v, want [gone;too]", got)
+	}
+}
+
+// A RENAME inside a comment must not raise a spurious caveat (renameCaveat scans
+// stripped SQL).
+func TestRenameCaveatIgnoresComments(t *testing.T) {
+	if c := renameCaveat(mig("V3__x.sql", "-- ALTER TABLE a RENAME TO b;\nCREATE TABLE c (id int);")); c != "" {
+		t.Errorf("commented RENAME must not raise a caveat, got %q", c)
+	}
+	if c := renameCaveat(mig("V3__x.sql", "ALTER TABLE a RENAME TO b;")); c == "" {
+		t.Error("a real RENAME must raise a caveat")
 	}
 }
 

@@ -6,7 +6,7 @@
 // func-value argument of each to a concrete function — a synthetic root tagged
 // with its route or topic.
 //
-//	roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (library) exports
+//	roots = mains ∪ HTTP handlers ∪ bus consumers ∪ (library) exported funcs & methods
 //
 // A registration whose handler cannot be resolved to a concrete function is not
 // dropped: it is recorded as a blind spot, mirroring the rest of the static
@@ -33,7 +33,7 @@ const (
 	KindInit     Kind = "init"     // a package initializer (always runs before main)
 	KindHTTP     Kind = "http"     // an HTTP handler registered on a router
 	KindConsumer Kind = "consumer" // a bus consumer registered via subscribe
-	KindExport   Kind = "export"   // an exported function (library fallback)
+	KindExport   Kind = "export"   // an exported function or method of an exported type (library fallback)
 	// KindCallback and KindWorker are DECLARED roots (config entrypoints), asserted
 	// by FQN because call-resolution provably cannot reach them: a callback's
 	// handler value threads through a value-flow chain root discovery runs before
@@ -192,7 +192,7 @@ func chiRegistrars() []Registrar {
 // Discover finds the synthetic roots of prog given the registration hints and any
 // author-declared entrypoints (callbacks and workers call-resolution cannot
 // reach). When the unit has no mains and no registered or declared handlers, it
-// falls back to the unit's exported functions (library mode).
+// falls back to the unit's exported functions and exported methods (library mode).
 func Discover(prog *ssabuild.Program, registrars []Registrar, declared ...DeclaredEntrypoint) *Result {
 	res := &Result{}
 	// Identity is the full (fn, kind, name) triple, not the function alone: two

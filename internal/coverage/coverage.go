@@ -125,6 +125,13 @@ func collectOps(s *ir.CanonicalSpan, into map[string]bool) {
 // behavioral client span carries, plus ok=false for a kind that has NO behavioral
 // vocabulary (object storage / cache today) — for which no span key exists, so the
 // caller must skip it rather than emit a forever-unmatchable key.
+//
+// The kinds handled here MUST track the boundary labeler's emitted ExternalDep kinds
+// (internal/static/boundary) and the behavioral op-key prefixes (internal/canon/opkey):
+// a kind that gains a span vocabulary in opkey but is left in the ok=false default is
+// silently dropped from coverage. When a method-named kind (effectkind.IsMethodNamed)
+// gains behavioral capture, add its case here. Today blob/cache have no span key and
+// are intentionally skipped (over-reporting them as forever-unexercised would be noise).
 func externalKey(d boundary.ExternalDep, op string) (string, bool) {
 	switch d.Kind {
 	case "http":
