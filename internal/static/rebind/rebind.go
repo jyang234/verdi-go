@@ -62,6 +62,9 @@ func Compute(res *analyze.Result) Plan {
 	var plan Plan
 	addSeen := map[[2]string]bool{}
 	remSeen := map[[2]string]bool{}
+	// One memoising impl-finder shared across the pass (interface resolution is call-site-
+	// independent), so the RuntimeTypes scan runs once per (interface, method).
+	finder := reclaim.NewImplFinder(reclaim.ProgOf(res))
 	for _, n := range res.Graph.Nodes {
 		f := n.Func
 		if f == nil {
@@ -85,7 +88,7 @@ func Compute(res *analyze.Result) Plan {
 					// when every one directly invokes it. nil means abstain (keep the union).
 					// The closure must also be confined to THIS call (checked above) so the
 					// removed edges are re-attributed to exactly one command→closure edge.
-					runners := runnersToDeUnion(f.Prog, common, i)
+					runners := runnersToDeUnion(finder, common, i)
 					if len(runners) == 0 {
 						continue
 					}
@@ -133,9 +136,9 @@ func Compute(res *analyze.Result) Plan {
 //     real can-reach edge, and — because no implementation merely stores the parameter —
 //     there is no second invocation site for the closure that the removal would miss. If
 //     any implementation cannot be proven to directly invoke, abstain and keep the union.
-func runnersToDeUnion(prog *ssa.Program, common *ssa.CallCommon, i int) []string {
+func runnersToDeUnion(finder *reclaim.ImplFinder, common *ssa.CallCommon, i int) []string {
 	if common.IsInvoke() {
-		impls := reclaim.Implementations(prog, common)
+		impls := finder.Of(common)
 		if len(impls) == 0 {
 			return nil
 		}

@@ -125,6 +125,9 @@ func serveHTTPReceivers(f *ssa.Function) []ssa.Value {
 func TxClosure(res *analyze.Result) []Edge {
 	var edges []Edge
 	seen := map[[2]string]bool{}
+	// One memoising impl-finder shared across the whole pass: the interface resolution is
+	// call-site-independent, so this scans prog.RuntimeTypes() once per (interface, method).
+	finder := NewImplFinder(progOf(res))
 	for _, n := range res.Graph.Nodes {
 		f := n.Func
 		if f == nil {
@@ -146,7 +149,7 @@ func TxClosure(res *analyze.Result) []Edge {
 					if closure == nil {
 						continue
 					}
-					if !newTxProbe(f.Prog).invokesParam(callee, i) {
+					if !newTxProbe(finder).invokesParam(callee, i) {
 						continue
 					}
 					key := [2]string{n.FQN, closure.RelString(nil)}
@@ -219,17 +222,17 @@ type invKey struct {
 // A revisit returns false — conservatively "not proven via this path", which can only
 // lose precision (miss a reclaimable closure), never soundness (invent an edge); and
 // adding edges is the safe direction regardless. One probe per top-level query keeps the
-// result a pure function of the SSA, so TxClosure is deterministic. prog is the program
-// the SSA belongs to, used to resolve interface-dispatched runner calls to their concrete
-// implementations (the dominant real shape: the unit-of-work is an interface).
+// result a pure function of the SSA, so TxClosure is deterministic. impls resolves
+// interface-dispatched runner calls to their concrete implementations (the dominant real
+// shape: the unit-of-work is an interface), memoised across the whole pass.
 type txProbe struct {
-	prog  *ssa.Program
+	impls *ImplFinder
 	param map[invKey]bool
 	val   map[ssa.Value]bool
 }
 
-func newTxProbe(prog *ssa.Program) *txProbe {
-	return &txProbe{prog: prog, param: map[invKey]bool{}, val: map[ssa.Value]bool{}}
+func newTxProbe(impls *ImplFinder) *txProbe {
+	return &txProbe{impls: impls, param: map[invKey]bool{}, val: map[ssa.Value]bool{}}
 }
 
 // invokesParam reports whether calling fn provably invokes the function value passed as
@@ -349,10 +352,10 @@ func (p *txProbe) allImplsInvokeParam(common *ssa.CallCommon, paramIdx int) bool
 }
 
 // implementations resolves the interface method called by common to the concrete
-// implementations over p.prog. A thin wrapper over the exported Implementations (one
-// source of truth, shared with the rebind de-union pass).
+// implementations, via the pass-shared memoising finder (one source of truth, shared with
+// the rebind de-union pass through reclaim.Implementations / ImplFinder).
 func (p *txProbe) implementations(common *ssa.CallCommon) []*ssa.Function {
-	return Implementations(p.prog, common)
+	return p.impls.Of(common)
 }
 
 // Implementations resolves the interface method called by common to the concrete
@@ -371,6 +374,13 @@ func Implementations(prog *ssa.Program, common *ssa.CallCommon) []*ssa.Function 
 	if !ok {
 		return nil
 	}
+	return implementationsOver(prog, iface, meth)
+}
+
+// implementationsOver is the resolution kernel: the concrete implementations of meth over
+// the types in prog.RuntimeTypes() that implement iface. It is a pure function of
+// (prog, iface, meth) — which is why ImplFinder can memoise it.
+func implementationsOver(prog *ssa.Program, iface *types.Interface, meth *types.Func) []*ssa.Function {
 	var out []*ssa.Function
 	for _, T := range prog.RuntimeTypes() {
 		if !types.Implements(T, iface) {
@@ -385,6 +395,53 @@ func Implementations(prog *ssa.Program, common *ssa.CallCommon) []*ssa.Function 
 		}
 	}
 	return out
+}
+
+// implKey identifies an interface-method resolution. The interface is keyed by its
+// canonical String() (NOT the *types.Interface pointer, which go/types does not intern):
+// structurally identical interfaces resolve identically, so sharing is sound; the method
+// pointer disambiguates same-shaped interfaces that declare different methods. Keying on
+// the method ALONE would be a soundness bug — the SAME *types.Func can be dispatched
+// through different interfaces (an embedding), whose impl sets differ, and an undersized
+// set could wrongly de-union (a false absence).
+type implKey struct {
+	iface string
+	meth  *types.Func
+}
+
+// ImplFinder memoises interface-method → implementations resolution across call sites
+// within ONE pass (the resolution is call-site-independent), so a pass with many
+// interface-dispatched sites does the RuntimeTypes scan once per (interface, method)
+// rather than once per site. A finder is single-pass and not safe for concurrent use; the
+// passes that use it (TxClosure, rebind.Compute) are sequential and deterministic.
+type ImplFinder struct {
+	prog *ssa.Program
+	memo map[implKey][]*ssa.Function
+}
+
+// NewImplFinder returns a finder over prog. prog may be nil (Of then returns nil).
+func NewImplFinder(prog *ssa.Program) *ImplFinder {
+	return &ImplFinder{prog: prog, memo: map[implKey][]*ssa.Function{}}
+}
+
+// Of resolves common's interface method to its concrete implementations, memoised. Returns
+// nil for a non-invoke call (no Method) or when the receiver type is not an interface.
+func (f *ImplFinder) Of(common *ssa.CallCommon) []*ssa.Function {
+	meth := common.Method
+	if meth == nil || f.prog == nil {
+		return nil
+	}
+	iface, ok := common.Value.Type().Underlying().(*types.Interface)
+	if !ok {
+		return nil
+	}
+	k := implKey{iface: iface.String(), meth: meth}
+	if v, ok := f.memo[k]; ok {
+		return v
+	}
+	v := implementationsOver(f.prog, iface, meth)
+	f.memo[k] = v
+	return v
 }
 
 // freeVarLoadInvoked reports whether loading the idx-th free var of fn (a *T captured by
@@ -415,6 +472,20 @@ func referrers(v ssa.Value) []ssa.Instruction {
 		return nil
 	}
 	return *r
+}
+
+// ProgOf returns the SSA program the result's call-graph nodes belong to (every node
+// shares one program), or nil for an empty graph. Shared so the reclaim and rebind passes
+// build their ImplFinder over the same program.
+func ProgOf(res *analyze.Result) *ssa.Program { return progOf(res) }
+
+func progOf(res *analyze.Result) *ssa.Program {
+	for _, n := range res.Graph.Nodes {
+		if n.Func != nil {
+			return n.Func.Prog
+		}
+	}
+	return nil
 }
 
 func anyFlowsTo(recvs []ssa.Value, target *ssa.Function) bool {

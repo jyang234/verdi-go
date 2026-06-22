@@ -263,13 +263,22 @@ func TestAnalyzeBySink_Decomposes(t *testing.T) {
 			}
 			gotFlows[f] = true
 		}
-		// The soundness guard: a NO-FLOW sink requires the aggregate cone to be complete.
-		if sr.Report.Verdict == taint.NoFlow && agg.Escaped {
-			t.Errorf("sink %q reported NO-FLOW while the aggregate cone escaped — a false no-flow", sr.Sink)
-		}
-		// A sink with flows is FLOW; the verdict must match the trichotomy precedence.
-		if want := combine([]taint.Verdict{verdictOfFlows(sr.Report.Flows, agg.Escaped)}); want != sr.Report.Verdict {
-			t.Errorf("sink %q verdict %s, want %s", sr.Sink, sr.Report.Verdict, want)
+		// The verdict must match the OBSERVABLE facts directly (a specification, not a
+		// re-derived verdict helper): a sink with flows is FLOW; with none it is ABSTAIN
+		// iff the aggregate cone escaped (the no-false-no-flow soundness guard), else NO-FLOW.
+		switch {
+		case len(sr.Report.Flows) > 0:
+			if sr.Report.Verdict != taint.Flow {
+				t.Errorf("sink %q has flows but verdict %s, want FLOW", sr.Sink, sr.Report.Verdict)
+			}
+		case agg.Escaped:
+			if sr.Report.Verdict != taint.Abstain {
+				t.Errorf("sink %q no-flow on an escaped cone but verdict %s, want ABSTAIN (a false no-flow otherwise)", sr.Sink, sr.Report.Verdict)
+			}
+		default:
+			if sr.Report.Verdict != taint.NoFlow {
+				t.Errorf("sink %q no-flow on a complete cone but verdict %s, want NO-FLOW", sr.Sink, sr.Report.Verdict)
+			}
 		}
 	}
 	if len(gotFlows) != len(agg.Flows) {
@@ -279,18 +288,6 @@ func TestAnalyzeBySink_Decomposes(t *testing.T) {
 		if !gotFlows[f] {
 			t.Errorf("aggregate flow %+v not present in any per-sink report", f)
 		}
-	}
-}
-
-// verdictOfFlows mirrors the package's internal trichotomy for the test's expectations.
-func verdictOfFlows(flows []taint.Finding, escaped bool) taint.Verdict {
-	switch {
-	case len(flows) > 0:
-		return taint.Flow
-	case escaped:
-		return taint.Abstain
-	default:
-		return taint.NoFlow
 	}
 }
 

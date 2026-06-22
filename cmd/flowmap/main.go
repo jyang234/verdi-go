@@ -507,13 +507,12 @@ func cmdTaint(args []string) error {
 	if err != nil {
 		return err
 	}
-	rep := taint.Analyze(res.Program, tc)
 	// Decompositions ride alongside the aggregate (additive): the aggregate verdict and
 	// --gate are unchanged. by-source answers "which field leaks", by-sink "which sink
 	// receives", and the (source × sink) matrix the full cross — each marginalises back to
-	// the aggregate, so none invents a verdict the aggregate could not prove.
-	bySource := taint.AnalyzeBySource(res.Program, tc)
-	bySink := taint.AnalyzeBySink(res.Program, tc)
+	// the aggregate, so none invents a verdict the aggregate could not prove. Decompose
+	// computes them all from one whole-program prepare + one per-source pass.
+	d := taint.Decompose(res.Program, tc)
 	if *asJSON {
 		// Embed the aggregate Report (its fields promote to top level) and append the
 		// additive decomposition arrays — the Report type itself is unchanged.
@@ -523,10 +522,10 @@ func cmdTaint(args []string) error {
 			BySink          []taint.SinkReport
 			BySourceAndSink []taint.SourceSinkReport
 		}{
-			Report:          rep,
-			BySource:        bySource,
-			BySink:          bySink,
-			BySourceAndSink: taint.AnalyzeBySourceAndSink(res.Program, tc),
+			Report:          d.Aggregate,
+			BySource:        d.BySource,
+			BySink:          d.BySink,
+			BySourceAndSink: d.BySourceAndSink,
 		}
 		b, err := canonjson.Marshal(out)
 		if err != nil {
@@ -536,14 +535,14 @@ func cmdTaint(args []string) error {
 			return err
 		}
 	} else {
-		fmt.Print(taint.Render(dir, rep))
-		fmt.Print(taint.RenderBySource(bySource))
-		fmt.Print(taint.RenderBySink(bySink))
+		fmt.Print(taint.Render(dir, d.Aggregate))
+		fmt.Print(taint.RenderBySource(d.BySource))
+		fmt.Print(taint.RenderBySink(d.BySink))
 	}
 	// --gate fails on a proven could-flow. ABSTAIN stays a disclosure (a strict
 	// fail-closed mode that also fails on abstain is a follow-up).
-	if *gate && rep.Verdict == taint.Flow {
-		return fmt.Errorf("taint: %d source→sink flow(s) found (must-not-flow gate)", len(rep.Flows))
+	if *gate && d.Aggregate.Verdict == taint.Flow {
+		return fmt.Errorf("taint: %d source→sink flow(s) found (must-not-flow gate)", len(d.Aggregate.Flows))
 	}
 	return nil
 }

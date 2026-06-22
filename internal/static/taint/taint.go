@@ -274,9 +274,14 @@ func verdictOf(flows []Finding, escaped bool) Verdict {
 // pins the union identity. The point is that an aggregate FLOW from one source no
 // longer MASKS the others' NO-FLOW/ABSTAIN/FLOW status.
 func AnalyzeBySource(prog *ssabuild.Program, cfg Config) []SourceReport {
-	// Prepare the cfg-independent indexes ONCE and reuse them for every per-source run,
-	// rather than re-walking the whole program (firstPartyFuncs + index) per source.
-	p := prepare(prog)
+	return prepare(prog).bySource(cfg)
+}
+
+// bySource runs the analysis once per declared source over the prepared (shared) indexes
+// and returns the SourceReports in canonical Source order. Factored out so Decompose can
+// run the per-source pass ONCE and derive both the by-source and the (source × sink)
+// decompositions from it.
+func (p *prepared) bySource(cfg Config) []SourceReport {
 	var out []SourceReport
 	for _, fs := range cfg.SourceFuncs {
 		out = append(out, SourceReport{
@@ -297,22 +302,21 @@ func AnalyzeBySource(prog *ssabuild.Program, cfg Config) []SourceReport {
 }
 
 // AnalyzeBySink decomposes the analysis by DECLARED sink: which sink actually receives
-// source data. Unlike AnalyzeBySource it needs only ONE analysis — the FULL-sink aggregate
-// — partitioned by sink. Re-running scoped to a single sink would be UNSOUND-leaning
-// (imprecise): the other declared sinks are typically external, so a tainted value reaching
-// one would ESCAPE (an undeclared external call) instead of being recorded-and-stopped,
-// spuriously downgrading a true NO-FLOW to ABSTAIN. Partitioning the aggregate keeps the
-// real propagation and escape semantics, so a sink with no flow reads NO-FLOW exactly when
-// the whole forward cone was complete — sound, and the per-sink flows union back to the
-// aggregate's. Reported in canonical Sink order.
+// source data. It needs only ONE analysis — the FULL-sink aggregate — PARTITIONED by sink
+// (see BySink). Re-running scoped to a single sink would be UNSOUND-leaning (imprecise):
+// the other declared sinks are typically external, so a tainted value reaching one would
+// ESCAPE (an undeclared external call) instead of being recorded-and-stopped, spuriously
+// downgrading a true NO-FLOW to ABSTAIN. Reported in canonical Sink order.
 func AnalyzeBySink(prog *ssabuild.Program, cfg Config) []SinkReport {
-	return bySink(Analyze(prog, cfg), cfg.Sinks)
+	return BySink(Analyze(prog, cfg), cfg.Sinks)
 }
 
-// bySink partitions an aggregate Report (run against the FULL sink set) into one SinkReport
-// per declared sink. The Escaped/EscapeSites are the aggregate's (sink-independent), so a
-// no-flow sink is NO-FLOW only on a complete cone, else ABSTAIN.
-func bySink(agg Report, sinks []FuncSpec) []SinkReport {
+// BySink partitions an aggregate Report (run against the FULL sink set) into one SinkReport
+// per declared sink — a pure function, NO new analysis. The Escaped/EscapeSites are the
+// aggregate's (sink-independent), so a no-flow sink is NO-FLOW only on a complete cone,
+// else ABSTAIN. Exported so a caller that already holds the aggregate (the CLI's `rep`)
+// derives the per-sink view without re-running Analyze.
+func BySink(agg Report, sinks []FuncSpec) []SinkReport {
 	seen := map[string]bool{}
 	var out []SinkReport
 	for _, s := range sinks {
@@ -342,22 +346,23 @@ func bySink(agg Report, sinks []FuncSpec) []SinkReport {
 // AnalyzeBySourceAndSink computes the full (source × sink) matrix: for every declared
 // source it runs the analysis scoped to that source (against the FULL sink set, so the
 // propagation/escape semantics are correct — see AnalyzeBySink) and partitions that run
-// by sink. Each cell is sound by the conjunction of the two decompositions' arguments,
-// and the cells marginalise back to AnalyzeBySource (collapsing sinks) and AnalyzeBySink
-// (collapsing sources). Reported in canonical (Source, Sink) order.
+// by sink. Reported in canonical (Source, Sink) order.
 func AnalyzeBySourceAndSink(prog *ssabuild.Program, cfg Config) []SourceSinkReport {
-	p := prepare(prog)
+	return BySourceAndSink(AnalyzeBySource(prog, cfg), cfg.Sinks)
+}
+
+// BySourceAndSink derives the (source × sink) matrix from already-computed per-source
+// reports by partitioning each by sink — a pure function, NO new analysis. Each cell is
+// sound by the conjunction of the by-source and by-sink arguments, and the cells
+// marginalise back to the per-source reports (collapsing sinks) and to BySink (collapsing
+// sources). Exported so the CLI builds the matrix from the same per-source runs it already
+// rendered, instead of re-analysing per source.
+func BySourceAndSink(bySource []SourceReport, sinks []FuncSpec) []SourceSinkReport {
 	var out []SourceSinkReport
-	emit := func(source string, scoped Config) {
-		for _, sr := range bySink(p.analyze(scoped), cfg.Sinks) {
-			out = append(out, SourceSinkReport{Source: source, Sink: sr.Sink, Report: sr.Report})
+	for _, sr := range bySource {
+		for _, snk := range BySink(sr.Report, sinks) {
+			out = append(out, SourceSinkReport{Source: sr.Source, Sink: snk.Sink, Report: snk.Report})
 		}
-	}
-	for _, fs := range cfg.SourceFuncs {
-		emit(fs.Pkg+"#"+fs.Name, Config{SourceFuncs: []FuncSpec{fs}, Sinks: cfg.Sinks})
-	}
-	for _, fs := range cfg.SourceFields {
-		emit(fs.Pkg+"#"+fs.Type+"."+fs.Field, Config{SourceFields: []FieldSpec{fs}, Sinks: cfg.Sinks})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Source != out[j].Source {
@@ -366,6 +371,31 @@ func AnalyzeBySourceAndSink(prog *ssabuild.Program, cfg Config) []SourceSinkRepo
 		return out[i].Sink < out[j].Sink
 	})
 	return out
+}
+
+// Decomposition is the complete taint result: the authoritative aggregate (what the gate
+// reads) plus the three decompositions, all derived from ONE prepare + one per-source pass.
+type Decomposition struct {
+	Aggregate       Report
+	BySource        []SourceReport
+	BySink          []SinkReport
+	BySourceAndSink []SourceSinkReport
+}
+
+// Decompose runs the taint analysis and every decomposition from a SINGLE whole-program
+// prepare: one aggregate run (the authoritative gate verdict) and one per-source pass, with
+// by-sink and the matrix derived as pure partitions. It avoids the redundant aggregate and
+// duplicated per-source runs of calling AnalyzeBySink / AnalyzeBySourceAndSink separately.
+func Decompose(prog *ssabuild.Program, cfg Config) Decomposition {
+	p := prepare(prog)
+	agg := p.analyze(cfg)
+	bySource := p.bySource(cfg)
+	return Decomposition{
+		Aggregate:       agg,
+		BySource:        bySource,
+		BySink:          BySink(agg, cfg.Sinks),
+		BySourceAndSink: BySourceAndSink(bySource, cfg.Sinks),
+	}
 }
 
 // seed taints the source call-results and source field reads, returning how many
