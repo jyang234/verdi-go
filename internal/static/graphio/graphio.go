@@ -201,6 +201,21 @@ func (g *Graph) nodeSet() map[string]bool {
 	return nodes
 }
 
+// nodePackageSet returns the set of packages that contributed a node to g — the
+// "rendered component" set. It is the ONE predicate for "this package is visible in
+// the rollup" (a non-empty Node.Package), so the omitted-package anchor reads the same
+// notion of a component the rollup renders (RollupByPackage's per-package node counts
+// have these exact keys). nodeSet keys on FQN; this keys on Package — the C3 altitude.
+func (g *Graph) nodePackageSet() map[string]bool {
+	pkgs := make(map[string]bool, len(g.Nodes))
+	for _, n := range g.Nodes {
+		if n.Package != "" {
+			pkgs[n.Package] = true
+		}
+	}
+	return pkgs
+}
+
 // FrontierSection is the disclosed frontier carried in the graph: the per-site
 // markers, plus an AGGREGATE count of routes whose severance could not be confirmed
 // (the third state — kept a count, not per-route markers, so it stays stable under

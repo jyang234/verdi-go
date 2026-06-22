@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"example.com/eventbussvc/api"
+	"example.com/eventbussvc/audit"
 	"example.com/eventbussvc/bus"
 	"example.com/eventbussvc/participant"
 	"example.com/eventbussvc/store"
@@ -20,6 +21,11 @@ type Server struct {
 	// package declares no functions, so it contributes no call-graph node and the C3
 	// rollup discloses it as an imported-but-omitted no-function package.
 	role participant.Role
+	// rec references the audit package, whose only function is a POINTER-RECEIVER
+	// method nothing calls — so audit contributes no node yet is NOT function-less. It
+	// must NOT be disclosed as omitted: the regression guard that the omitted-package
+	// walk counts *T methods (see audit.Recorder).
+	rec *audit.Recorder
 }
 
 // New returns a Server backed by st.

@@ -1152,9 +1152,12 @@ A disclosure, never a gate — no verdict reads it (tenet 3: say where the map i
   default render is byte-identical to the pre-band flat layout. A view grouping, never
   a gate.
 - `--rollup package --diff BASE` → the component delta, split
-  `{code_added, code_removed, disclosure_added, disclosure_removed}`. **The split
-  is load-bearing:** a `call`/`effect` delta is a real dependency change; a
-  `disclosed` delta is only a *newly-documented* effect (pure instrumentation).
+  `{code_added, code_removed, disclosure_added, disclosure_removed}`, plus
+  `{omitted_added, omitted_removed}` for a types-only internal package that
+  appeared/disappeared (its own bin — it carries no edge, so it is neither a
+  dependency nor a blind-effect change). **The split is load-bearing:** a
+  `call`/`effect` delta is a real dependency change; a `disclosed` delta is only a
+  *newly-documented* effect (pure instrumentation).
   Without the split, annotating a seam reads as an architecture change. The diff
   is symmetric: swapping base and branch flips every `*_added` into the matching
   `*_removed`. Edge identity is `(from, to, kind)` — a re-worded annotation note is

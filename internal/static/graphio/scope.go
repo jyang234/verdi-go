@@ -99,15 +99,11 @@ func omittedPackages(res *analyze.Result, g *Graph) []string {
 			hasFunc[path] = true
 		}
 	}
-	// The rendered components: packages that contributed a node to THIS graph. The
-	// disclosure is anchored to them — a package no component imports is genuinely
-	// unreferenced, not invisibly-imported, so it is never listed.
-	component := map[string]bool{}
-	for _, n := range g.Nodes {
-		if n.Package != "" {
-			component[n.Package] = true
-		}
-	}
+	// The rendered components: packages that contributed a node to THIS graph (the one
+	// "is this package visible in the rollup" predicate, shared with the rollup's own
+	// node-count keys). The disclosure is anchored to them — a package no component
+	// imports is genuinely unreferenced, not invisibly-imported, so it is never listed.
+	component := g.nodePackageSet()
 	omitted := map[string]bool{}
 	for _, p := range res.Program.ServicePkgs {
 		if !component[p.Pkg.Path()] {
@@ -124,15 +120,7 @@ func omittedPackages(res *analyze.Result, g *Graph) []string {
 			omitted[ip] = true
 		}
 	}
-	if len(omitted) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(omitted))
-	for p := range omitted {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
+	return sortedKeys(omitted)
 }
 
 // rootByName returns the root function registered under name (a route or topic).

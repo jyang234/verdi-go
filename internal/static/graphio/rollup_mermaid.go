@@ -108,14 +108,13 @@ func (r *PackageRollup) mermaid(opts RollupMermaidOptions, substrate string) str
 	b.WriteString("    %% dotted into a :::root box = composition-root wiring (DI back-edge, not a domain dependency)\n")
 	if len(r.Omitted) > 0 {
 		// Imported-but-invisible internal packages (types/consts only — no functions,
-		// so no component box). Disclosed as a footnote, abbreviated like the box
-		// labels, so the C3 map does not silently drop a real internal package a
-		// reader would expect to see (tenet 3: say where the view is blind).
-		short := make([]string, len(r.Omitted))
-		for i, pkg := range r.Omitted {
-			short[i] = shortPkg(pkg)
-		}
-		b.WriteString("    %% omitted (imported, no functions): " + comment(strings.Join(short, ", ")) +
+		// so no component box). Disclosed as a footnote with FULL import paths, NOT the
+		// shortPkg box abbreviation: a footnote is a flat comma list with no node id to
+		// disambiguate it, so two packages sharing their last two path segments (e.g.
+		// .../a/internal/model and .../b/internal/model) would collide into one
+		// ambiguous entry — the full path keeps each distinct, which is the whole point
+		// of a disclosure (tenet 3: say where the view is blind, unambiguously).
+		b.WriteString("    %% omitted (imported, no functions): " + comment(strings.Join(r.Omitted, ", ")) +
 			" — types/consts-only internal package(s), absent from the call-graph rollup\n")
 	}
 	if opts.Bands {
@@ -308,6 +307,22 @@ func rollupMermaidDiff(base, branch *PackageRollup, caveats []string, opts Rollu
 	}
 	for _, c := range caveats {
 		b.WriteString("    %% ⚠ " + comment(c) + "\n")
+	}
+	// The imported-but-invisible types-only internal packages that appeared (＋) or
+	// disappeared (−) between base and branch — the same orientation delta the JSON
+	// diff carries (OmittedAdded/Removed), so the diff render does not silently drop a
+	// signal the single-rollup footnote shows. Full paths, for the same no-collision
+	// reason the single-rollup footnote uses them.
+	if added, removed := diffStringSets(base.Omitted, branch.Omitted); len(added) > 0 || len(removed) > 0 {
+		parts := make([]string, 0, len(added)+len(removed))
+		for _, p := range added {
+			parts = append(parts, "＋"+p)
+		}
+		for _, p := range removed {
+			parts = append(parts, "−"+p)
+		}
+		b.WriteString("    %% omitted (imported, no functions) Δ: " + comment(strings.Join(parts, ", ")) +
+			" — types/consts-only internal package(s) added/removed from the rollup\n")
 	}
 	writeLegend(&b)
 

@@ -290,10 +290,11 @@ func TestRollupSurfacesOmittedPackages(t *testing.T) {
 		t.Errorf("rollup Omitted aliases Graph.OmittedPackages — a mutation leaked back")
 	}
 
-	// The footnote names the omitted packages (abbreviated like the box labels) and the
-	// render stays structurally valid Mermaid.
+	// The footnote names the omitted packages by FULL import path (no shortPkg
+	// abbreviation, so two packages sharing a leaf cannot collide) and the render stays
+	// structurally valid Mermaid.
 	m := g.RollupByPackage().Mermaid(RollupMermaidOptions{})
-	if !strings.Contains(m, "omitted (imported, no functions)") || !strings.Contains(m, "svc/participant") {
+	if !strings.Contains(m, "omitted (imported, no functions)") || !strings.Contains(m, "ex.com/svc/participant") {
 		t.Errorf("rollup Mermaid missing the omitted-packages footnote:\n%s", m)
 	}
 	if err := validateMermaid(m); err != nil {
@@ -307,6 +308,70 @@ func TestRollupSurfacesOmittedPackages(t *testing.T) {
 	}
 	if strings.Contains(plain.Mermaid(RollupMermaidOptions{}), "omitted (imported") {
 		t.Errorf("a rollup with no omitted packages must render no footnote")
+	}
+}
+
+// TestRollupOmittedFootnoteFullPathNoCollision pins that two omitted packages sharing
+// their last two path segments stay DISTINCT in the footnote — the reason it emits full
+// import paths rather than the shortPkg box abbreviation (which would collapse both to
+// one ambiguous entry, defeating the disclosure).
+func TestRollupOmittedFootnoteFullPathNoCollision(t *testing.T) {
+	g := rollupSampleGraph()
+	// Both abbreviate (shortPkg) to "internal/model" — the collision the full path avoids.
+	g.OmittedPackages = []string{"ex.com/a/internal/model", "ex.com/b/internal/model"}
+	m := g.RollupByPackage().Mermaid(RollupMermaidOptions{})
+	for _, want := range g.OmittedPackages {
+		if !strings.Contains(m, want) {
+			t.Errorf("omitted footnote dropped the full path %q (collision?):\n%s", want, m)
+		}
+	}
+	if err := validateMermaid(m); err != nil {
+		t.Errorf("rollup Mermaid with colliding omitted packages invalid: %v", err)
+	}
+}
+
+// TestRollupDiffOmittedPackageDelta pins that a types-only internal package added or
+// dropped between base and branch is surfaced in the diff's own OmittedAdded/Removed bin
+// (not the code/disclosure bins, which carry edges), in both the JSON and the Mermaid
+// footnote — so the diff does not silently lose the orientation signal the single rollup
+// discloses. Symmetry: swapping base↔branch flips OmittedAdded↔OmittedRemoved.
+func TestRollupDiffOmittedPackageDelta(t *testing.T) {
+	baseG := rollupSampleGraph()
+	baseG.OmittedPackages = []string{"ex.com/svc/a", "ex.com/svc/shared"}
+	branchG := rollupSampleGraph()
+	branchG.OmittedPackages = []string{"ex.com/svc/shared", "ex.com/svc/c"}
+
+	d := diffRollups(baseG.RollupByPackage(), branchG.RollupByPackage())
+	if !reflect.DeepEqual(d.OmittedAdded, []string{"ex.com/svc/c"}) {
+		t.Errorf("OmittedAdded = %v, want [ex.com/svc/c]", d.OmittedAdded)
+	}
+	if !reflect.DeepEqual(d.OmittedRemoved, []string{"ex.com/svc/a"}) {
+		t.Errorf("OmittedRemoved = %v, want [ex.com/svc/a]", d.OmittedRemoved)
+	}
+	// The omitted delta must NOT leak into the edge bins (a types-only package has no edge).
+	if n := len(d.CodeAdded) + len(d.CodeRemoved) + len(d.DisclosureAdded) + len(d.DisclosureRemoved); n != 0 {
+		t.Errorf("omitted-package delta must not touch the edge bins, got %d edge deltas", n)
+	}
+
+	// Symmetry under base↔branch swap.
+	rev := diffRollups(branchG.RollupByPackage(), baseG.RollupByPackage())
+	if !reflect.DeepEqual(rev.OmittedAdded, d.OmittedRemoved) || !reflect.DeepEqual(rev.OmittedRemoved, d.OmittedAdded) {
+		t.Errorf("omitted delta not symmetric under swap:\nfwd added=%v removed=%v\nrev added=%v removed=%v",
+			d.OmittedAdded, d.OmittedRemoved, rev.OmittedAdded, rev.OmittedRemoved)
+	}
+
+	// The diff Mermaid footnote names both the added (＋) and removed (−) packages, full path.
+	m := RollupMermaidDiff(baseG, branchG, RollupMermaidOptions{})
+	if !strings.Contains(m, "＋ex.com/svc/c") || !strings.Contains(m, "−ex.com/svc/a") {
+		t.Errorf("diff Mermaid missing the omitted-package Δ footnote:\n%s", m)
+	}
+	if err := validateMermaid(m); err != nil {
+		t.Errorf("rollup diff Mermaid with omitted Δ invalid: %v", err)
+	}
+	// An unchanged omitted set produces no delta and no footnote.
+	clean := diffRollups(baseG.RollupByPackage(), baseG.RollupByPackage())
+	if clean.OmittedAdded != nil || clean.OmittedRemoved != nil {
+		t.Errorf("an unchanged omitted set must yield no delta, got added=%v removed=%v", clean.OmittedAdded, clean.OmittedRemoved)
 	}
 }
 
