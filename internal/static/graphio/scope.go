@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	cg "github.com/jyang234/golang-code-graph/internal/static/callgraph"
@@ -60,6 +61,75 @@ func compositionRoots(res *analyze.Result) []string {
 			seen[pkg] = true
 			out = append(out, pkg)
 		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// omittedPackages returns the sorted, deduped import paths of the first-party
+// packages a rendered C3 component IMPORTS but that declare no functions
+// (types/consts only) — the imported-but-invisible internal packages the rollup
+// discloses (see Graph.OmittedPackages). g supplies the component set (its node
+// packages); res supplies the first-party package universe and the direct-import
+// graph. Empty (nil) when every imported first-party package contributes a node.
+//
+// "Has functions" is collected through the COMPLETE walk (ssautil.AllFunctions —
+// methods, *T-receiver methods, wrappers, and nested closures), never pkg.Members:
+// Members omits all methods, so a types-WITH-methods package would be miscounted as
+// function-less and falsely disclosed as omitted (CLAUDE.md: collect functions
+// completely). The walk is restricted to first-party paths as it goes, so it records
+// only the packages this disclosure can name. A package WITH functions is never
+// listed even if all of them are unreachable (no node): that is the frontier/
+// missed-root concern, kept distinct so this footnote stays a structural,
+// algo-independent "this package has nothing to roll up" rather than a reachability
+// claim.
+func omittedPackages(res *analyze.Result, g *Graph) []string {
+	// First-party packages that declare at least one function (any receiver/closure/
+	// wrapper). A first-party package ABSENT from this set is types/consts only. The
+	// synthesized package initializer is EXCLUDED — every package, types-only ones
+	// included, gets an `init`, so counting it would mark nothing function-less — the
+	// same init exclusion firstPartyScope applies so "function" means the same thing
+	// in both places (CLAUDE.md: one notion of a real service function).
+	hasFunc := map[string]bool{}
+	for fn := range ssautil.AllFunctions(res.Program.Prog) {
+		if fn.Pkg == nil || fn.Pkg.Pkg == nil || features.IsPackageInit(fn) {
+			continue
+		}
+		if path := fn.Pkg.Pkg.Path(); res.Program.IsFirstPartyPath(path) {
+			hasFunc[path] = true
+		}
+	}
+	// The rendered components: packages that contributed a node to THIS graph. The
+	// disclosure is anchored to them — a package no component imports is genuinely
+	// unreferenced, not invisibly-imported, so it is never listed.
+	component := map[string]bool{}
+	for _, n := range g.Nodes {
+		if n.Package != "" {
+			component[n.Package] = true
+		}
+	}
+	omitted := map[string]bool{}
+	for _, p := range res.Program.ServicePkgs {
+		if !component[p.Pkg.Path()] {
+			continue // only disclose under a package a reader can see (a rendered component)
+		}
+		for _, imp := range p.Pkg.Imports() {
+			ip := imp.Path()
+			if !res.Program.IsFirstPartyPath(ip) || hasFunc[ip] {
+				// A stdlib/third-party import is not a missing INTERNAL package; a
+				// first-party import that declares functions is either a component or
+				// the (separate) unreachable-code concern — neither belongs here.
+				continue
+			}
+			omitted[ip] = true
+		}
+	}
+	if len(omitted) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(omitted))
+	for p := range omitted {
+		out = append(out, p)
 	}
 	sort.Strings(out)
 	return out

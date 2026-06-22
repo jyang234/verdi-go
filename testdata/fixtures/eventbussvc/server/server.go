@@ -9,16 +9,21 @@ import (
 
 	"example.com/eventbussvc/api"
 	"example.com/eventbussvc/bus"
+	"example.com/eventbussvc/participant"
 	"example.com/eventbussvc/store"
 )
 
 // Server is the StrictServerInterface implementation.
 type Server struct {
 	st *store.Store
+	// role references the types-only participant package so the import is real; that
+	// package declares no functions, so it contributes no call-graph node and the C3
+	// rollup discloses it as an imported-but-omitted no-function package.
+	role participant.Role
 }
 
 // New returns a Server backed by st.
-func New(st *store.Store) *Server { return &Server{st: st} }
+func New(st *store.Store) *Server { return &Server{st: st, role: participant.Publisher} }
 
 func (s *Server) CreateEventTypeTemplate(ctx context.Context, _ api.CreateEventTypeTemplateRequestObject) (api.CreateEventTypeTemplateResponseObject, error) {
 	bus.Publish("eventtype.created")

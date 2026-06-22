@@ -107,6 +107,30 @@ type Graph struct {
 	// only (the rollup that consumes it refuses an --entry scope).
 	CompositionRoots []string `json:"composition_roots,omitempty"`
 
+	// OmittedPackages are the first-party packages a rendered C3 component IMPORTS
+	// but that declare NO functions (types/consts only) — so they contribute no
+	// call-graph node and are absent from the component rollup, with no signal a
+	// reader orienting on the architecture would otherwise see they exist. The C3
+	// rollup discloses them as a footnote (tenet 3: say where the map is blind
+	// explicitly), so a real internal domain package — imported by the command and
+	// the api/app layers but types-only — is not silently dropped from the
+	// orientation view. Confined to first-party imports OF a component: an absent
+	// stdlib/third-party dep is expected, and a first-party package no component
+	// imports is genuinely unreferenced (e.g. a co-located client SDK the service
+	// binary does not link), so neither is listed — only an imported-but-invisible
+	// internal package is. "No functions" is a STRUCTURAL fact (collected through the
+	// complete ssautil.AllFunctions walk, so a methods-only package is not miscounted
+	// as function-less), independent of the call-graph algo — distinct from a package
+	// whose functions are merely UNREACHABLE (that is the frontier/missed-root
+	// concern, not this one), which is why a has-functions package never appears here.
+	// Disclosure-only — same trust class as CompositionRoots: no verdict, count,
+	// edge, tier, or reachability computation reads it. A whole-program fact like
+	// Entrypoints: it rides unscoped builds only (a scoped --entry view prunes
+	// components, so the imported-by-a-component set would be a scoping artifact).
+	// Sorted, deduped, and omitted when empty, so a service with no types-only
+	// internal package emits a byte-identical graph.
+	OmittedPackages []string `json:"omitted_packages,omitempty"`
+
 	// EffectOrder is the partial-effect disclosure (incident-triage plan IT-3):
 	// for each function holding both a committed external effect (bus publish,
 	// DB mutation) and a fallible call, whether the effect can — or always
@@ -655,6 +679,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 	// attribution-loss signal would be a scoping artifact, not a finding. Gate it on
 	// the unscoped build, the same convention those sections use.
 	if entry == "" {
+		g.OmittedPackages = omittedPackages(res, g)
 		g.reclaimEdges = reclaimEdges(res, g.nodeSet())
 		g.Frontier = frontierSection(g)
 	}

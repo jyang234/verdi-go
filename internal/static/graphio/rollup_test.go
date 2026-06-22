@@ -270,6 +270,46 @@ func TestRollupDeterministic(t *testing.T) {
 	}
 }
 
+// TestRollupSurfacesOmittedPackages pins that the imported-but-invisible internal
+// packages flowmap records on the graph (Graph.OmittedPackages) are surfaced verbatim
+// into the rollup model and disclosed as a Mermaid footnote — the orientation gap the
+// C3 view would otherwise leave silent (tenet 3). It also pins that the surfacing does
+// NOT alias the graph slice (a defensive copy) and that an empty set stays nil so the
+// JSON field is dropped.
+func TestRollupSurfacesOmittedPackages(t *testing.T) {
+	g := rollupSampleGraph()
+	g.OmittedPackages = []string{"ex.com/svc/participant", "ex.com/svc/roles"}
+	r := g.RollupByPackage()
+
+	if !reflect.DeepEqual(r.Omitted, g.OmittedPackages) {
+		t.Errorf("rollup Omitted = %v, want %v", r.Omitted, g.OmittedPackages)
+	}
+	// The copy must not alias the graph's slice (mutating one must not move the other).
+	r.Omitted[0] = "MUTATED"
+	if g.OmittedPackages[0] == "MUTATED" {
+		t.Errorf("rollup Omitted aliases Graph.OmittedPackages — a mutation leaked back")
+	}
+
+	// The footnote names the omitted packages (abbreviated like the box labels) and the
+	// render stays structurally valid Mermaid.
+	m := g.RollupByPackage().Mermaid(RollupMermaidOptions{})
+	if !strings.Contains(m, "omitted (imported, no functions)") || !strings.Contains(m, "svc/participant") {
+		t.Errorf("rollup Mermaid missing the omitted-packages footnote:\n%s", m)
+	}
+	if err := validateMermaid(m); err != nil {
+		t.Errorf("rollup Mermaid with omitted footnote invalid: %v", err)
+	}
+
+	// An empty set stays nil (so json omitempty drops the field) and renders no footnote.
+	plain := rollupSampleGraph().RollupByPackage()
+	if plain.Omitted != nil {
+		t.Errorf("a graph with no omitted packages must carry Omitted=nil, got %v", plain.Omitted)
+	}
+	if strings.Contains(plain.Mermaid(RollupMermaidOptions{}), "omitted (imported") {
+		t.Errorf("a rollup with no omitted packages must render no footnote")
+	}
+}
+
 // TestRollupDiffSplitAndSymmetry pins the code-vs-disclosure split and the symmetry
 // invariant: swapping base and branch must flip every Added into the matching Removed.
 // The split is what keeps the diff honest — a newly-documented blind effect (disclosure)

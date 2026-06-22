@@ -75,6 +75,14 @@ const RollupRoot = "composition_root"
 type PackageRollup struct {
 	Components []Component  `json:"components"`
 	Edges      []RollupEdge `json:"edges"`
+	// Omitted are the first-party packages a component IMPORTS but that declare no
+	// functions (types/consts only), so they contribute no node and no component box
+	// — disclosed (read verbatim from Graph.OmittedPackages) so the C3 map names the
+	// imported-but-invisible internal packages instead of silently dropping them
+	// (tenet 3). Full import paths (the stable identity, like Component.Package);
+	// the Mermaid render abbreviates them for the footnote. Sorted and omitted when
+	// empty. Disclosure-only — never an edge, a node, or a verdict input.
+	Omitted []string `json:"omitted,omitempty"`
 }
 
 // Component is one first-party Go package and how many graph nodes rolled up into it.
@@ -259,7 +267,14 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	}
 	sort.Slice(edges, func(i, j int) bool { return rollupEdgeLess(edges[i], edges[j]) })
 
-	return &PackageRollup{Components: components, Edges: edges}
+	// The imported-but-invisible internal packages ride verbatim from the graph (a
+	// pure copy — the build already computed them); a defensive clone keeps the rollup
+	// from aliasing the graph's slice. Empty stays nil so omitempty drops the field.
+	var omitted []string
+	if len(g.OmittedPackages) > 0 {
+		omitted = append([]string(nil), g.OmittedPackages...)
+	}
+	return &PackageRollup{Components: components, Edges: edges, Omitted: omitted}
 }
 
 // rollupEdgeLess is the total intrinsic order for component edges: From, then To, then

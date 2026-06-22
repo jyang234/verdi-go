@@ -106,6 +106,18 @@ func (r *PackageRollup) mermaid(opts RollupMermaidOptions, substrate string) str
 	}
 	b.WriteString("    %% solid = resolved call/effect (code); dashed = disclosed effect (blind, documented)\n")
 	b.WriteString("    %% dotted into a :::root box = composition-root wiring (DI back-edge, not a domain dependency)\n")
+	if len(r.Omitted) > 0 {
+		// Imported-but-invisible internal packages (types/consts only — no functions,
+		// so no component box). Disclosed as a footnote, abbreviated like the box
+		// labels, so the C3 map does not silently drop a real internal package a
+		// reader would expect to see (tenet 3: say where the view is blind).
+		short := make([]string, len(r.Omitted))
+		for i, pkg := range r.Omitted {
+			short[i] = shortPkg(pkg)
+		}
+		b.WriteString("    %% omitted (imported, no functions): " + comment(strings.Join(short, ", ")) +
+			" — types/consts-only internal package(s), absent from the call-graph rollup\n")
+	}
 	if opts.Bands {
 		b.WriteString("    %% boxes grouped into architectural BANDS (semantic role read from the package name; a view, never a gate) — the composition root is drawn outside the bands\n")
 	}
