@@ -1127,7 +1127,20 @@ call-rank the `layering` policy gates on. A band is a **view, never a gate** —
 computes no verdict, which is what makes a name heuristic acceptable here. The
 composition root is left bandless (it is named by `role`, a graph fact).
 
-- `--rollup package` alone → the rollup JSON (`{components[], edges[]}`).
+A component box is one *package with functions*. A package that contributes only
+**types/consts** (no functions → no call-graph node) cannot appear as a box, so a real
+internal package — imported by the command and the api/app layers but function-less —
+would otherwise vanish from the orientation view with no signal it exists. The rollup
+discloses these as an **`omitted`** list (`omitempty`): the first-party packages a
+rendered component *imports* but that declare no functions. It is anchored to a real
+import (a package no component imports is genuinely unreferenced — e.g. a co-located
+client SDK the binary does not link — and is not listed) and is a structural,
+algo-independent fact (a package whose functions are merely *unreachable* is the
+frontier concern, not this one — it has functions, so it never appears here). The
+Mermaid render names them in a footnote (`%% omitted (imported, no functions): …`).
+A disclosure, never a gate — no verdict reads it (tenet 3: say where the map is blind).
+
+- `--rollup package` alone → the rollup JSON (`{components[], edges[], omitted[]}`).
 - `--rollup package --mermaid` → the component flowchart (solid vs dashed). Its header
   carries a **substrate** line (`algo` + reclaimer footprint) self-certifying which build
   the rollup came from — a rollup's fidelity is build-flag-dependent (an un-reclaimed
@@ -1139,9 +1152,12 @@ composition root is left bandless (it is named by `role`, a graph fact).
   default render is byte-identical to the pre-band flat layout. A view grouping, never
   a gate.
 - `--rollup package --diff BASE` → the component delta, split
-  `{code_added, code_removed, disclosure_added, disclosure_removed}`. **The split
-  is load-bearing:** a `call`/`effect` delta is a real dependency change; a
-  `disclosed` delta is only a *newly-documented* effect (pure instrumentation).
+  `{code_added, code_removed, disclosure_added, disclosure_removed}`, plus
+  `{omitted_added, omitted_removed}` for a types-only internal package that
+  appeared/disappeared (its own bin — it carries no edge, so it is neither a
+  dependency nor a blind-effect change). **The split is load-bearing:** a
+  `call`/`effect` delta is a real dependency change; a `disclosed` delta is only a
+  *newly-documented* effect (pure instrumentation).
   Without the split, annotating a seam reads as an architecture change. The diff
   is symmetric: swapping base and branch flips every `*_added` into the matching
   `*_removed`. Edge identity is `(from, to, kind)` — a re-worded annotation note is

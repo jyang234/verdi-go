@@ -20,6 +20,7 @@ package graphio
 //     newly-DOCUMENTED effect, not new architecture.
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -75,6 +76,14 @@ const RollupRoot = "composition_root"
 type PackageRollup struct {
 	Components []Component  `json:"components"`
 	Edges      []RollupEdge `json:"edges"`
+	// Omitted are the first-party packages a component IMPORTS but that declare no
+	// functions (types/consts only), so they contribute no node and no component box
+	// — disclosed (read verbatim from Graph.OmittedPackages) so the C3 map names the
+	// imported-but-invisible internal packages instead of silently dropping them
+	// (tenet 3). Full import paths (the stable identity, like Component.Package);
+	// the Mermaid render abbreviates them for the footnote. Sorted and omitted when
+	// empty. Disclosure-only — never an edge, a node, or a verdict input.
+	Omitted []string `json:"omitted,omitempty"`
 }
 
 // Component is one first-party Go package and how many graph nodes rolled up into it.
@@ -259,7 +268,11 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	}
 	sort.Slice(edges, func(i, j int) bool { return rollupEdgeLess(edges[i], edges[j]) })
 
-	return &PackageRollup{Components: components, Edges: edges}
+	// The imported-but-invisible internal packages ride verbatim from the graph (the
+	// build already computed them, sorted); slices.Clone keeps the rollup from aliasing
+	// the graph's slice and returns nil for a nil input, so an empty set stays nil and
+	// omitempty drops the field.
+	return &PackageRollup{Components: components, Edges: edges, Omitted: slices.Clone(g.OmittedPackages)}
 }
 
 // rollupEdgeLess is the total intrinsic order for component edges: From, then To, then
@@ -333,15 +346,27 @@ func lastSegment(importPath string) string {
 	return importPath
 }
 
-// joinSortedSet joins a set's members in lexical order (an intrinsic, run-independent
-// tie-break, never map-iteration order) with sep — so an aggregated note is byte-stable.
-func joinSortedSet(set map[string]bool, sep string) string {
+// sortedKeys returns a set's members in lexical order — the ONE home of the "collect a
+// string set's members, sort intrinsically" idiom (CLAUDE.md: one source of truth), so
+// the byte-stable orderings omittedPackages and joinSortedSet emit cannot drift on a
+// future tie-break refinement. Returns nil for an empty/nil set (so callers relying on
+// nil-when-empty, e.g. an omitempty field, keep that contract).
+func sortedKeys(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
 	out := make([]string, 0, len(set))
 	for s := range set {
 		out = append(out, s)
 	}
 	sort.Strings(out)
-	return strings.Join(out, sep)
+	return out
+}
+
+// joinSortedSet joins a set's members in lexical order (an intrinsic, run-independent
+// tie-break, never map-iteration order) with sep — so an aggregated note is byte-stable.
+func joinSortedSet(set map[string]bool, sep string) string {
+	return strings.Join(sortedKeys(set), sep)
 }
 
 // PackageRollupDiff is the component delta between two rollups, split THREE ways so a
@@ -363,6 +388,15 @@ type PackageRollupDiff struct {
 	WiringRemoved     []RollupEdge `json:"wiring_removed"`
 	DisclosureAdded   []RollupEdge `json:"disclosure_added"`
 	DisclosureRemoved []RollupEdge `json:"disclosure_removed"`
+	// OmittedAdded/Removed are the imported-but-invisible types-only internal packages
+	// (PackageRollup.Omitted) that appeared / disappeared between base and branch — so a
+	// diff surfaces the same orientation signal the single rollup discloses instead of
+	// silently dropping it. Their OWN bin, never the code/disclosure ones: a types-only
+	// package carries no edge, so an added/dropped one is neither a dependency change nor
+	// a blind-effect change. Disclosure-only (no verdict reads it), sorted, omitted when
+	// unchanged, and symmetric under base↔branch swap like every other delta list.
+	OmittedAdded   []string `json:"omitted_added,omitempty"`
+	OmittedRemoved []string `json:"omitted_removed,omitempty"`
 	// Caveats discloses a base↔branch SUBSTRATE skew (empty base, --algo/tool/reclaimer
 	// mismatch, or a base/branch built before per-node package) that would paint a
 	// non-code difference as a code/disclosure delta. Same honesty channel the
@@ -419,7 +453,37 @@ func diffRollups(base, branch *PackageRollup) *PackageRollupDiff {
 	sortRollupEdges(d.WiringRemoved)
 	sortRollupEdges(d.DisclosureAdded)
 	sortRollupEdges(d.DisclosureRemoved)
+	d.OmittedAdded, d.OmittedRemoved = diffStringSets(base.Omitted, branch.Omitted)
 	return d
+}
+
+// diffStringSets returns the members ADDED (in branch, not base) and REMOVED (in base,
+// not branch), each sorted, nil when empty (so an unchanged set drops from the diff
+// JSON via omitempty). Symmetric by construction: swapping base and branch swaps added
+// and removed. Used for the omitted-package delta, where identity is the full import
+// path (the two inputs are already sorted+deduped, so this only partitions them).
+func diffStringSets(base, branch []string) (added, removed []string) {
+	baseSet := make(map[string]bool, len(base))
+	for _, s := range base {
+		baseSet[s] = true
+	}
+	branchSet := make(map[string]bool, len(branch))
+	for _, s := range branch {
+		branchSet[s] = true
+	}
+	for _, s := range branch {
+		if !baseSet[s] {
+			added = append(added, s)
+		}
+	}
+	for _, s := range base {
+		if !branchSet[s] {
+			removed = append(removed, s)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
 }
 
 // rollupDiffCaveats is the base↔branch skew disclosure for a rollup diff: the call-graph

@@ -82,6 +82,15 @@ type Graph struct {
 	// the heuristic.
 	CompositionRoots []string `json:"composition_roots,omitempty"`
 
+	// OmittedPackages are the first-party packages a C3 component imports but that
+	// declare no functions (types/consts only) — the imported-but-invisible internal
+	// packages flowmap's component rollup discloses. groundwork decodes it on its own
+	// side of the trust boundary — DisallowUnknownFields would reject the graph
+	// otherwise — and round-trips it. A disclosure: no verdict, count, or reachability
+	// computation reads it. Omitted for a service with no types-only internal package,
+	// or a graph from a pre-field flowmap.
+	OmittedPackages []string `json:"omitted_packages,omitempty"`
+
 	// Frontier is the producer's classification of where static reachability stops
 	// (flowmap's frontier section). groundwork decodes it on its own side of the
 	// trust boundary — like every other graph-carried section — so a consumer can

@@ -2,7 +2,9 @@ package graphio_test
 
 import (
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
@@ -109,5 +111,103 @@ func TestRollupCompositionRootWiringEndToEnd(t *testing.T) {
 	}
 	if !sawServerStore || !sawStoreDB || !sawServerBus {
 		t.Errorf("expected the domain effect surface (server->store call, store->db effect, server->bus effect); rollup edges = %+v", r.Edges)
+	}
+}
+
+// TestRollupDisclosesOmittedPackageEndToEnd is the end-to-end guard for the
+// imported-but-omitted no-function disclosure (the C3 orientation gap from the field
+// report), on real analyzer output. The eventbussvc fixture's `participant` package is
+// types/consts only (no functions, so no call-graph node) yet IMPORTED by the `server`
+// component — exactly the internal domain package a reader orienting on the architecture
+// would otherwise have no signal exists. It pins that:
+//   - `participant` is disclosed in the rollup's Omitted list, with its full import path;
+//   - the Mermaid render carries the footnote naming it;
+//   - the disclosure is anchored to a real import: a package no component imports (and
+//     every function-bearing component) is NOT listed;
+//   - the omitted set is deterministic across two independent builds (a sorted path, per
+//     CLAUDE.md's determinism discipline for a new ordering surface).
+func TestRollupDisclosesOmittedPackageEndToEnd(t *testing.T) {
+	const participant = "example.com/eventbussvc/participant"
+
+	res, err := analyze.Analyze(eventbussvcDir())
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	g, err := graphio.Build(res, "")
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+	r := g.RollupByPackage()
+
+	found := false
+	for _, p := range r.Omitted {
+		if p == participant {
+			found = true
+		}
+		// A function-bearing component must never be listed as omitted.
+		for _, c := range r.Components {
+			if p == c.Package {
+				t.Errorf("a rendered component %q must not appear as an omitted package", p)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("types-only imported package %q missing from rollup Omitted = %v", participant, r.Omitted)
+	}
+
+	// The footnote names it by full import path.
+	m := g.RollupMermaid(graphio.RollupMermaidOptions{})
+	if !strings.Contains(m, "omitted (imported, no functions)") || !strings.Contains(m, participant) {
+		t.Errorf("rollup Mermaid missing the omitted-packages footnote for %q:\n%s", participant, m)
+	}
+
+	// Determinism: a second independent build yields the same omitted set.
+	res2, err := analyze.Analyze(eventbussvcDir())
+	if err != nil {
+		t.Fatalf("analyze (2): %v", err)
+	}
+	g2, err := graphio.Build(res2, "")
+	if err != nil {
+		t.Fatalf("build graph (2): %v", err)
+	}
+	if !reflect.DeepEqual(g2.RollupByPackage().Omitted, r.Omitted) {
+		t.Errorf("omitted set not deterministic across builds:\n%v\nvs\n%v", g2.RollupByPackage().Omitted, r.Omitted)
+	}
+}
+
+// TestRollupOmittedCountsPointerReceiverMethods is the sound-scope regression guard
+// (CLAUDE.md "collect functions completely"): the omitted-package walk must count
+// POINTER-RECEIVER (*T) methods — the dominant Go idiom that pkg.Members and
+// MethodSet(T) both omit — or it would miscount a methods-only package as function-less
+// and FALSELY disclose it as omitted. The eventbussvc `audit` package declares only a
+// *T method (never called, so it contributes no node) and is imported by the server
+// component, so it is precisely the function-BEARING package a methods-omitting walk
+// would wrongly list. It must be ABSENT from Omitted. A revert to pkg.Members/
+// MethodSet(T) flips this test red instead of shipping the unsound disclosure silently.
+func TestRollupOmittedCountsPointerReceiverMethods(t *testing.T) {
+	const audit = "example.com/eventbussvc/audit"
+
+	res, err := analyze.Analyze(eventbussvcDir())
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	g, err := graphio.Build(res, "")
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+	r := g.RollupByPackage()
+
+	for _, p := range r.Omitted {
+		if p == audit {
+			t.Errorf("methods-only package %q (only a *T method) was FALSELY disclosed as omitted — the walk dropped pointer-receiver methods", audit)
+		}
+	}
+	// Test-setup sanity: the *T method must stay unreachable, so audit contributes no
+	// node and is not a component box either (the disclosure correctly says nothing about
+	// it). If this fails, the fixture started calling the method — pick a fresh one.
+	for _, c := range r.Components {
+		if c.Package == audit {
+			t.Fatalf("test setup: %q unexpectedly has a node; its *T method must stay uncalled", audit)
+		}
 	}
 }
