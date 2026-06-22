@@ -503,10 +503,18 @@ func firstPartyFuncs(prog *ssabuild.Program) []*ssa.Function {
 			case *ssa.Function:
 				add(x)
 			case *ssa.Type:
-				// Methods of named types in this package.
-				ms := prog.Prog.MethodSets.MethodSet(x.Type())
-				for i := 0; i < ms.Len(); i++ {
-					add(prog.Prog.MethodValue(ms.At(i)))
+				// Walk BOTH the value and pointer method sets: MethodSet(T) omits
+				// pointer-receiver (*T) methods by Go's method-set rules, so a source/
+				// sink read located only inside a *T method would otherwise never be
+				// indexed or seeded — yielding a false NO-FLOW (sources seeded: 0), the
+				// one verdict this analysis must never emit. add() dedups the overlap
+				// (a value-receiver method is in both sets). Pointer receivers are the
+				// dominant Go idiom, so this is the common case, not an edge case.
+				for _, recv := range []types.Type{x.Type(), types.NewPointer(x.Type())} {
+					ms := prog.Prog.MethodSets.MethodSet(recv)
+					for i := 0; i < ms.Len(); i++ {
+						add(prog.Prog.MethodValue(ms.At(i)))
+					}
 				}
 			}
 		}

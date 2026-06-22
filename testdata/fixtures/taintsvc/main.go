@@ -81,6 +81,16 @@ func caseSliceIndex() {
 	sinkSlice(xs[0])
 }
 
+// 9. Pointer-receiver source: a sensitive field read located ONLY inside a *T method.
+// MethodSet(T) omits pointer-receiver methods, so firstPartyFuncs must walk BOTH the
+// value and pointer method sets or this read is never indexed/seeded — a false
+// NO-FLOW, the verdict this analysis must never emit. Truth = FLOW.
+type PtrCarrier struct{ Token string }
+
+func sinkPtr(string) {}
+
+func (p *PtrCarrier) leak() { sinkPtr(p.Token) }
+
 func main() {
 	caseDirect()
 	caseRelay()
@@ -90,4 +100,5 @@ func main() {
 	caseMap()
 	caseClean()
 	caseSliceIndex()
+	(&PtrCarrier{}).leak()
 }
