@@ -504,8 +504,18 @@ func cmdTaint(args []string) error {
 		return err
 	}
 	rep := taint.Analyze(res.Program, tc)
+	// Per-source decomposition rides alongside the aggregate (additive): the aggregate
+	// verdict and --gate are unchanged, but one source's FLOW no longer masks the
+	// others' status. AnalyzeBySource's per-source runs union back to exactly `rep`.
+	bySource := taint.AnalyzeBySource(res.Program, tc)
 	if *asJSON {
-		b, err := canonjson.Marshal(rep)
+		// Embed the aggregate Report (its fields promote to top level) and append the
+		// additive BySource array — the Report type itself is unchanged.
+		out := struct {
+			taint.Report
+			BySource []taint.SourceReport
+		}{Report: rep, BySource: bySource}
+		b, err := canonjson.Marshal(out)
 		if err != nil {
 			return err
 		}
@@ -514,6 +524,7 @@ func cmdTaint(args []string) error {
 		}
 	} else {
 		fmt.Print(taint.Render(dir, rep))
+		fmt.Print(taint.RenderBySource(bySource))
 	}
 	// --gate fails on a proven could-flow. ABSTAIN stays a disclosure (a strict
 	// fail-closed mode that also fails on abstain is a follow-up).

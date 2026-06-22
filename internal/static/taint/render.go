@@ -29,3 +29,36 @@ func Render(name string, r Report) string {
 	}
 	return b.String()
 }
+
+// RenderBySource formats the per-source decomposition (AnalyzeBySource) as an additive
+// block: one line per declared source with its INDEPENDENT verdict, so one source's
+// FLOW does not mask another's NO-FLOW / ABSTAIN / FLOW. A pure function of the
+// reports, so it is deterministic. Returns "" when there are no sources (nothing to add).
+func RenderBySource(reports []SourceReport) string {
+	if len(reports) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  by source (independent — one source's FLOW does not mask another):\n")
+	for _, sr := range reports {
+		switch sr.Report.Verdict {
+		case Flow:
+			fmt.Fprintf(&b, "    %-8s %s  → %s\n", sr.Report.Verdict, sr.Source, flowTargets(sr.Report.Flows))
+		case Abstain:
+			fmt.Fprintf(&b, "    %-8s %s  escaped at %s\n", sr.Report.Verdict, sr.Source, strings.Join(sr.Report.EscapeSites, ", "))
+		default: // NoFlow
+			fmt.Fprintf(&b, "    %-8s %s\n", sr.Report.Verdict, sr.Source)
+		}
+	}
+	return b.String()
+}
+
+// flowTargets renders a source's FLOW findings as "sink at site" entries, joined — the
+// "which field reaches which sink where" detail the aggregate verdict collapses.
+func flowTargets(flows []Finding) string {
+	parts := make([]string, 0, len(flows))
+	for _, f := range flows {
+		parts = append(parts, fmt.Sprintf("%s at %s", f.Sink, f.Site))
+	}
+	return strings.Join(parts, "; ")
+}

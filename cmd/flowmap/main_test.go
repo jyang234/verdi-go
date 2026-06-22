@@ -174,6 +174,49 @@ func fixtureDir() string {
 	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "fixtures", "loansvc")
 }
 
+// TestTaintRendersPerSourceDecomposition pins the B1 CLI surface: `flowmap taint`
+// emits the additive "by source" block alongside the aggregate, so an aggregate FLOW
+// no longer masks the other declared sources. taintsvc declares a FLOW source, an
+// ABSTAIN source (sourceMap escapes into a map) and a NO-FLOW source (sourceClean) at
+// once, so all three per-source verdicts must appear under one aggregate FLOW.
+func TestTaintRendersPerSourceDecomposition(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	svc := filepath.Join(filepath.Dir(file), "..", "..", "testdata", "fixtures", "taintsvc")
+
+	out := captureStdout(t, func() {
+		if err := run([]string{"taint", svc}); err != nil {
+			t.Fatalf("taint: %v", err)
+		}
+	})
+	if !strings.Contains(out, "by source") {
+		t.Fatalf("taint must emit the per-source block:\n%s", out)
+	}
+	for _, want := range []string{
+		"FLOW     example.com/taintsvc#sourceDirect",
+		"ABSTAIN  example.com/taintsvc#sourceMap",
+		"NO-FLOW  example.com/taintsvc#sourceClean",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("per-source block missing %q:\n%s", want, out)
+		}
+	}
+
+	// The decomposition is additive: the aggregate verdict is unchanged (still FLOW).
+	if !strings.Contains(out, "verdict: FLOW") {
+		t.Errorf("aggregate verdict must be unchanged (FLOW):\n%s", out)
+	}
+
+	// --json carries the same decomposition as an additive BySource array.
+	jsonOut := captureStdout(t, func() {
+		if err := run([]string{"taint", "--json", svc}); err != nil {
+			t.Fatalf("taint --json: %v", err)
+		}
+	})
+	if !strings.Contains(jsonOut, `"BySource"`) {
+		t.Errorf("--json must include the additive BySource array:\n%s", jsonOut)
+	}
+}
+
 // silenceStdout redirects os.Stdout for the duration of the test so a command's
 // JSON output does not pollute the test log.
 func silenceStdout(t *testing.T) {

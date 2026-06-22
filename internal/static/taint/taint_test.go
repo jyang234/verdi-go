@@ -131,6 +131,84 @@ func TestSliceIndexEscapesToAbstain(t *testing.T) {
 	}
 }
 
+// AnalyzeBySource must DECOMPOSE without changing the aggregate: the per-source runs
+// union back to exactly Analyze(all sources). This is the soundness contract of the
+// decomposition (taint is a monotone per-value union) — decomposing must not invent a
+// flow/escape the aggregate lacks, nor drop one it has. The fixture mixes a FLOW
+// source (sourceDirect), an ABSTAIN source (sourceMap) and a NO-FLOW source
+// (sourceClean): the aggregate is FLOW and would MASK the other two, which is exactly
+// what per-source reporting recovers.
+func TestAnalyzeBySource_Decomposes(t *testing.T) {
+	cfg := taint.Config{
+		SourceFuncs:  []taint.FuncSpec{src("sourceDirect"), src("sourceMap"), src("sourceClean")},
+		SourceFields: []taint.FieldSpec{{Pkg: pkg, Type: "Recipient", Field: "Secret"}},
+		Sinks:        []taint.FuncSpec{sink("sinkDirect"), sink("sinkMap"), sink("sinkClean"), sink("sinkFieldRead")},
+	}
+	prog := analyzeFixture(t).Program
+	agg := taint.Analyze(prog, cfg)
+	per := taint.AnalyzeBySource(prog, cfg)
+
+	// One report per declared source, in canonical (sorted) Source order.
+	if len(per) != len(cfg.SourceFuncs)+len(cfg.SourceFields) {
+		t.Fatalf("want %d per-source reports, got %d", len(cfg.SourceFuncs)+len(cfg.SourceFields), len(per))
+	}
+	for i := 1; i < len(per); i++ {
+		if per[i-1].Source >= per[i].Source {
+			t.Errorf("per-source reports not in canonical order: %q before %q", per[i-1].Source, per[i].Source)
+		}
+	}
+
+	// Union identity: the per-source flows / escape sites / seed counts / escaped flag
+	// must reconstruct the aggregate exactly — nothing invented, nothing dropped.
+	gotFlows := map[taint.Finding]bool{}
+	gotSites := map[string]bool{}
+	escaped, seeds := false, 0
+	for _, sr := range per {
+		for _, f := range sr.Report.Flows {
+			gotFlows[f] = true
+		}
+		for _, s := range sr.Report.EscapeSites {
+			gotSites[s] = true
+		}
+		escaped = escaped || sr.Report.Escaped
+		seeds += sr.Report.Sources
+	}
+	if escaped != agg.Escaped {
+		t.Errorf("union escaped = %v, aggregate = %v", escaped, agg.Escaped)
+	}
+	if seeds != agg.Sources {
+		t.Errorf("sum of per-source seeds = %d, aggregate = %d", seeds, agg.Sources)
+	}
+	if len(gotFlows) != len(agg.Flows) {
+		t.Errorf("union flows = %d, aggregate = %d", len(gotFlows), len(agg.Flows))
+	}
+	for _, f := range agg.Flows {
+		if !gotFlows[f] {
+			t.Errorf("aggregate flow %+v not present in any per-source report (a masked/dropped flow)", f)
+		}
+	}
+	for _, s := range agg.EscapeSites {
+		if !gotSites[s] {
+			t.Errorf("aggregate escape site %q not present in any per-source report", s)
+		}
+	}
+
+	// The whole point: the aggregate is a single FLOW that masks the rest; per-source
+	// must surface at least one non-FLOW verdict so the decomposition is informative.
+	if agg.Verdict != taint.Flow {
+		t.Fatalf("fixture precondition: aggregate should be FLOW, got %s", agg.Verdict)
+	}
+	sawNonFlow := false
+	for _, sr := range per {
+		if sr.Report.Verdict != taint.Flow {
+			sawNonFlow = true
+		}
+	}
+	if !sawNonFlow {
+		t.Error("per-source decomposition surfaced no non-FLOW verdict — it would add nothing over the aggregate")
+	}
+}
+
 // The report must be byte-identical across repeated runs: Go randomizes map-iteration
 // order per range, so an unsorted EscapeSites/Flows collection would surface here.
 func TestDeterministic(t *testing.T) {

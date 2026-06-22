@@ -90,6 +90,15 @@ type Report struct {
 	Sources     int      // source seeds matched (func results + field reads)
 }
 
+// SourceReport is one declared source's verdict, from AnalyzeBySource: the analysis
+// run scoped to that SINGLE source (against the full declared sink set). Source is
+// the canonical descriptor — "importpath#Name" for a func source, "importpath#Type.Field"
+// for a field source — so the decomposition is reported in a stable, run-independent order.
+type SourceReport struct {
+	Source string
+	Report Report
+}
+
 // fieldKey identifies a struct field globally: (named type, field index). Taint on a
 // field is type+index-global (field-INsensitive to instance) — the same trick the
 // SQL fold uses; an over-approximation in the safe direction (it can only over-taint).
@@ -166,6 +175,40 @@ func Analyze(prog *ssabuild.Program, cfg Config) Report {
 		r.Verdict = NoFlow
 	}
 	return r
+}
+
+// AnalyzeBySource decomposes the analysis by DECLARED source: it runs Analyze once
+// per source (each scoped to that one source but against the FULL declared sink set)
+// and returns one SourceReport per source, in canonical Source order.
+//
+// This is reporting granularity, NOT a capability change, and it is sound for one
+// reason: taint here is a monotone per-value union — a source reaches a sink iff its
+// OWN value does, independent of the other declared sources (there is no conjunction;
+// a value is tainted if ANY incoming source taints it). So the per-source reports
+// union back to EXACTLY Analyze(all sources): decomposing loses nothing (every
+// aggregate flow/escape is attributable to some single source whose scoped run also
+// finds it) and invents nothing (a source that escapes still ABSTAINs — we never
+// manufacture a NO-FLOW the aggregate could not prove). TestAnalyzeBySource_Decomposes
+// pins the union identity. The point is that an aggregate FLOW from one source no
+// longer MASKS the others' NO-FLOW/ABSTAIN/FLOW status.
+func AnalyzeBySource(prog *ssabuild.Program, cfg Config) []SourceReport {
+	var out []SourceReport
+	for _, fs := range cfg.SourceFuncs {
+		out = append(out, SourceReport{
+			Source: fs.Pkg + "#" + fs.Name,
+			Report: Analyze(prog, Config{SourceFuncs: []FuncSpec{fs}, Sinks: cfg.Sinks}),
+		})
+	}
+	for _, fs := range cfg.SourceFields {
+		out = append(out, SourceReport{
+			Source: fs.Pkg + "#" + fs.Type + "." + fs.Field,
+			Report: Analyze(prog, Config{SourceFields: []FieldSpec{fs}, Sinks: cfg.Sinks}),
+		})
+	}
+	// Canonical, run-independent order (the config slices are author-ordered; sorting on
+	// the intrinsic Source key keeps the decomposition byte-identical across runs).
+	sort.Slice(out, func(i, j int) bool { return out[i].Source < out[j].Source })
+	return out
 }
 
 // index precomputes the field-load and caller indexes over first-party code.
