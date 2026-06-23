@@ -71,6 +71,14 @@ func (o Options) budget() int {
 	return defaultMaxNodes
 }
 
+// collapseAccounted reports whether the accounted zone should summarize by package:
+// when the accounted count alone exceeds the budget (unless Full). It is the ONE rule
+// both renders consult, so the markdown and the diagram never disagree on when the
+// accounted zone is rolled up.
+func (o Options) collapseAccounted(accounted int) bool {
+	return !o.Full && accounted > o.budget()
+}
+
 // ChangedFn is one changed function with its evidence and the forward blind spots that
 // keep the tool from fully accounting for it, split by whether THIS MR introduced them.
 // Deterministic: every field derives from sorted graph data.
@@ -103,6 +111,16 @@ type Report struct {
 	Carried     []ChangedFn `json:"carried,omitempty"`
 	Accounted   []ChangedFn `json:"accounted,omitempty"`
 }
+
+// TODO(prototype): deferred code-review findings — address when this graduates past the
+// real-diff test, not before (premature hardening of code whose shape isn't proven):
+//   - Build recomputes each changed function's forward cone 2-3x (ForNodes +
+//     ForwardBlindSpots on branch, + ForwardBlindSpots on base); a single combined walk,
+//     and restricting the base recompute to functions whose cone changed, would remove it.
+//   - NewOverApprox/CarriedOverApprox are mutually-exclusive derived state (from
+//     branchOver/baseOver); the "never both true" invariant is unguarded.
+//   - changedFns re-implements review.diffGraphs' base→branch node/edge delta; nodeSet
+//     duplicates review.nodeSet. Both could share one helper once the surface settles.
 
 // Build computes the triage over the BRANCH graph (the post-merge reality the reviewer
 // is judging). For each changed function it compares the branch forward blind-spot set
@@ -163,16 +181,16 @@ func Build(base, branch *graph.Graph) Report {
 
 // splitNewCarried partitions the branch's serious forward blind spots into those NOT in
 // the base forward set (new) and those in both (carried). Seam identity is
-// (Kind, Site, Detail), the impact engine's dedup key, so a blind spot newly REACHED via
-// an added edge (its site existed but was unreachable from this function in the base) is
-// correctly new.
+// graph.BlindSpot.DedupKey — the SAME key impact dedups on, so a blind spot newly REACHED
+// via an added edge (its site existed but was unreachable from this function in the base)
+// is correctly new, and the two surfaces cannot drift on what a blind spot IS.
 func splitNewCarried(branchSerious, baseSerious []graph.BlindSpot) (newSeams, carried []graph.BlindSpot) {
 	had := map[string]bool{}
 	for _, b := range baseSerious {
-		had[seamKey(b)] = true
+		had[b.DedupKey()] = true
 	}
 	for _, b := range branchSerious {
-		if had[seamKey(b)] {
+		if had[b.DedupKey()] {
 			carried = append(carried, b)
 		} else {
 			newSeams = append(newSeams, b)
@@ -180,8 +198,6 @@ func splitNewCarried(branchSerious, baseSerious []graph.BlindSpot) (newSeams, ca
 	}
 	return newSeams, carried
 }
-
-func seamKey(b graph.BlindSpot) string { return b.Kind + "\x00" + b.Site + "\x00" + b.Detail }
 
 // changedFns is the sorted set of branch functions the MR structurally moved: new
 // functions, signature changes, and functions that gained an outgoing call or effect.
@@ -273,13 +289,19 @@ func tierRank(t int) int {
 
 // reachesMutating is a RANKING-ONLY heuristic (no verdict rests on it): does the change's
 // resolved effect surface include a write — a mutating SQL verb via the shared sqlverb
-// source, or a bus PUBLISH?
+// source, or a bus PUBLISH? It matches on the verb TOKEN (not a substring), mirroring
+// fitness.IsWrite's db/bus classification, so an effect whose name merely contains
+// "PUBLISH" is not miscounted as a write.
 func reachesMutating(effects []string) bool {
 	for _, e := range effects {
-		if f := strings.Fields(e); len(f) >= 2 && f[0] == "db" && sqlverb.Mutating(f[1]) {
+		f := strings.Fields(e) // "db <OP> <table>" | "bus PUBLISH <event>" | "bus CONSUME <event>"
+		if len(f) < 2 {
+			continue
+		}
+		if f[0] == "db" && sqlverb.Mutating(f[1]) {
 			return true
 		}
-		if strings.Contains(e, "PUBLISH") {
+		if f[0] == "bus" && f[1] == "PUBLISH" {
 			return true
 		}
 	}
@@ -405,7 +427,7 @@ func (r Report) RenderMarkdown(o Options) string {
 
 	fmt.Fprintf(&b, "\n## ✅ Fully accounted — %d change(s): complete evidence shown\n", a)
 	b.WriteString("_The tool can show the COMPLETE structural surface for these. That is not approval — the tool accepts nothing at face value; verify the resolved effects are the ones you intend._\n")
-	if !o.Full && a > o.budget() {
+	if o.collapseAccounted(a) {
 		fmt.Fprintf(&b, "_(summarized by package — %d changes over the %d-node budget; pass --full to expand each)_\n", a, o.budget())
 		for _, rl := range rollupAccounted(r.Accounted) {
 			effs := "no boundary effects"
@@ -539,9 +561,10 @@ func (r Report) RenderMermaid(o Options) string {
 	blindZone(fmt.Sprintf("🟡 Carried blind — %d (not new)", len(r.Carried)), "c", "carried", "cseam",
 		r.Carried, func(cf ChangedFn) []graph.BlindSpot { return cf.CarriedSeams })
 
-	// Accounted: full nodes when within the total budget, else rolled up by package —
-	// each rollup node still wired to the effects its package touches (I/O surface kept).
-	full := o.Full || len(r.NewBlind)+len(r.Carried)+len(r.Accounted) <= max
+	// Accounted: full nodes within budget, else rolled up by package — each rollup node
+	// still wired to the effects its package touches (I/O surface kept). Same collapse rule
+	// as the markdown (Options.collapseAccounted), so the two views never disagree.
+	full := !o.collapseAccounted(len(r.Accounted))
 	fmt.Fprintf(&b, "  subgraph ACCOUNTED[\"%s\"]\n", mmLabel(fmt.Sprintf("✅ Accounted — %d (complete evidence, not approval)", len(r.Accounted))))
 	if full {
 		for i, cf := range r.Accounted {
@@ -593,14 +616,22 @@ func distinctKinds(bs []graph.BlindSpot) []string {
 	return setutil.SortedKeys(seen)
 }
 
-// mmLabel makes a string safe inside a Mermaid quoted label: collapse the closing quote,
-// and entity-escape the angle brackets a <dynamic> effect carries.
-func mmLabel(s string) string {
-	s = strings.ReplaceAll(s, "\"", "'")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	return s
-}
+// mmLabel makes a string safe inside a Mermaid quoted label. It entity-escapes the full
+// set of breakers — & (entity start), < > (the <dynamic> effect carries them), the quote
+// that would close the label, and the apostrophe — and folds newlines/tabs to spaces.
+// Mirrors graphio.labelEscaper (the producer-side Mermaid escaper); kept a local copy
+// rather than crossing the flowmap/groundwork boundary for one presentation helper.
+var mmReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&#39;",
+	"\n", " ",
+	"\t", " ",
+)
+
+func mmLabel(s string) string { return mmReplacer.Replace(s) }
 
 // shortPkg compacts a package import path to its last two segments for display.
 func shortPkg(p string) string {

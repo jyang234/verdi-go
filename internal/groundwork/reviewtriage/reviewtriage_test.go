@@ -248,6 +248,63 @@ func TestScaleRollsUpAccountedNotNewBlind(t *testing.T) {
 	}
 }
 
+// TestRendersAreDeterministic pins CLAUDE.md's prime directive for the new ordering and
+// emission paths: Build and both renders are pure functions of their inputs, byte-identical
+// across repeated runs. It exercises the map-derived paths (rollupAccounted's grouping,
+// distinctKinds, the Mermaid effect-id assignment) under several budgets, where a leaked
+// map-iteration order would surface as a diff between two otherwise-identical runs.
+func TestRendersAreDeterministic(t *testing.T) {
+	rep := Report{
+		BaseNodes: 6, BranchNodes: 10,
+		NewBlind: []ChangedFn{
+			{FQN: "x/p.A", Tier: 1, NewSeams: []graph.BlindSpot{{Kind: "reflect", Site: "x/p.A"}}, Effects: []string{"db INSERT t"}},
+			{FQN: "x/q.B", Tier: 1, NewSeams: []graph.BlindSpot{{Kind: "DynamicEffect", Site: "x/q.B"}}, Effects: []string{"bus PUBLISH e"}},
+		},
+		Carried: []ChangedFn{{FQN: "x/p.C", CarriedSeams: []graph.BlindSpot{{Kind: "reflect", Site: "x/p.deep"}}}},
+		Accounted: []ChangedFn{
+			{FQN: "x/p.D", Effects: []string{"db SELECT u"}},
+			{FQN: "x/p.E", Effects: []string{"db SELECT u"}},
+			{FQN: "x/q.F", Effects: []string{"db INSERT t"}},
+		},
+	}
+	for _, o := range []Options{{}, {Full: true}, {MaxNodes: 1}} {
+		if a, b := rep.RenderMermaid(o), rep.RenderMermaid(o); a != b {
+			t.Errorf("RenderMermaid non-deterministic at %+v:\n%s\n---\n%s", o, a, b)
+		}
+		if a, b := rep.RenderMarkdown(o), rep.RenderMarkdown(o); a != b {
+			t.Errorf("RenderMarkdown non-deterministic at %+v", o)
+		}
+	}
+
+	// Build itself: the changed-set and zone partition are map-derived; two runs over the
+	// same graphs must produce the identical report.
+	base := &graph.Graph{
+		Nodes:      []graph.Node{{FQN: "x/p.A", Sig: "o"}, {FQN: "x/p.C", Sig: "o"}, {FQN: "x/p.deep"}},
+		Edges:      []graph.Edge{{From: "x/p.C", To: "x/p.deep"}},
+		BlindSpots: []graph.BlindSpot{{Kind: "reflect", Site: "x/p.deep"}},
+	}
+	branch := &graph.Graph{
+		Nodes:      []graph.Node{{FQN: "x/p.A", Sig: "n"}, {FQN: "x/p.C", Sig: "n"}, {FQN: "x/p.deep"}, {FQN: "x/q.B", Sig: "n"}},
+		Edges:      []graph.Edge{{From: "x/p.C", To: "x/p.deep"}, {From: "x/q.B", To: "boundary:db INSERT t", Boundary: "outbound-sync"}},
+		BlindSpots: []graph.BlindSpot{{Kind: "reflect", Site: "x/p.deep"}},
+	}
+	if a, b := Build(base, branch).RenderMarkdown(Options{}), Build(base, branch).RenderMarkdown(Options{}); a != b {
+		t.Errorf("Build+RenderMarkdown non-deterministic across runs:\n%s\n---\n%s", a, b)
+	}
+}
+
+// TestMmLabelEscapesAmpersand pins finding #1: a label carrying '&' is entity-escaped
+// (an unescaped '&' starts a Mermaid HTML entity and corrupts the node), matching the
+// producer-side escaper.
+func TestMmLabelEscapesAmpersand(t *testing.T) {
+	if got := mmLabel("a & b"); got != "a &amp; b" {
+		t.Errorf("mmLabel(%q) = %q, want '&' entity-escaped", "a & b", got)
+	}
+	if got := mmLabel("x\ny"); got != "x y" {
+		t.Errorf("mmLabel must fold newlines to spaces, got %q", got)
+	}
+}
+
 // TestBuildNoStructuralChange: identical graphs ⇒ nothing to triage, and the render says
 // so explicitly rather than emitting a blank page (silence is never a silent pass).
 func TestBuildNoStructuralChange(t *testing.T) {

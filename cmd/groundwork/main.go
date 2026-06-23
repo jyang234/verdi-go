@@ -664,8 +664,10 @@ func cmdReviewTriage(args []string) error {
 	opts := reviewtriage.Options{Full: full}
 	if maxArg != "" {
 		n, err := strconv.Atoi(maxArg)
-		if err != nil || n < 0 {
-			return fmt.Errorf("--max-nodes: want a non-negative integer, got %q", maxArg)
+		// Require a POSITIVE budget: 0 would otherwise pass and then be silently treated
+		// as the default by Options.budget() (which maps 0 → default), ignoring the flag.
+		if err != nil || n < 1 {
+			return fmt.Errorf("--max-nodes: want a positive integer, got %q", maxArg)
 		}
 		opts.MaxNodes = n
 	}

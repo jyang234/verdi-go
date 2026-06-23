@@ -112,7 +112,9 @@ func gatherBlindSpots(ix *graph.Index, nodes []string, dynEffects []graph.Edge) 
 		for _, b := range bs {
 			// Detail is part of the identity: two DynamicEffect blind spots at the same
 			// site with different effect labels are distinct disclosures (Detail is rendered).
-			k := b.Kind + "\x00" + b.Site + "\x00" + b.Detail
+			// graph.BlindSpot.DedupKey is the one source for this identity (shared with
+			// reviewtriage's new-vs-carried diff).
+			k := b.DedupKey()
 			if !seen[k] {
 				seen[k] = true
 				blind = append(blind, b)
