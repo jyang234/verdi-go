@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/capture"
@@ -169,7 +170,7 @@ usage:
   groundwork chains <graph.json>... [--service <name>=<graph.json>]... [--policy <p.json>]...  cross-service effect chains (CX-5, observational)
   groundwork fitness <policy.json> <graph.json> [--expect <sha>] evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--expect <sha>] [--json]   computed MR review artifact (BLOCK exits non-zero)
-  groundwork review-triage <base.json> <branch.json> [--json|--mermaid]   PROTOTYPE: partition changed functions into vouched (full evidence) vs focus (blind-spot, look here)
+  groundwork review-triage <base.json> <branch.json> [--json|--mermaid] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage (new-blind / carried / accounted); large diffs roll up the accounted zone by package
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
@@ -652,11 +653,21 @@ func ruleCount(p *policy.Policy) int {
 func cmdReviewTriage(args []string) error {
 	asJSON, rest := takeFlag(args, "--json", "-json")
 	asMermaid, rest := takeFlag(rest, "--mermaid", "-mermaid")
+	full, rest := takeFlag(rest, "--full", "-full")
+	maxArg, _, rest := takeValueFlag(rest, "--max-nodes", "-max-nodes")
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: groundwork review-triage <base-graph.json> <branch-graph.json> [--json | --mermaid]")
+		return fmt.Errorf("usage: groundwork review-triage <base-graph.json> <branch-graph.json> [--json | --mermaid] [--full] [--max-nodes N]")
 	}
 	if asJSON && asMermaid {
 		return fmt.Errorf("review-triage: choose at most one of --json or --mermaid")
+	}
+	opts := reviewtriage.Options{Full: full}
+	if maxArg != "" {
+		n, err := strconv.Atoi(maxArg)
+		if err != nil || n < 0 {
+			return fmt.Errorf("--max-nodes: want a non-negative integer, got %q", maxArg)
+		}
+		opts.MaxNodes = n
 	}
 	base, err := graph.LoadFile(rest[0])
 	if err != nil {
@@ -676,9 +687,9 @@ func cmdReviewTriage(args []string) error {
 		_, err = os.Stdout.Write(b)
 		return err
 	case asMermaid:
-		fmt.Print(rep.RenderMermaid())
+		fmt.Print(rep.RenderMermaid(opts))
 	default:
-		fmt.Print(rep.RenderMarkdown())
+		fmt.Print(rep.RenderMarkdown(opts))
 	}
 	return nil
 }

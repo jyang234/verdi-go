@@ -16,19 +16,28 @@
 //     tool accepts nothing at face value; "accounted" only means "nothing here is
 //     hidden from you."
 //
+// SCALE. On a large diff the renders collapse — but a collapse that drops the wrong
+// node tells a confident lie, the exact failure goal (a) exists to prevent. So the
+// collapse obeys the triage's own attention gradient, with an invariant: it proceeds
+// only from the LOW-attention end (accounted, then carried) and NEVER collapses the
+// new-blind zone or the boundary-effect surface; the accounted bulk rolls up BY PACKAGE
+// (preserving which packages changed and the effects they touch), and every collapse is
+// disclosed with a count — nothing ever vanishes silently. The full detail always
+// remains in the markdown / --full render, so a diagram rollup hides nothing the
+// reviewer cannot recover.
+//
 // This serves the two founding goals: (a) combat hallucination/context poisoning by
 // being a deterministic reference frame whose incompleteness is LOUD — and, for a diff,
-// whose NEWLY-incomplete regions are loudest, because that is where a poisoned
-// understanding most easily slips in unreviewed; (b) route a reviewer's verification
-// effort by confidence × novelty. Pure composition over the graph index and the impact
-// evidence engine — a pure function of (base, branch), no policy, no verdict.
+// whose NEWLY-incomplete regions are loudest; (b) route a reviewer's verification effort
+// by confidence × novelty. Pure composition over the graph index and the impact evidence
+// engine — a pure function of (base, branch), no policy, no verdict.
 //
 // PROTOTYPE scope/limits (ride with the report): the changed set is the set-based
 // node/edge/effect delta; the per-function evidence is a static blast radius (what the
 // change COULD touch, not the route a given input takes); novelty is computed by
 // comparing each function's base vs branch FORWARD blind-spot set, so a brand-new call
-// SITE to an already-reachable blind spot reads as carried, not new (the set-based
-// limit); and "accounted" is structural completeness, never approval.
+// SITE to an already-reachable blind spot reads as carried, not new; and "accounted" is
+// structural completeness, never approval.
 package reviewtriage
 
 import (
@@ -43,6 +52,25 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/sqlverb"
 )
 
+// defaultMaxNodes is the per-zone function-node budget before a zone collapses (the
+// accounted zone rolls up by package; a blind zone caps with a disclosed "+N more").
+// Effects and the new-blind detail are never bounded by it.
+const defaultMaxNodes = 40
+
+// Options tunes the renders for scale. The zero value is the default (collapse large
+// zones at defaultMaxNodes); Full renders every node (the escape hatch).
+type Options struct {
+	MaxNodes int  // function-node budget per zone before collapse; 0 ⇒ defaultMaxNodes
+	Full     bool // render every node, no collapse
+}
+
+func (o Options) budget() int {
+	if o.MaxNodes > 0 {
+		return o.MaxNodes
+	}
+	return defaultMaxNodes
+}
+
 // ChangedFn is one changed function with its evidence and the forward blind spots that
 // keep the tool from fully accounting for it, split by whether THIS MR introduced them.
 // Deterministic: every field derives from sorted graph data.
@@ -56,8 +84,8 @@ type ChangedFn struct {
 	Effects         []string `json:"effects,omitempty"`           // forward boundary effects it can reach (human-readable)
 
 	// NewSeams are serious forward blind spots this MR introduced or newly reaches;
-	// CarriedSeams pre-existed on this path. The split is what separates the focus zone
-	// (new) from the carried zone (disclosed, not new).
+	// CarriedSeams pre-existed on this path. The split separates the focus zone (new)
+	// from the carried zone (disclosed, not new).
 	NewSeams     []graph.BlindSpot `json:"new_seams,omitempty"`
 	CarriedSeams []graph.BlindSpot `json:"carried_seams,omitempty"`
 	BenignSeams  []string          `json:"benign_seams,omitempty"` // trivial-severity seams, set aside but disclosed (#2)
@@ -78,9 +106,8 @@ type Report struct {
 
 // Build computes the triage over the BRANCH graph (the post-merge reality the reviewer
 // is judging). For each changed function it compares the branch forward blind-spot set
-// against the BASE one to tell new blindness from carried (the diff-delta that keeps a
-// pre-existing blind spot from reading as this MR's fault, and a new one from blending
-// into the background). The blind zones are consequence-ranked (#4).
+// against the BASE one to tell new blindness from carried. The blind zones are
+// consequence-ranked (#4).
 func Build(base, branch *graph.Graph) Report {
 	branchIx, baseIx := graph.NewIndex(branch), graph.NewIndex(base)
 	baseNode := nodeSet(base)
@@ -116,16 +143,15 @@ func Build(base, branch *graph.Graph) Report {
 		}
 		switch {
 		case len(cf.NewSeams) > 0 || cf.NewOverApprox:
-			newBlind = append(newBlind, cf) // this MR made it unverifiable — focus
+			newBlind = append(newBlind, cf)
 		case len(cf.CarriedSeams) > 0 || cf.CarriedOverApprox:
-			carried = append(carried, cf) // blind, but not newly so — disclosed, not background
+			carried = append(carried, cf)
 		default:
-			accounted = append(accounted, cf) // complete evidence — NOT approval
+			accounted = append(accounted, cf)
 		}
 	}
 	sortByConsequence(newBlind)
 	sortByConsequence(carried)
-	// accounted keeps changedFns' FQN order (the low-attention zone).
 	return Report{
 		BaseNodes:   len(base.Nodes),
 		BranchNodes: len(branch.Nodes),
@@ -135,11 +161,11 @@ func Build(base, branch *graph.Graph) Report {
 	}
 }
 
-// splitNewCarried partitions the branch's serious forward blind spots into those NOT
-// present in the base forward set (new — this MR introduced or newly reaches them) and
-// those present in both (carried). The seam identity is (Kind, Site, Detail), the same
-// key the impact engine dedups on, so a blind spot newly REACHED via an added edge (its
-// site existed but was unreachable from this function in the base) is correctly new.
+// splitNewCarried partitions the branch's serious forward blind spots into those NOT in
+// the base forward set (new) and those in both (carried). Seam identity is
+// (Kind, Site, Detail), the impact engine's dedup key, so a blind spot newly REACHED via
+// an added edge (its site existed but was unreachable from this function in the base) is
+// correctly new.
 func splitNewCarried(branchSerious, baseSerious []graph.BlindSpot) (newSeams, carried []graph.BlindSpot) {
 	had := map[string]bool{}
 	for _, b := range baseSerious {
@@ -168,7 +194,7 @@ func changedFns(base, branch *graph.Graph) []string {
 	changed := map[string]bool{}
 	for _, n := range branch.Nodes {
 		if old, existed := baseSig[n.FQN]; !existed || old != n.Sig {
-			changed[n.FQN] = true // new function, or its signature moved
+			changed[n.FQN] = true
 		}
 	}
 	baseEdge := make(map[string]bool, len(base.Edges))
@@ -176,9 +202,6 @@ func changedFns(base, branch *graph.Graph) []string {
 		baseEdge[e.From+"\x00"+e.To] = true
 	}
 	for _, e := range branch.Edges {
-		// A function that gained a callee or a boundary effect changed behavior, even
-		// if its own node is unchanged. Restrict to a real branch node so a synthetic
-		// boundary endpoint is never mistaken for a changed function.
 		if branchNode[e.From] && !baseEdge[e.From+"\x00"+e.To] {
 			changed[e.From] = true
 		}
@@ -187,9 +210,8 @@ func changedFns(base, branch *graph.Graph) []string {
 }
 
 // splitSeverity divides forward-cone blind spots into the zone-worthy (serious) and the
-// producer-tagged-benign (trivial). Only Severity=="trivial" is benign; every other
-// value — including the empty default that covers reflection, dynamic effects, and
-// unresolved dispatch — is serious (#2 fails toward flagging, never hiding).
+// producer-tagged-benign (trivial). Only Severity=="trivial" is benign; every other value
+// — including the empty default — is serious (#2 fails toward flagging, never hiding).
 func splitSeverity(bs []graph.BlindSpot) (serious, benign []graph.BlindSpot) {
 	for _, b := range bs {
 		if b.Severity == "trivial" {
@@ -225,8 +247,8 @@ func seamReasons(seams []graph.BlindSpot) []string {
 }
 
 // sortByConsequence orders a blind zone so scarce reviewer attention lands on the most
-// consequential change first (#4): most-critical salience tier, then a change that can
-// MUTATE state over a read-only one, then the larger blast radius, then FQN.
+// consequential change first (#4): most-critical tier, then state-mutating, then blast
+// radius, then FQN.
 func sortByConsequence(fs []ChangedFn) {
 	sort.SliceStable(fs, func(i, j int) bool {
 		if a, b := tierRank(fs[i].Tier), tierRank(fs[j].Tier); a != b {
@@ -242,8 +264,6 @@ func sortByConsequence(fs []ChangedFn) {
 	})
 }
 
-// tierRank orders salience tiers most-critical-first and sends the unset tier (0) to the
-// back, so a real tier always outranks "unknown".
 func tierRank(t int) int {
 	if t <= 0 {
 		return 1 << 30
@@ -252,8 +272,8 @@ func tierRank(t int) int {
 }
 
 // reachesMutating is a RANKING-ONLY heuristic (no verdict rests on it): does the change's
-// resolved effect surface include a write — a mutating SQL verb via the one shared
-// sqlverb source, or a bus PUBLISH?
+// resolved effect surface include a write — a mutating SQL verb via the shared sqlverb
+// source, or a bus PUBLISH?
 func reachesMutating(effects []string) bool {
 	for _, e := range effects {
 		if f := strings.Fields(e); len(f) >= 2 && f[0] == "db" && sqlverb.Mutating(f[1]) {
@@ -266,9 +286,7 @@ func reachesMutating(effects []string) bool {
 	return false
 }
 
-// blindReason renders one blind spot as a reviewer-actionable sentence: what the tool
-// cannot see, where, and the implicit thing to verify. Keyed on the disclosed Kind; an
-// unrecognized kind falls back to an honest generic rather than dropping the disclosure.
+// blindReason renders one blind spot as a reviewer-actionable sentence.
 func blindReason(b graph.BlindSpot) string {
 	at := b.Site
 	if at == "" {
@@ -302,11 +320,41 @@ func blindReason(b graph.BlindSpot) string {
 	}
 }
 
-// RenderMarkdown is the human-reviewer report: new blindness first (where this diff most
-// needs eyes), then carried blindness (disclosed, not new), then the fully-accounted
-// rest (complete evidence — explicitly NOT approval). A change with no structural
-// movement yields an explicit "nothing to triage" rather than an empty page.
-func (r Report) RenderMarkdown() string {
+// pkgRollup is a package's accounted changes summarized: the count and the union of the
+// boundary effects they reach (the I/O surface is preserved even when functions collapse).
+type pkgRollup struct {
+	Pkg     string   `json:"pkg"`
+	Count   int      `json:"count"`
+	Effects []string `json:"effects,omitempty"`
+}
+
+// rollupAccounted groups accounted changes by package, deduping and sorting each group's
+// effects — the scale collapse that keeps the I/O surface and package structure while
+// shedding per-function detail. Deterministic (packages and effects sorted).
+func rollupAccounted(fns []ChangedFn) []pkgRollup {
+	count := map[string]int{}
+	eff := map[string]map[string]bool{}
+	for _, cf := range fns {
+		p := fitness.PkgOf(cf.FQN)
+		count[p]++
+		if eff[p] == nil {
+			eff[p] = map[string]bool{}
+		}
+		for _, e := range cf.Effects {
+			eff[p][e] = true
+		}
+	}
+	var out []pkgRollup
+	for _, p := range setutil.SortedKeys(count) {
+		out = append(out, pkgRollup{Pkg: p, Count: count[p], Effects: setutil.SortedKeys(eff[p])})
+	}
+	return out
+}
+
+// RenderMarkdown is the human-reviewer report: new blindness first, then carried, then
+// the fully-accounted rest. On a large diff the accounted zone summarizes by package
+// (unless Full) — the blind zones never collapse (silence is never a silent pass).
+func (r Report) RenderMarkdown(o Options) string {
 	var b strings.Builder
 	n, c, a := len(r.NewBlind), len(r.Carried), len(r.Accounted)
 	fmt.Fprintf(&b, "# MR review triage — where to spend your verification\n")
@@ -357,17 +405,28 @@ func (r Report) RenderMarkdown() string {
 
 	fmt.Fprintf(&b, "\n## ✅ Fully accounted — %d change(s): complete evidence shown\n", a)
 	b.WriteString("_The tool can show the COMPLETE structural surface for these. That is not approval — the tool accepts nothing at face value; verify the resolved effects are the ones you intend._\n")
-	for _, cf := range r.Accounted {
-		fmt.Fprintf(&b, "\n### %s%s\n", cf.FQN, tierTag(cf.Tier))
-		if len(cf.BenignSeams) == 0 {
-			b.WriteString("Every path through this change is statically resolved — no dynamic dispatch, reflection, or opaque I/O on any reachable path. Evidence to verify against the code:\n")
-		} else {
-			b.WriteString("Statically resolved except a benign seam the producer tagged trivial; the effect surface is otherwise complete. Evidence to verify against the code:\n")
-			for _, s := range cf.BenignSeams {
-				fmt.Fprintf(&b, "- (set aside) %s\n", s)
+	if !o.Full && a > o.budget() {
+		fmt.Fprintf(&b, "_(summarized by package — %d changes over the %d-node budget; pass --full to expand each)_\n", a, o.budget())
+		for _, rl := range rollupAccounted(r.Accounted) {
+			effs := "no boundary effects"
+			if len(rl.Effects) > 0 {
+				effs = strings.Join(rl.Effects, ", ")
 			}
+			fmt.Fprintf(&b, "- **%s** — %d change(s); effects: %s\n", shortPkg(rl.Pkg), rl.Count, effs)
 		}
-		writeEvidence(&b, cf, false)
+	} else {
+		for _, cf := range r.Accounted {
+			fmt.Fprintf(&b, "\n### %s%s\n", cf.FQN, tierTag(cf.Tier))
+			if len(cf.BenignSeams) == 0 {
+				b.WriteString("Every path through this change is statically resolved — no dynamic dispatch, reflection, or opaque I/O on any reachable path. Evidence to verify against the code:\n")
+			} else {
+				b.WriteString("Statically resolved except a benign seam the producer tagged trivial; the effect surface is otherwise complete. Evidence to verify against the code:\n")
+				for _, s := range cf.BenignSeams {
+					fmt.Fprintf(&b, "- (set aside) %s\n", s)
+				}
+			}
+			writeEvidence(&b, cf, false)
+		}
 	}
 
 	b.WriteString("\n---\n")
@@ -375,15 +434,13 @@ func (r Report) RenderMarkdown() string {
 	return b.String()
 }
 
-// writeEvidence prints the checkable facts of a change: the entrypoints it is live behind
-// and the boundary-effect surface it reaches. partial marks a blind zone, where the same
-// facts are a FLOOR (a blind spot may hide more).
+// writeEvidence prints the checkable facts of a change. partial marks a blind zone, where
+// the facts are a FLOOR (a blind spot may hide more).
 func writeEvidence(b *strings.Builder, cf ChangedFn, partial bool) {
 	floor := ""
 	if partial {
 		floor = " (a FLOOR — the blind spot(s) above may hide more)"
 	}
-
 	coverNote := ""
 	if cf.CoverUpperBound {
 		coverNote = " ≤ (upper bound — reverse dispatch seam)"
@@ -396,7 +453,6 @@ func writeEvidence(b *strings.Builder, cf ChangedFn, partial bool) {
 			fmt.Fprintf(b, "  - %s\n", e)
 		}
 	}
-
 	switch {
 	case len(cf.Effects) == 0 && !partial:
 		b.WriteString("- reaches NO boundary effects — a pure/internal change (no DB, bus, or outbound I/O on any path)\n")
@@ -414,13 +470,14 @@ func writeEvidence(b *strings.Builder, cf ChangedFn, partial bool) {
 	}
 }
 
-// RenderMermaid draws the three-zone triage as a flowchart: changed functions colored by
-// zone (new-blind = red, carried = amber, accounted = green), each blind change tied to a
-// dashed seam node naming what the tool can't see past, and every change wired to the
-// boundary effects it reaches — dashed from a blind change (a FLOOR), solid from an
-// accounted one (the complete surface). Converging changes share an effect node.
-// Deterministic: zones are ordered, effects emitted first-seen, all ids synthetic.
-func (r Report) RenderMermaid() string {
+// RenderMermaid draws the three-zone triage as a flowchart. On a large diff it collapses
+// from the low-attention end only: a blind zone over budget caps with a disclosed
+// "+N more" node (new-blind ordered by consequence, so the shown ones matter most), and
+// the accounted bulk rolls up BY PACKAGE — each rollup node still wired to the effects it
+// touches. The boundary-effect surface and the new-blind detail are never silently
+// dropped; the full set is always in the markdown / --full render.
+func (r Report) RenderMermaid(o Options) string {
+	max := o.budget()
 	var b strings.Builder
 	b.WriteString("flowchart LR\n")
 	b.WriteString("  classDef newblind fill:#fde8e8,stroke:#e02424,color:#771d1d;\n")
@@ -428,6 +485,7 @@ func (r Report) RenderMermaid() string {
 	b.WriteString("  classDef accounted fill:#e6f4ea,stroke:#137333,color:#0b4a22;\n")
 	b.WriteString("  classDef nseam fill:#fff8f0,stroke:#e02424,stroke-dasharray:4 3,color:#771d1d;\n")
 	b.WriteString("  classDef cseam fill:#fffaf0,stroke:#d97706,stroke-dasharray:4 3,color:#7c4a03;\n")
+	b.WriteString("  classDef rollup fill:#f0fdf4,stroke:#137333,stroke-dasharray:2 2,color:#0b4a22;\n")
 	b.WriteString("  classDef effect fill:#eef2ff,stroke:#3b5bdb,color:#1e3a8a;\n")
 
 	if len(r.NewBlind)+len(r.Carried)+len(r.Accounted) == 0 {
@@ -449,12 +507,17 @@ func (r Report) RenderMermaid() string {
 	type mmEdge struct{ from, to, style string }
 	var edges []mmEdge
 
-	// A blind zone subgraph: each change, its seam node (the blind spots that put it in
-	// this zone), and dashed (floor) effect edges.
-	blindZone := func(title, idPrefix, nodeClass, seamClass string, fns []ChangedFn, seamsOf func(ChangedFn) []graph.BlindSpot) {
-		fmt.Fprintf(&b, "  subgraph %s[\"%s\"]\n", strings.ToUpper(idPrefix), mmLabel(title))
-		for i, cf := range fns {
-			id := fmt.Sprintf("%s%d", idPrefix, i)
+	// A blind zone: full nodes up to the budget, then a single disclosed overflow node
+	// (never a silent drop). New-blind is consequence-ordered, so the shown ones matter
+	// most; the overflow points the reviewer at the full markdown list.
+	blindZone := func(title, prefix, nodeClass, seamClass string, fns []ChangedFn, seamsOf func(ChangedFn) []graph.BlindSpot) {
+		shown, overflow := fns, 0
+		if !o.Full && len(fns) > max {
+			shown, overflow = fns[:max], len(fns)-max
+		}
+		fmt.Fprintf(&b, "  subgraph %s[\"%s\"]\n", strings.ToUpper(prefix), mmLabel(title))
+		for i, cf := range shown {
+			id := fmt.Sprintf("%s%d", prefix, i)
 			fmt.Fprintf(&b, "    %s[\"%s\"]:::%s\n", id, mmLabel(nodeLabel(cf)), nodeClass)
 			if kinds := distinctKinds(seamsOf(cf)); len(kinds) > 0 {
 				sid := id + "s"
@@ -465,6 +528,9 @@ func (r Report) RenderMermaid() string {
 				edges = append(edges, mmEdge{id, effFor(eff), "-.->"})
 			}
 		}
+		if overflow > 0 {
+			fmt.Fprintf(&b, "    %smore[\"+%d more — see report\"]:::%s\n", prefix, overflow, nodeClass)
+		}
 		b.WriteString("  end\n")
 	}
 
@@ -473,13 +539,25 @@ func (r Report) RenderMermaid() string {
 	blindZone(fmt.Sprintf("🟡 Carried blind — %d (not new)", len(r.Carried)), "c", "carried", "cseam",
 		r.Carried, func(cf ChangedFn) []graph.BlindSpot { return cf.CarriedSeams })
 
-	// Accounted subgraph: solid (complete) effect edges, no seam node.
+	// Accounted: full nodes when within the total budget, else rolled up by package —
+	// each rollup node still wired to the effects its package touches (I/O surface kept).
+	full := o.Full || len(r.NewBlind)+len(r.Carried)+len(r.Accounted) <= max
 	fmt.Fprintf(&b, "  subgraph ACCOUNTED[\"%s\"]\n", mmLabel(fmt.Sprintf("✅ Accounted — %d (complete evidence, not approval)", len(r.Accounted))))
-	for i, cf := range r.Accounted {
-		id := fmt.Sprintf("a%d", i)
-		fmt.Fprintf(&b, "    %s[\"%s\"]:::accounted\n", id, mmLabel(nodeLabel(cf)))
-		for _, eff := range cf.Effects {
-			edges = append(edges, mmEdge{id, effFor(eff), "-->"})
+	if full {
+		for i, cf := range r.Accounted {
+			id := fmt.Sprintf("a%d", i)
+			fmt.Fprintf(&b, "    %s[\"%s\"]:::accounted\n", id, mmLabel(nodeLabel(cf)))
+			for _, eff := range cf.Effects {
+				edges = append(edges, mmEdge{id, effFor(eff), "-->"})
+			}
+		}
+	} else {
+		for i, rl := range rollupAccounted(r.Accounted) {
+			id := fmt.Sprintf("a%d", i)
+			fmt.Fprintf(&b, "    %s[\"%s\"]:::rollup\n", id, mmLabel(fmt.Sprintf("%s · %d accounted", shortPkg(rl.Pkg), rl.Count)))
+			for _, eff := range rl.Effects {
+				edges = append(edges, mmEdge{id, effFor(eff), "-->"})
+			}
 		}
 	}
 	b.WriteString("  end\n")
@@ -493,8 +571,8 @@ func (r Report) RenderMermaid() string {
 	return b.String()
 }
 
-// nodeLabel is the compact function label for the diagram: short name, tier badge, and a
-// ✍ marker on a state-mutating change so the eye finds it.
+// nodeLabel is the compact function label: short name, tier badge, and a ✍ marker on a
+// state-mutating change so the eye finds it.
 func nodeLabel(cf ChangedFn) string {
 	s := fitness.ShortName(cf.FQN)
 	if cf.Tier > 0 {
@@ -506,8 +584,7 @@ func nodeLabel(cf ChangedFn) string {
 	return s
 }
 
-// distinctKinds is the sorted, deduped set of blind-spot kinds — the at-a-glance "why
-// can't the tool see here" the diagram colors.
+// distinctKinds is the sorted, deduped set of blind-spot kinds.
 func distinctKinds(bs []graph.BlindSpot) []string {
 	seen := map[string]bool{}
 	for _, b := range bs {
@@ -516,8 +593,8 @@ func distinctKinds(bs []graph.BlindSpot) []string {
 	return setutil.SortedKeys(seen)
 }
 
-// mmLabel makes a string safe inside a Mermaid quoted label: collapse the quote that
-// would close it, and entity-escape the angle brackets a <dynamic> effect carries.
+// mmLabel makes a string safe inside a Mermaid quoted label: collapse the closing quote,
+// and entity-escape the angle brackets a <dynamic> effect carries.
 func mmLabel(s string) string {
 	s = strings.ReplaceAll(s, "\"", "'")
 	s = strings.ReplaceAll(s, "<", "&lt;")
@@ -525,7 +602,18 @@ func mmLabel(s string) string {
 	return s
 }
 
-// tierTag is the salience badge beside a changed function (omitted for the unset tier).
+// shortPkg compacts a package import path to its last two segments for display.
+func shortPkg(p string) string {
+	if p == "" {
+		return "(root)"
+	}
+	parts := strings.Split(p, "/")
+	if len(parts) <= 2 {
+		return p
+	}
+	return ".../" + strings.Join(parts[len(parts)-2:], "/")
+}
+
 func tierTag(t int) string {
 	if t <= 0 {
 		return ""
@@ -533,7 +621,6 @@ func tierTag(t int) string {
 	return fmt.Sprintf("  [tier %d]", t)
 }
 
-// tierLookup maps each branch function to its salience tier.
 func tierLookup(g *graph.Graph) map[string]int {
 	m := make(map[string]int, len(g.Nodes))
 	for _, n := range g.Nodes {
@@ -542,7 +629,6 @@ func tierLookup(g *graph.Graph) map[string]int {
 	return m
 }
 
-// nodeSet is the FQN membership set of a graph's nodes.
 func nodeSet(g *graph.Graph) map[string]bool {
 	m := make(map[string]bool, len(g.Nodes))
 	for _, n := range g.Nodes {
@@ -551,8 +637,6 @@ func nodeSet(g *graph.Graph) map[string]bool {
 	return m
 }
 
-// trimmedEffects strips the internal "boundary:" prefix from each effect label for
-// display, keeping them sorted.
 func trimmedEffects(effects []string) []string {
 	out := make([]string, 0, len(effects))
 	for _, e := range effects {

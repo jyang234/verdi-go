@@ -37,7 +37,7 @@ func TestNewBlindVsAccounted(t *testing.T) {
 		t.Errorf("nothing should be carried here: %+v", rep.Carried)
 	}
 
-	md := rep.RenderMarkdown()
+	md := rep.RenderMarkdown(Options{})
 	if !strings.Contains(md, "db SELECT users") || !strings.Contains(md, "COMPLETE boundary-effect surface") {
 		t.Errorf("accounted evidence (the resolved effect surface) not rendered:\n%s", md)
 	}
@@ -97,8 +97,8 @@ func TestNewVsCarriedBlindness(t *testing.T) {
 	if len(b.CarriedSeams) != 1 || b.CarriedSeams[0].Site != "svc.deep" {
 		t.Errorf("svc.B should also carry the pre-existing svc.deep seam, got %+v", b.CarriedSeams)
 	}
-	if !strings.Contains(rep.RenderMarkdown(), "also passes through pre-existing blindness") {
-		t.Errorf("a new-blind change that also carries blindness must disclose the carried part:\n%s", rep.RenderMarkdown())
+	if !strings.Contains(rep.RenderMarkdown(Options{}), "also passes through pre-existing blindness") {
+		t.Errorf("a new-blind change that also carries blindness must disclose the carried part:\n%s", rep.RenderMarkdown(Options{}))
 	}
 }
 
@@ -119,8 +119,8 @@ func TestSeverityTrivialStaysAccounted(t *testing.T) {
 	if len(rep.Accounted) != 1 || len(rep.Accounted[0].BenignSeams) != 1 {
 		t.Fatalf("the benign seam must be accounted AND disclosed, got %+v", rep.Accounted)
 	}
-	if !strings.Contains(rep.RenderMarkdown(), "producer-tagged trivial") {
-		t.Errorf("the set-aside benign seam was not disclosed:\n%s", rep.RenderMarkdown())
+	if !strings.Contains(rep.RenderMarkdown(Options{}), "producer-tagged trivial") {
+		t.Errorf("the set-aside benign seam was not disclosed:\n%s", rep.RenderMarkdown(Options{}))
 	}
 }
 
@@ -187,7 +187,7 @@ func TestRenderMermaidZonesAndSafety(t *testing.T) {
 		},
 		BlindSpots: []graph.BlindSpot{{Kind: "NonConstantBoundaryArg", Site: "svc.Dyn", Detail: "non-const topic"}},
 	}
-	md := Build(base, branch).RenderMermaid()
+	md := Build(base, branch).RenderMermaid(Options{})
 	for _, want := range []string{"flowchart LR", "classDef newblind", "classDef carried", "classDef accounted", ":::newblind", ":::accounted"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("mermaid missing %q:\n%s", want, md)
@@ -195,6 +195,56 @@ func TestRenderMermaidZonesAndSafety(t *testing.T) {
 	}
 	if strings.Contains(md, "PUBLISH <dynamic>") || !strings.Contains(md, "&lt;dynamic&gt;") {
 		t.Errorf("the <dynamic> effect label must be entity-escaped for Mermaid:\n%s", md)
+	}
+}
+
+// TestScaleRollsUpAccountedNotNewBlind pins the scale invariant: over budget, the
+// accounted bulk rolls up BY PACKAGE while the new-blind zone is never collapsed and the
+// boundary-effect surface is never dropped; --full expands everything.
+func TestScaleRollsUpAccountedNotNewBlind(t *testing.T) {
+	rep := Report{
+		BaseNodes: 10, BranchNodes: 12,
+		NewBlind: []ChangedFn{{
+			FQN: "pkg/a.Danger", Tier: 1,
+			NewSeams: []graph.BlindSpot{{Kind: "reflect", Site: "pkg/a.Danger"}},
+			Effects:  []string{"db INSERT t"},
+		}},
+		Accounted: []ChangedFn{
+			{FQN: "example.com/svc/internal/handler.A", Effects: []string{"db SELECT users"}},
+			{FQN: "example.com/svc/internal/handler.B", Effects: []string{"db SELECT users"}},
+			{FQN: "example.com/svc/internal/store.C", Effects: []string{"db INSERT ledger"}},
+			{FQN: "example.com/svc/internal/store.D", Effects: []string{"db INSERT ledger"}},
+			{FQN: "example.com/svc/internal/store.E"},
+		},
+	}
+
+	small := rep.RenderMermaid(Options{MaxNodes: 2})
+	if !strings.Contains(small, "a.Danger") {
+		t.Errorf("new-blind node must NEVER be collapsed:\n%s", small)
+	}
+	if !strings.Contains(small, "internal/handler · 2 accounted") || !strings.Contains(small, "internal/store · 3 accounted") {
+		t.Errorf("accounted must roll up by package over budget:\n%s", small)
+	}
+	if strings.Contains(small, "handler.A") {
+		t.Errorf("a rolled-up accounted zone must not emit per-function nodes:\n%s", small)
+	}
+	for _, e := range []string{"db SELECT users", "db INSERT ledger", "db INSERT t"} {
+		if !strings.Contains(small, e) {
+			t.Errorf("effect %q dropped under rollup — the I/O surface must be preserved:\n%s", e, small)
+		}
+	}
+
+	full := rep.RenderMermaid(Options{Full: true})
+	if !strings.Contains(full, "handler.A") {
+		t.Errorf("--full must expand the accounted zone:\n%s", full)
+	}
+
+	md := rep.RenderMarkdown(Options{MaxNodes: 2})
+	if !strings.Contains(md, "summarized by package") || strings.Contains(md, "handler.A") {
+		t.Errorf("markdown accounted must summarize by package over budget:\n%s", md)
+	}
+	if !strings.Contains(md, "a.Danger") {
+		t.Errorf("markdown new-blind must never be summarized:\n%s", md)
 	}
 }
 
@@ -206,7 +256,7 @@ func TestBuildNoStructuralChange(t *testing.T) {
 	if len(rep.NewBlind)+len(rep.Carried)+len(rep.Accounted) != 0 {
 		t.Fatalf("identical graphs must yield no changed functions, got %+v / %+v / %+v", rep.NewBlind, rep.Carried, rep.Accounted)
 	}
-	if !strings.Contains(rep.RenderMarkdown(), "No structural change detected") {
-		t.Errorf("a no-change render must say so explicitly:\n%s", rep.RenderMarkdown())
+	if !strings.Contains(rep.RenderMarkdown(Options{}), "No structural change detected") {
+		t.Errorf("a no-change render must say so explicitly:\n%s", rep.RenderMarkdown(Options{}))
 	}
 }
