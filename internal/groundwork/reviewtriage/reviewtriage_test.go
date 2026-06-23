@@ -54,6 +54,80 @@ func TestBuildPartitionsVouchedAndFocus(t *testing.T) {
 	}
 }
 
+// TestSeverityTrivialStaysVouched pins #2: a change whose only forward blind spot is
+// producer-tagged "trivial" (a benign seam) is NOT pulled into focus — it stays
+// vouched, but the benign seam is still disclosed so completeness is never over-claimed.
+func TestSeverityTrivialStaysVouched(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Benign", Sig: "old"}}}
+	branch := &graph.Graph{
+		Nodes:       []graph.Node{{FQN: "svc.Benign", Sig: "new"}},
+		BlindSpots:  []graph.BlindSpot{{Kind: "ConcurrentDispatch", Site: "svc.Benign", Detail: "cancel func", Severity: "trivial"}},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /b", Fn: "svc.Benign"}},
+	}
+	rep := Build(base, branch)
+	if len(rep.Focus) != 0 {
+		t.Fatalf("a trivial-severity seam must not trigger focus, got %+v", rep.Focus)
+	}
+	if len(rep.Vouched) != 1 || len(rep.Vouched[0].BenignSeams) != 1 {
+		t.Fatalf("the benign seam must be vouched AND disclosed, got %+v", rep.Vouched)
+	}
+	if !strings.Contains(rep.RenderMarkdown(), "producer-tagged trivial") {
+		t.Errorf("the set-aside benign seam was not disclosed:\n%s", rep.RenderMarkdown())
+	}
+}
+
+// TestFocusRankedByConsequence pins #4: focus items are ordered most-consequential
+// first — a critical-tier change ahead of a low-tier one. Both have a forward blind
+// spot, so the partition is fixed and only the ORDER is under test.
+func TestFocusRankedByConsequence(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Low", Sig: "o"}, {FQN: "svc.Crit", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.Low", Sig: "n", Tier: 3}, {FQN: "svc.Crit", Sig: "n", Tier: 1}},
+		Edges: []graph.Edge{
+			{From: "svc.Crit", To: "boundary:db INSERT ledger", Boundary: "outbound-sync"},
+			{From: "svc.Low", To: "boundary:db SELECT users", Boundary: "outbound-sync"},
+		},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "reflect", Site: "svc.Crit", Detail: "c"},
+			{Kind: "reflect", Site: "svc.Low", Detail: "l"},
+		},
+	}
+	rep := Build(base, branch)
+	if len(rep.Focus) != 2 {
+		t.Fatalf("want 2 focus changes, got %+v", rep.Focus)
+	}
+	if rep.Focus[0].FQN != "svc.Crit" {
+		t.Errorf("focus order = [%s, %s], want the critical-tier change first", rep.Focus[0].FQN, rep.Focus[1].FQN)
+	}
+}
+
+// TestCallerBlindSpotDoesNotForceFocus pins #1 at the package boundary: a clean change
+// that is merely CALLED by reflective code stays vouched — the blind spot is in the
+// caller (reverse reach), not in what the change can do.
+func TestCallerBlindSpotDoesNotForceFocus(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Clean", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.RefCaller", Sig: "o"}, {FQN: "svc.Clean", Sig: "n"}},
+		Edges: []graph.Edge{
+			{From: "svc.RefCaller", To: "svc.Clean"},
+			{From: "svc.Clean", To: "boundary:db SELECT users", Boundary: "outbound-sync"},
+		},
+		BlindSpots:  []graph.BlindSpot{{Kind: "reflect", Site: "svc.RefCaller", Detail: "upstream"}},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /x", Fn: "svc.RefCaller"}},
+	}
+	rep := Build(base, branch)
+	// svc.Clean changed; svc.RefCaller is unchanged (same sig, no new edge in base→branch? it is new here, so it is "changed" too).
+	var clean *ChangedFn
+	for i := range rep.Vouched {
+		if rep.Vouched[i].FQN == "svc.Clean" {
+			clean = &rep.Vouched[i]
+		}
+	}
+	if clean == nil {
+		t.Fatalf("svc.Clean must be VOUCHED despite a reflective caller; focus=%+v vouched=%+v", rep.Focus, rep.Vouched)
+	}
+}
+
 // TestBuildNoStructuralChange: identical graphs ⇒ nothing to triage, and the render
 // says so explicitly rather than emitting a blank page (silence is never a silent pass).
 func TestBuildNoStructuralChange(t *testing.T) {
