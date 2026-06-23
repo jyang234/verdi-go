@@ -29,8 +29,9 @@
 // This serves the two founding goals: (a) combat hallucination/context poisoning by
 // being a deterministic reference frame whose incompleteness is LOUD — and, for a diff,
 // whose NEWLY-incomplete regions are loudest; (b) route a reviewer's verification effort
-// by confidence × novelty. Pure composition over the graph index and the impact evidence
-// engine — a pure function of (base, branch), no policy, no verdict.
+// by confidence × novelty. Composition over the graph index and the impact evidence
+// engine, a deterministic function of its inputs and no verdict — with an OPTIONAL policy
+// that enables only the per-route write-movement section (reused from the review artifact).
 //
 // PROTOTYPE scope/limits (ride with the report): the changed set is the set-based
 // node/edge/effect delta; the per-function evidence is a static blast radius (what the
@@ -49,6 +50,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 	"github.com/jyang234/golang-code-graph/internal/sqlverb"
 )
@@ -117,9 +119,12 @@ type Report struct {
 	// The verified external-surface delta — what the MR does that the tool can vouch for,
 	// derived from the boundary-edge and entrypoint sets (sound over statically-resolved
 	// edges). Contract-level: an effect already present on another path is not "added".
-	EffectsAdded     []string `json:"effects_added,omitempty"`
-	EffectsRemoved   []string `json:"effects_removed,omitempty"`
-	EntrypointsAdded []string `json:"entrypoints_added,omitempty"`
+	// Effects and entrypoints are both reported in BOTH directions (added and removed) so a
+	// deleted route or dropped effect is never silently omitted.
+	EffectsAdded       []string `json:"effects_added,omitempty"`
+	EffectsRemoved     []string `json:"effects_removed,omitempty"`
+	EntrypointsAdded   []string `json:"entrypoints_added,omitempty"`
+	EntrypointsRemoved []string `json:"entrypoints_removed,omitempty"`
 
 	// RouteIO is the per-route refinement of the write surface ("GET /x now writes Y"),
 	// present only when Build was given a policy. Reuses fitness.RouteWrites.
@@ -201,7 +206,7 @@ func Build(base, branch *graph.Graph, p *policy.Policy) Report {
 	// The verified "what this MR does" delta: boundary effects and entrypoints the branch
 	// has that the base did not (and vice versa). Sound over statically-resolved edges.
 	effAdded, effRemoved := stringSetDelta(boundaryEffectSet(base), boundaryEffectSet(branch))
-	epsAdded, _ := stringSetDelta(entrypointSet(base), entrypointSet(branch))
+	epsAdded, epsRemoved := stringSetDelta(entrypointSet(base), entrypointSet(branch))
 
 	var routeIO []RouteMove
 	if p != nil {
@@ -209,63 +214,52 @@ func Build(base, branch *graph.Graph, p *policy.Policy) Report {
 	}
 
 	return Report{
-		BaseNodes:        len(base.Nodes),
-		BranchNodes:      len(branch.Nodes),
-		NewBlind:         newBlind,
-		Carried:          carried,
-		Accounted:        accounted,
-		EffectsAdded:     effAdded,
-		EffectsRemoved:   effRemoved,
-		EntrypointsAdded: epsAdded,
-		RouteIO:          routeIO,
+		BaseNodes:          len(base.Nodes),
+		BranchNodes:        len(branch.Nodes),
+		NewBlind:           newBlind,
+		Carried:            carried,
+		Accounted:          accounted,
+		EffectsAdded:       effAdded,
+		EffectsRemoved:     effRemoved,
+		EntrypointsAdded:   epsAdded,
+		EntrypointsRemoved: epsRemoved,
+		RouteIO:            routeIO,
 	}
 }
 
-// routeIODelta is the verified per-route write movement: for each route (non-root
-// entrypoint), the write labels the branch reaches that the base did not, and vice versa.
-// It REUSES fitness.RouteWrites — the one source for "what a route writes", shared with the
-// review artifact's per-route section — so the two surfaces cannot disagree; only the
-// set-diff is local. A side counted over a blind frontier marks the row, since a delta
-// against a blind side may be the graph's knowledge shifting, not the code's behavior.
+// routeIODelta is the verified per-route write movement: which routes gained or lost a
+// write base→branch. It is a thin mapper over review.RouteIODeltas — the ONE per-route
+// delta (over fitness.RouteWrites), so this surface and the review artifact cannot
+// disagree, and the rows arrive already sorted on the intrinsic route FQN (a display-name
+// collision can never make the order arrival-dependent). Only the display-name resolution
+// and the per-side blind collapse are local presentation.
 func routeIODelta(p *policy.Policy, baseIx, branchIx *graph.Index) []RouteMove {
-	baseRW := fitness.RouteWrites(p, baseIx)
-	branchRW := fitness.RouteWrites(p, branchIx)
-	names := routeNames(baseIx, branchIx)
+	names := routeNames(branchIx, baseIx) // branch name preferred (it describes branch behavior)
 	display := func(fqn string) string {
 		if n := names[fqn]; n != "" {
 			return n
 		}
 		return fitness.ShortName(fqn)
 	}
-
-	var out []RouteMove
-	for route, br := range branchRW {
-		b, existed := baseRW[route]
-		var added, removed []string
-		blind := br.Blind
-		if existed {
-			added, removed = writeDiff(b.Writes, br.Writes)
-			blind = blind || b.Blind
-		} else {
-			added = sortedCopy(br.Writes)
-		}
-		if len(added) == 0 && len(removed) == 0 {
-			continue
-		}
-		out = append(out, RouteMove{Route: display(route), Added: added, Removed: removed, Blind: blind})
+	// nil RW maps ⇒ review computes them via fitness.RouteWrites.
+	rows := review.RouteIODeltas(p, baseIx, branchIx, nil, nil)
+	out := make([]RouteMove, 0, len(rows))
+	for _, rd := range rows {
+		out = append(out, RouteMove{
+			Route:   display(rd.Route),
+			Added:   rd.Added,
+			Removed: rd.Removed,
+			Blind:   sideBlind(rd.Base) || sideBlind(rd.Branch),
+		})
 	}
-	// Routes removed on the branch that carried writes — the lost-route case.
-	for route, b := range baseRW {
-		if _, ok := branchRW[route]; !ok && len(b.Writes) > 0 {
-			out = append(out, RouteMove{Route: display(route), Removed: sortedCopy(b.Writes), Blind: b.Blind})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Route < out[j].Route })
 	return out
 }
 
+func sideBlind(s *review.RouteIOSide) bool { return s != nil && s.Frontier == review.FrontierBlind }
+
 // routeNames maps an entrypoint handler FQN to its human route name ("GET /x"), preferring
-// the branch's name; falls back per-FQN to nothing (the caller uses ShortName then).
+// the FIRST index's name; callers pass (branchIx, baseIx) so the branch name wins. Falls
+// back per-FQN to nothing (the caller uses ShortName then).
 func routeNames(ixs ...*graph.Index) map[string]string {
 	m := map[string]string{}
 	for _, ix := range ixs {
@@ -278,30 +272,6 @@ func routeNames(ixs ...*graph.Index) map[string]string {
 		}
 	}
 	return m
-}
-
-// writeDiff returns the sorted write labels added (in branch, not base) and removed.
-func writeDiff(baseW, branchW []string) (added, removed []string) {
-	bs, brs := setutil.StringSet(baseW), setutil.StringSet(branchW)
-	for w := range brs {
-		if !bs[w] {
-			added = append(added, w)
-		}
-	}
-	for w := range bs {
-		if !brs[w] {
-			removed = append(removed, w)
-		}
-	}
-	sort.Strings(added)
-	sort.Strings(removed)
-	return added, removed
-}
-
-func sortedCopy(s []string) []string {
-	out := append([]string(nil), s...)
-	sort.Strings(out)
-	return out
 }
 
 // boundaryEffectSet is the set of human-readable boundary-effect labels the graph emits
@@ -687,10 +657,13 @@ func (r Report) RenderSummary(o Options) string {
 	if !o.Full {
 		lim = o.budget()
 	}
-	if len(r.EntrypointsAdded)+len(r.EffectsAdded)+len(r.EffectsRemoved) > 0 {
+	if len(r.EntrypointsAdded)+len(r.EntrypointsRemoved)+len(r.EffectsAdded)+len(r.EffectsRemoved) > 0 {
 		b.WriteString("\n**What this MR does (verified):**\n")
 		if len(r.EntrypointsAdded) > 0 {
 			fmt.Fprintf(&b, "- exposes %d new entrypoint(s): %s\n", len(r.EntrypointsAdded), backtickList(r.EntrypointsAdded, lim))
+		}
+		if len(r.EntrypointsRemoved) > 0 {
+			fmt.Fprintf(&b, "- removes %d entrypoint(s): %s\n", len(r.EntrypointsRemoved), backtickList(r.EntrypointsRemoved, lim))
 		}
 		if len(r.EffectsAdded) > 0 {
 			fmt.Fprintf(&b, "- adds %d external effect(s): %s\n", len(r.EffectsAdded), backtickList(r.EffectsAdded, lim))

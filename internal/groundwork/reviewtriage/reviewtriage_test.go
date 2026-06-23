@@ -323,10 +323,14 @@ func TestPerRouteWriteMovement(t *testing.T) {
 	}
 }
 
-// TestVerifiedDeltaEntrypoints pins the entrypoint half of the verified delta: a new route
-// in the branch is reported as exposed.
+// TestVerifiedDeltaEntrypoints pins BOTH halves of the entrypoint delta: a new route is
+// reported as exposed, and a REMOVED route is reported (not silently dropped) — symmetric
+// with the effect delta.
 func TestVerifiedDeltaEntrypoints(t *testing.T) {
-	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.H", Sig: "o"}}}
+	base := &graph.Graph{
+		Nodes:       []graph.Node{{FQN: "svc.H", Sig: "o"}, {FQN: "svc.Old", Sig: "o"}},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "DELETE /old", Fn: "svc.Old"}},
+	}
 	branch := &graph.Graph{
 		Nodes:       []graph.Node{{FQN: "svc.H", Sig: "n"}},
 		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "POST /admin/ledger", Fn: "svc.H"}},
@@ -335,8 +339,47 @@ func TestVerifiedDeltaEntrypoints(t *testing.T) {
 	if len(rep.EntrypointsAdded) != 1 || rep.EntrypointsAdded[0] != "POST /admin/ledger" {
 		t.Fatalf("EntrypointsAdded = %v, want [POST /admin/ledger]", rep.EntrypointsAdded)
 	}
-	if !strings.Contains(rep.RenderSummary(Options{}), "exposes 1 new entrypoint(s): `POST /admin/ledger`") {
-		t.Errorf("summary must report the new route:\n%s", rep.RenderSummary(Options{}))
+	if len(rep.EntrypointsRemoved) != 1 || rep.EntrypointsRemoved[0] != "DELETE /old" {
+		t.Fatalf("EntrypointsRemoved = %v, want [DELETE /old] (a removed route must not be dropped)", rep.EntrypointsRemoved)
+	}
+	out := rep.RenderSummary(Options{})
+	if !strings.Contains(out, "exposes 1 new entrypoint(s): `POST /admin/ledger`") || !strings.Contains(out, "removes 1 entrypoint(s): `DELETE /old`") {
+		t.Errorf("summary must report both the new and the removed route:\n%s", out)
+	}
+}
+
+// TestRouteIODeterministicMultiRoute pins the per-route ordering path (the one new ordering
+// path in the per-route work): with a policy and several routes moving their write surface,
+// the rendered summary is byte-identical across repeated runs — the rows arrive sorted on
+// the intrinsic route FQN (via review.RouteIODeltas), not on the lossy display name.
+func TestRouteIODeterministicMultiRoute(t *testing.T) {
+	base := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.A", Sig: "o"}, {FQN: "svc.B", Sig: "o"}},
+		Edges: []graph.Edge{
+			{From: "svc.A", To: "boundary:db SELECT x", Boundary: "outbound-sync"},
+			{From: "svc.B", To: "boundary:db SELECT y", Boundary: "outbound-sync"},
+		},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /a", Fn: "svc.A"}, {Kind: "http", Name: "GET /b", Fn: "svc.B"}},
+	}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.A", Sig: "n"}, {FQN: "svc.B", Sig: "n"}},
+		Edges: []graph.Edge{
+			{From: "svc.A", To: "boundary:db SELECT x", Boundary: "outbound-sync"},
+			{From: "svc.A", To: "boundary:db INSERT audit", Boundary: "outbound-sync"},
+			{From: "svc.B", To: "boundary:db SELECT y", Boundary: "outbound-sync"},
+			{From: "svc.B", To: "boundary:db INSERT log", Boundary: "outbound-sync"},
+		},
+		Entrypoints: []graph.Entrypoint{{Kind: "http", Name: "GET /a", Fn: "svc.A"}, {Kind: "http", Name: "GET /b", Fn: "svc.B"}},
+	}
+	p := &policy.Policy{Service: "svc"}
+	if got := len(Build(base, branch, p).RouteIO); got != 2 {
+		t.Fatalf("want 2 route moves, got %d", got)
+	}
+	want := Build(base, branch, p).RenderSummary(Options{})
+	for i := 0; i < 6; i++ {
+		if got := Build(base, branch, p).RenderSummary(Options{}); got != want {
+			t.Fatalf("per-route render non-deterministic across runs:\n%s\n---\n%s", want, got)
+		}
 	}
 }
 
