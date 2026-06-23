@@ -30,6 +30,11 @@ an adversary-resistant gate (see the trust boundary in the usage guide).
 - **[`scorecard.md`](scorecard.md)** — the capability scorecard, graded by
   evidence class: what is proven, what is measured, and what is honestly
   unproven from inside this repo.
+- **[`ab-testing-postmortem.md`](ab-testing-postmortem.md)** — the A/B +
+  adversarial-control ledger: every test run to pin down groundwork's
+  distinctive value against a grep-armed agent, why each "capability edge"
+  claim died to its own control, and the systematic/reliability value that
+  survived.
 - **[`usage.md`](usage.md)** — the practical guide: how groundwork and flowmap fit
   together, every command with real examples, a worked end-to-end review, and the
   trust boundary. Read this first to *use* it.

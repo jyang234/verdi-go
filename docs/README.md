@@ -69,6 +69,7 @@ design record behind them.
 | [`implementation-plan.md`](groundwork/implementation-plan.md) | `DESIGN RECORD` | Plan-of-record for building groundwork (built). |
 | [`drills.md`](groundwork/drills.md) | `DESIGN RECORD` | Triage effectiveness, measured as committed tests — the evidence record. |
 | [`scorecard.md`](groundwork/scorecard.md) | `DESIGN RECORD` | Honest capability assessment, graded by evidence class. |
+| [`ab-testing-postmortem.md`](groundwork/ab-testing-postmortem.md) | `DESIGN RECORD` | A/B + adversarial-control ledger: groundwork's distinctive value vs a grep-armed agent — no per-instance capability edge, systematic/calibration value survives. |
 
 ## design/ — plans & briefs
 
