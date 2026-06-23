@@ -35,6 +35,11 @@ an adversary-resistant gate (see the trust boundary in the usage guide).
   distinctive value against a grep-armed agent, why each "capability edge"
   claim died to its own control, and the systematic/reliability value that
   survived.
+- **[`evaluation-playbook.md`](evaluation-playbook.md)** — the reusable
+  *method* distilled from that engagement: how to honestly test whether a
+  dev tool beats or merely complements a capable agent, without fooling
+  yourself (the de-biasing kit, the trap-design rules, the convergence and
+  treadmill meta-tests, and a one-page run-sheet).
 - **[`usage.md`](usage.md)** — the practical guide: how groundwork and flowmap fit
   together, every command with real examples, a worked end-to-end review, and the
   trust boundary. Read this first to *use* it.

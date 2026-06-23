@@ -70,6 +70,7 @@ design record behind them.
 | [`drills.md`](groundwork/drills.md) | `DESIGN RECORD` | Triage effectiveness, measured as committed tests — the evidence record. |
 | [`scorecard.md`](groundwork/scorecard.md) | `DESIGN RECORD` | Honest capability assessment, graded by evidence class. |
 | [`ab-testing-postmortem.md`](groundwork/ab-testing-postmortem.md) | `DESIGN RECORD` | A/B + adversarial-control ledger: groundwork's distinctive value vs a grep-armed agent — no per-instance capability edge, systematic/calibration value survives. |
+| [`evaluation-playbook.md`](groundwork/evaluation-playbook.md) | `ACTIVE` | Reusable method extracted from that engagement: how to evaluate a dev tool against a capable agent without fooling yourself — de-biasing kit, trap-design rules, convergence/treadmill meta-tests, run-sheet. |
 
 ## design/ — plans & briefs
 
