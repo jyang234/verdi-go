@@ -128,6 +128,32 @@ func TestCallerBlindSpotDoesNotForceFocus(t *testing.T) {
 	}
 }
 
+// TestRenderMermaidZonesAndSafety pins the diagram: it declares both zone classes,
+// colors a focus change with its blind-seam node, a vouched change green, shares an
+// effect node, and entity-escapes the angle brackets a <dynamic> effect carries (an
+// unescaped "<" would break the Mermaid parser).
+func TestRenderMermaidZonesAndSafety(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Clean", Sig: "o"}, {FQN: "svc.Dyn", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.Clean", Sig: "n", Tier: 2}, {FQN: "svc.Dyn", Sig: "n", Tier: 1}},
+		Edges: []graph.Edge{
+			{From: "svc.Clean", To: "boundary:db SELECT users", Boundary: "outbound-sync"},
+			{From: "svc.Dyn", To: "boundary:bus PUBLISH <dynamic>", Boundary: "outbound-async"},
+		},
+		BlindSpots: []graph.BlindSpot{{Kind: "NonConstantBoundaryArg", Site: "svc.Dyn", Detail: "non-const topic"}},
+	}
+	md := Build(base, branch).RenderMermaid()
+
+	for _, want := range []string{"flowchart LR", "classDef focus", "classDef vouched", ":::focus", ":::vouched", ":::blind"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("mermaid missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "PUBLISH <dynamic>") || !strings.Contains(md, "&lt;dynamic&gt;") {
+		t.Errorf("the <dynamic> effect label must be entity-escaped for Mermaid:\n%s", md)
+	}
+}
+
 // TestBuildNoStructuralChange: identical graphs ⇒ nothing to triage, and the render
 // says so explicitly rather than emitting a blank page (silence is never a silent pass).
 func TestBuildNoStructuralChange(t *testing.T) {

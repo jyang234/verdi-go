@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
@@ -61,8 +62,9 @@ type ChangedFn struct {
 
 	// Reasons the tool cannot fully vouch (empty ⇒ vouched): forward-cone blind spots
 	// of non-trivial severity, plus a forward HighFanOut over-approximation.
-	Reasons           []string `json:"reasons,omitempty"`
-	EffectsUpperBound bool     `json:"effects_upper_bound,omitempty"` // forward HighFanOut: the effect surface is an upper bound
+	Reasons           []string          `json:"reasons,omitempty"`
+	Blind             []graph.BlindSpot `json:"blind,omitempty"`               // the raw serious forward blind spots (Reasons rendered; this carries the kinds the diagram colors)
+	EffectsUpperBound bool              `json:"effects_upper_bound,omitempty"` // forward HighFanOut: the effect surface is an upper bound
 
 	// BenignSeams are trivial-severity forward blind spots set aside from the FOCUS
 	// decision (#2) but disclosed so a vouched change never over-claims completeness.
@@ -102,6 +104,7 @@ func Build(base, branch *graph.Graph) Report {
 		}
 		if len(serious) > 0 || fwdOver {
 			cf.Reasons = seriousReasons(serious, fwdOver)
+			cf.Blind = serious
 			focus = append(focus, cf)
 		} else {
 			vouched = append(vouched, cf)
@@ -365,6 +368,113 @@ func writeEvidence(b *strings.Builder, cf ChangedFn, partial bool) {
 			fmt.Fprintf(b, "  - %s\n", e)
 		}
 	}
+}
+
+// RenderMermaid draws the triage as a flowchart for a reviewer who reads a picture
+// faster than a list: changed functions colored by zone (focus = red, vouched = green),
+// each focus function tied to a dashed "⚠ blind" node naming the seam the tool cannot
+// see past, and every change wired to the boundary effects it reaches — dashed from a
+// focus change (a FLOOR, the surface may hide more), solid from a vouched one (the
+// complete surface). Converging changes share an effect node, so a sink several changes
+// touch is visible at a glance. Deterministic: focus is consequence-ordered, effects
+// are emitted in first-seen order, all ids are synthetic.
+func (r Report) RenderMermaid() string {
+	var b strings.Builder
+	b.WriteString("flowchart LR\n")
+	b.WriteString("  classDef focus fill:#fde8e8,stroke:#e02424,color:#771d1d;\n")
+	b.WriteString("  classDef vouched fill:#e6f4ea,stroke:#137333,color:#0b4a22;\n")
+	b.WriteString("  classDef blind fill:#fff8f0,stroke:#e02424,stroke-dasharray:4 3,color:#771d1d;\n")
+	b.WriteString("  classDef effect fill:#eef2ff,stroke:#3b5bdb,color:#1e3a8a;\n")
+
+	if len(r.Focus)+len(r.Vouched) == 0 {
+		b.WriteString("  none[\"No structural change to triage\"]\n")
+		return b.String()
+	}
+
+	// Effect nodes are shared across both zones (deduped, first-seen order) so a sink
+	// multiple changes converge on shows as one node. Edges are collected and emitted
+	// after the subgraphs, since an edge may cross the focus/vouched boundary.
+	effID := map[string]string{}
+	var effOrder []string
+	effFor := func(label string) string {
+		if id, ok := effID[label]; ok {
+			return id
+		}
+		id := fmt.Sprintf("e%d", len(effOrder))
+		effID[label] = id
+		effOrder = append(effOrder, label)
+		return id
+	}
+	type mmEdge struct{ from, to, style string }
+	var edges []mmEdge
+
+	// Focus subgraph: each change, its blind-seam node, and dashed (floor) effect edges.
+	fmt.Fprintf(&b, "  subgraph FOCUS[\"%s\"]\n", mmLabel(fmt.Sprintf("⚠️ Focus — %d change(s) to verify", len(r.Focus))))
+	for i, cf := range r.Focus {
+		fid := fmt.Sprintf("f%d", i)
+		fmt.Fprintf(&b, "    %s[\"%s\"]:::focus\n", fid, mmLabel(nodeLabel(cf)))
+		if kinds := distinctKinds(cf.Blind); len(kinds) > 0 {
+			bid := fid + "b"
+			fmt.Fprintf(&b, "    %s{{\"%s\"}}:::blind\n", bid, mmLabel("⚠ "+strings.Join(kinds, ", ")))
+			edges = append(edges, mmEdge{fid, bid, "-.->"})
+		}
+		for _, eff := range cf.Effects {
+			edges = append(edges, mmEdge{fid, effFor(eff), "-.->"})
+		}
+	}
+	b.WriteString("  end\n")
+
+	// Vouched subgraph: each change with solid (complete) effect edges.
+	fmt.Fprintf(&b, "  subgraph VOUCHED[\"%s\"]\n", mmLabel(fmt.Sprintf("✅ Vouched — %d change(s), evidence shown", len(r.Vouched))))
+	for i, cf := range r.Vouched {
+		vid := fmt.Sprintf("v%d", i)
+		fmt.Fprintf(&b, "    %s[\"%s\"]:::vouched\n", vid, mmLabel(nodeLabel(cf)))
+		for _, eff := range cf.Effects {
+			edges = append(edges, mmEdge{vid, effFor(eff), "-->"})
+		}
+	}
+	b.WriteString("  end\n")
+
+	// Shared effect nodes (outside both subgraphs), then every edge.
+	for i, label := range effOrder {
+		fmt.Fprintf(&b, "  e%d[[\"%s\"]]:::effect\n", i, mmLabel(label))
+	}
+	for _, e := range edges {
+		fmt.Fprintf(&b, "  %s %s %s\n", e.from, e.style, e.to)
+	}
+	return b.String()
+}
+
+// nodeLabel is the compact function label for the diagram: the short name plus the
+// salience-tier badge (a writer of state earns a marker so the eye finds it).
+func nodeLabel(cf ChangedFn) string {
+	s := fitness.ShortName(cf.FQN)
+	if cf.Tier > 0 {
+		s += fmt.Sprintf(" [t%d]", cf.Tier)
+	}
+	if reachesMutating(cf.Effects) {
+		s += " ✍"
+	}
+	return s
+}
+
+// distinctKinds is the sorted, deduped set of blind-spot kinds on a change — the
+// at-a-glance "why can't the tool see here" the diagram colors.
+func distinctKinds(bs []graph.BlindSpot) []string {
+	seen := map[string]bool{}
+	for _, b := range bs {
+		seen[b.Kind] = true
+	}
+	return setutil.SortedKeys(seen)
+}
+
+// mmLabel makes a string safe inside a Mermaid quoted label: collapse the quote that
+// would close it, and entity-escape the angle brackets a <dynamic> effect carries.
+func mmLabel(s string) string {
+	s = strings.ReplaceAll(s, "\"", "'")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 // tierTag is the salience badge beside a changed function (omitted for the unset tier).
