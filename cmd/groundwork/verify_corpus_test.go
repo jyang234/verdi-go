@@ -10,6 +10,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
+	"github.com/jyang234/golang-code-graph/internal/impeach"
 )
 
 // corpusDir is the committed impeachsvc behavioral corpus, loaded WHOLE by
@@ -106,6 +107,76 @@ func TestVerifyCorpusImpeachmentBlocks(t *testing.T) {
 	}
 	if n := len(gr.NewViolations) + len(gr.ScopeEscapes) + len(gr.BreakingContract) + len(gr.NewBlindSpots) + len(gr.NewWriteTargets); n != 0 {
 		t.Errorf("a static block dimension is also set (%d) — impeachment is not the sole cause: %+v", n, gr)
+	}
+}
+
+// TestVerifyCorpusSurfacesSeveranceLocalization pins Fix #2 end to end: the gate's
+// disclosed breach must carry the severance localization (Kind/Site), and the human
+// render must NAME the seam — "missed-root: static never discovered the entry …" —
+// so the certificate's payload is "where static was blind", not just "a proof was
+// unproved". The impeachsvc trap is a missed admin route, so Kind is missed-root.
+func TestVerifyCorpusSurfacesSeveranceLocalization(t *testing.T) {
+	g := stampedImpeachGraph(t)
+	pol := writePolicy(t, gatingPolicy)
+
+	out := captureStdout(t, func() {
+		_ = run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--json"})
+	})
+	var gr review.GateResult
+	if err := json.Unmarshal([]byte(out), &gr); err != nil {
+		t.Fatalf("parse gate JSON: %v\n%s", err, out)
+	}
+	if len(gr.ImpeachmentBreaches) != 1 {
+		t.Fatalf("want 1 breach, got %d: %+v", len(gr.ImpeachmentBreaches), gr.ImpeachmentBreaches)
+	}
+	if k := gr.ImpeachmentBreaches[0].Kind; k != impeach.SeveranceMissedRoot {
+		t.Errorf("breach Kind = %q, want %q (the undiscovered admin route)", k, impeach.SeveranceMissedRoot)
+	}
+	if gr.ImpeachmentBreaches[0].Site == "" {
+		t.Error("breach Site is empty — the localized seam was not surfaced")
+	}
+
+	text := captureStdout(t, func() {
+		_ = run([]string{"verify", pol, g, g, "--corpus", corpusDir})
+	})
+	if !strings.Contains(text, "missed-root: static never discovered the entry") {
+		t.Errorf("the certificate does not name the seam (Fix #2 regressed):\n%s", text)
+	}
+}
+
+// TestVerifyCorpusNonBindingIsDisclosedNotSilent pins Fix #3 end to end: an
+// UNSTAMPED graph makes the committed corpus fail the code-identity rung
+// (VERSION-SKEW), so it binds to nothing and yields no blockers. The gate still
+// PASSES (a non-binding corpus is not a code violation) but must NOT pass silently —
+// the result must disclose that the corpus provided no protection, or an operator
+// will mistake an inert corpus for a behavioral all-clear (the original silent-PASS).
+func TestVerifyCorpusNonBindingIsDisclosedNotSilent(t *testing.T) {
+	// The committed graph on disk is stampless, so its injected trace identity is
+	// empty ⇒ VERSION-SKEW for every candidate.
+	g := "../../internal/impeach/testdata/impeachsvc.graph.json"
+	pol := writePolicy(t, gatingPolicy)
+
+	out := captureStdout(t, func() {
+		_ = run([]string{"verify", pol, g, g, "--corpus", corpusDir, "--json"})
+	})
+	var gr review.GateResult
+	if err := json.Unmarshal([]byte(out), &gr); err != nil {
+		t.Fatalf("parse gate JSON: %v\n%s", err, out)
+	}
+	if !gr.Pass {
+		t.Fatal("a non-binding corpus must not BLOCK (it is not a code violation)")
+	}
+	if len(gr.ImpeachmentBreaches) != 0 {
+		t.Fatalf("a non-binding corpus must yield no blockers, got %+v", gr.ImpeachmentBreaches)
+	}
+	disclosed := false
+	for _, c := range gr.Caveats {
+		if strings.Contains(c, "did not bind to this commit") && strings.Contains(c, "VERSION-SKEW") {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Errorf("non-binding corpus was not disclosed (silent PASS is the bug) — caveats: %v", gr.Caveats)
 	}
 }
 

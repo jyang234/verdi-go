@@ -114,14 +114,24 @@ func Resolve(r Report, ix *graph.Index, rules []policy.ReachRule, origin CorpusO
 // GateFinding is one gate-blocking witness with the precise reason it blocks —
 // the bridge to the review layer's BLOCK (§14-C). It carries the verdict and the
 // must_not_reach rule so the disclosure names exactly which invariant the
-// behavioral witness broke or unproved.
+// behavioral witness broke or unproved, AND the localization (Site/Kind) of WHERE
+// static lost the effect — the distinctive payload of the behavioral join (§6).
+// Without Site/Kind the gate disclosure degrades to "a proof was unproved"; with
+// them it names the exact seam static was blind to (e.g. missed-root: an entry the
+// graph never discovered), which is the whole reason behavior could impeach static.
 type GateFinding struct {
 	Effect  string `json:"effect"`
 	Flow    string `json:"flow"`
 	Entry   string `json:"entry"`
 	Verdict string `json:"verdict"` // VIOLATED | IMPEACHMENT
 	Rule    string `json:"rule"`    // the must_not_reach rule whose proof this breaks/unproves
-	Reason  string `json:"reason"`
+	// Site and Kind are the severance localization (§6): Kind is the break flavor
+	// (missed-root | severed-emitter | unmodeled-effect) and Site is where it broke
+	// (coarse "" at L0, a precise node at L1). omitempty so a finding without a
+	// localized severance serializes clean and adds nothing to the digest.
+	Site   string `json:"site,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+	Reason string `json:"reason"`
 }
 
 // GateBlockers returns the witnesses that fail a gate. It is EMPTY unless the
@@ -150,11 +160,13 @@ func (res Resolution) GateBlockers() []GateFinding {
 	}
 	var out []GateFinding
 	for _, w := range res.Candidates {
+		site, kind := sevSiteKind(w)
 		switch w.Verdict {
 		case VerdictViolated:
 			out = append(out, GateFinding{
 				Effect: w.Effect, Flow: w.Observed.Flow, Entry: w.Observed.Entry,
 				Verdict: VerdictViolated, Rule: firstReqOrAny(w.Claim.Rules, reqProof),
+				Site: site, Kind: kind,
 				Reason: "behaviorally-confirmed must_not_reach breach: the forbidden effect was observed reaching from this entry",
 			})
 		case VerdictImpeachment:
@@ -163,6 +175,7 @@ func (res Resolution) GateBlockers() []GateFinding {
 					out = append(out, GateFinding{
 						Effect: w.Effect, Flow: w.Observed.Flow, Entry: w.Observed.Entry,
 						Verdict: VerdictImpeachment, Rule: name,
+						Site: site, Kind: kind,
 						Reason: "impeachment downgrades a require_proof must_not_reach proof to CANT-PROVE (fails closed)",
 					})
 				}
@@ -251,6 +264,52 @@ func firstReqOrAny(names []string, reqProof map[string]bool) string {
 	return ""
 }
 
+// sevSiteKind reads a witness's severance localization (Site, Kind) for the gate
+// finding, guarding the nil severance defensively — Audit localizes every candidate
+// before classify, so a gated witness always carries one, but the gate must never
+// panic on a malformed report.
+func sevSiteKind(w Witness) (site, kind string) {
+	if w.Severance != nil {
+		return w.Severance.Site, w.Severance.Kind
+	}
+	return "", ""
+}
+
+// BindingDisclosures reports WHY a supplied corpus produced no sound impeachment
+// when the reason is that it did not BIND — candidates existed (effects were
+// observed contradicting static) but were capped at a binding rung: VERSION-SKEW
+// (the corpus's code identity is unestablished/mismatched against the graph stamp)
+// or CAPTURE-UNTRUSTED (the capture is not an established production/integration
+// grade). In either case the corpus provided ZERO gate protection, and a gate that
+// passed silently would let an operator believe they were protected when they are
+// not — the exact silent-PASS this discloses. It is disclosure, not a gate (the
+// corpus binding is an operational assumption, not a code violation; failing closed
+// to BLOCK on every stale corpus is a separate policy choice). Returns nil when
+// there were no candidates (a corpus that bound and found nothing is legitimately
+// clean) or when every non-impeaching candidate was a binding-unrelated downgrade
+// (NOT-A-CONTRADICTION = static abstains; LABEL-MISMATCH / CROSS-SERVICE = not this
+// audit's concern). Deterministic: fixed order (skew before untrusted), counts over
+// the already-sorted Candidates.
+func (res Resolution) BindingDisclosures() []string {
+	skew, untrusted := 0, 0
+	for _, w := range res.Candidates {
+		switch w.Verdict {
+		case DowngradeVersionSkew:
+			skew++
+		case DowngradeCaptureUntrusted:
+			untrusted++
+		}
+	}
+	var out []string
+	if skew > 0 {
+		out = append(out, plural(skew, "behavioral candidate")+" did not bind to this commit (VERSION-SKEW: the corpus's code identity is unestablished or does not match the graph stamp) and provided no gate protection — re-capture the corpus for this commit")
+	}
+	if untrusted > 0 {
+		out = append(out, plural(untrusted, "behavioral candidate")+" capped at CAPTURE-UNTRUSTED (the corpus capture is not an established production/integration grade) and provided no gate protection")
+	}
+	return out
+}
+
 func lessGateFinding(a, b GateFinding) bool {
 	if a.Effect != b.Effect {
 		return a.Effect < b.Effect
@@ -264,7 +323,17 @@ func lessGateFinding(a, b GateFinding) bool {
 	if a.Verdict != b.Verdict {
 		return a.Verdict < b.Verdict
 	}
-	return a.Rule < b.Rule
+	if a.Rule != b.Rule {
+		return a.Rule < b.Rule
+	}
+	// Site/Kind are the final tie-break: two findings can share (Effect, Flow, Entry,
+	// Verdict, Rule) yet localize to different seams (two observed paths to one effect),
+	// so the order must break on them too or the non-stable sort would order them on
+	// arrival (§5 determinism).
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	return a.Site < b.Site
 }
 
 // sortedKeys is the deterministic key list of a set — intrinsic order, never map

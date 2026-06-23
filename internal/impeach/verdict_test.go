@@ -2,6 +2,7 @@ package impeach
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -137,6 +138,72 @@ func TestGateBlockersBareImpeachmentOnlyBlocksUnderRequireProof(t *testing.T) {
 	got := Resolve(r, ix, strict, OriginCommitted).GateBlockers()
 	if len(got) != 1 || got[0].Verdict != VerdictImpeachment || got[0].Rule != "hard" {
 		t.Errorf("require_proof bare impeachment did not block: %+v", got)
+	}
+}
+
+// TestGateBlockersCarrySeveranceLocalization pins the Fix #2 contract: a gate
+// finding must carry the severance localization (Kind/Site) so the gate certificate
+// names WHERE static was blind, not merely "a proof was unproved". The fixture is a
+// severed-emitter (the entry is a discovered root but no root reaches the emitter),
+// so the finding must disclose that flavor and a non-empty site.
+func TestGateBlockersCarrySeveranceLocalization(t *testing.T) {
+	ix, r, _ := impeachFixture(t)
+	rules := []policy.ReachRule{{
+		Name: "no-delete", From: []string{"svc.cronjob"}, To: []string{"boundary:db DELETE ledger"}, RequireProof: true,
+	}}
+	got := Resolve(r, ix, rules, OriginCommitted).GateBlockers()
+	if len(got) != 1 {
+		t.Fatalf("want 1 blocker, got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != SeveranceSeveredEmitter {
+		t.Errorf("GateFinding.Kind = %q, want %q (the localized seam flavor)", got[0].Kind, SeveranceSeveredEmitter)
+	}
+	if got[0].Site == "" {
+		t.Errorf("GateFinding.Site is empty; want the precise severed node so the certificate names the seam")
+	}
+}
+
+// TestBindingDisclosures pins the Fix #3 contract: a corpus whose candidates were
+// capped at a BINDING rung (VERSION-SKEW / CAPTURE-UNTRUSTED) bound to nothing and
+// must be DISCLOSED (so an inert corpus cannot read as a clean PASS), while a corpus
+// with nothing to disclose (no candidates, or only binding-unrelated downgrades)
+// returns no disclosure.
+func TestBindingDisclosures(t *testing.T) {
+	mk := func(verdicts ...string) Resolution {
+		var cs []Witness
+		for _, v := range verdicts {
+			cs = append(cs, Witness{Verdict: v})
+		}
+		return Resolution{Report: Report{Candidates: cs}}
+	}
+
+	skew := mk(DowngradeVersionSkew, DowngradeVersionSkew).BindingDisclosures()
+	if len(skew) != 1 || !strings.Contains(skew[0], "did not bind to this commit") || !strings.Contains(skew[0], "VERSION-SKEW") {
+		t.Errorf("version-skew candidates not disclosed: %v", skew)
+	}
+
+	untrusted := mk(DowngradeCaptureUntrusted).BindingDisclosures()
+	if len(untrusted) != 1 || !strings.Contains(untrusted[0], "CAPTURE-UNTRUSTED") {
+		t.Errorf("capture-untrusted candidates not disclosed: %v", untrusted)
+	}
+
+	// Both rungs present ⇒ both disclosed, skew first (deterministic order).
+	both := mk(DowngradeCaptureUntrusted, DowngradeVersionSkew).BindingDisclosures()
+	if len(both) != 2 || !strings.Contains(both[0], "VERSION-SKEW") {
+		t.Errorf("both binding rungs should disclose, skew first: %v", both)
+	}
+
+	// A bound corpus that found a real impeachment (or nothing) has no binding gap.
+	if d := mk(VerdictImpeachment).BindingDisclosures(); len(d) != 0 {
+		t.Errorf("a bound impeachment must not emit a binding disclosure: %v", d)
+	}
+	if d := mk().BindingDisclosures(); len(d) != 0 {
+		t.Errorf("an empty (clean) corpus must not emit a binding disclosure: %v", d)
+	}
+	// NOT-A-CONTRADICTION is a binding-UNRELATED downgrade (static abstains) — not a
+	// non-binding corpus, so it must stay silent.
+	if d := mk(DowngradeNotAContradiction).BindingDisclosures(); len(d) != 0 {
+		t.Errorf("a binding-unrelated downgrade must not be disclosed as non-binding: %v", d)
 	}
 }
 

@@ -717,11 +717,14 @@ func cmdVerify(args []string) error {
 	// impeachment_gate.gate (observe-first).
 	var opts []review.GateOption
 	if hasCorpus {
-		blockers, err := committedImpeachmentBlockers(p, branch, corpusDir, captureArg)
+		blockers, notes, err := committedImpeachmentBlockers(p, branch, corpusDir, captureArg)
 		if err != nil {
 			return err
 		}
-		opts = append(opts, review.WithImpeachment(blockers))
+		// WithImpeachmentNotes carries the binding disclosures so a corpus that did
+		// not bind (VERSION-SKEW / CAPTURE-UNTRUSTED) cannot read as a clean PASS —
+		// the silent-PASS this path previously had.
+		opts = append(opts, review.WithImpeachment(blockers), review.WithImpeachmentNotes(notes))
 	}
 	g := review.Gate(p, base, branch, scope, opts...)
 
@@ -904,16 +907,20 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 // candidate to a gating impeachment; a corpus that self-describes neither (and no
 // caller assertion) never blocks. GateBlockers additionally fences to a committed
 // corpus, so a live trace can never reach here.
-func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, capture string) ([]impeach.GateFinding, error) {
+// It also returns the binding disclosures (Resolution.BindingDisclosures): when the
+// corpus produced candidates but none bound (VERSION-SKEW / CAPTURE-UNTRUSTED), the
+// gate must say so rather than pass silently — a non-binding corpus that reads as a
+// clean PASS is the trust-corroding default this surfaces.
+func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, capture string) ([]impeach.GateFinding, []string, error) {
 	traces, err := loadCommittedCorpus(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ix := graph.NewIndex(branch)
 	prov := impeach.Provenance{TraceIdentity: branch.Stamp, Capture: capture}
 	r := impeach.Audit(p.Service, ix, traces, prov)
 	res := impeach.Resolve(r, ix, p.MustNotReach, impeach.OriginCommitted)
-	return res.GateBlockers(), nil
+	return res.GateBlockers(), res.BindingDisclosures(), nil
 }
 
 // loadCommittedCorpus reads every committed canonical-trace golden (*.golden.json)
