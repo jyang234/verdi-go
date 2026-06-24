@@ -385,3 +385,25 @@ func TestFaultCardStatesScope(t *testing.T) {
 		t.Error("plain card carries the fault scope block")
 	}
 }
+
+// TestForwardBlindSpotsExcludesCallerBlindSpots pins the forward-only contract: the
+// review surfaces partition a change by what it can DO, so a blind spot in a CALLER
+// (reverse reach) must not count against the change — only the forward cone does.
+// ForNodes (the bidirectional incident card) must still see both.
+func TestForwardBlindSpotsExcludesCallerBlindSpots(t *testing.T) {
+	ix := graph.NewIndex(&graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.up"}, {FQN: "svc.mid"}, {FQN: "svc.down"}},
+		Edges: []graph.Edge{{From: "svc.up", To: "svc.mid"}, {From: "svc.mid", To: "svc.down"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "reflect", Site: "svc.up", Detail: "caller blind"},
+			{Kind: "reflect", Site: "svc.down", Detail: "callee blind"},
+		},
+	})
+	blind, _ := ForwardBlindSpots(ix, []string{"svc.mid"})
+	if len(blind) != 1 || blind[0].Site != "svc.down" {
+		t.Fatalf("forward blind spots = %+v, want only svc.down (caller svc.up excluded)", blind)
+	}
+	if card := ForNodes(ix, []string{"svc.mid"}); len(card.BlindSpots) != 2 {
+		t.Errorf("ForNodes (bidirectional) should see both caller and callee blind spots, got %+v", card.BlindSpots)
+	}
+}

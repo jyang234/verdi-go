@@ -300,6 +300,13 @@ type BlindSpot struct {
 	Package string `json:"package,omitempty"`
 }
 
+// DedupKey is the identity of a blind spot for set operations: the (Kind, Site, Detail)
+// tuple. It is the ONE source for "what makes two blind spots the same", shared by
+// impact's gather-and-dedup and reviewtriage's base-vs-branch new-vs-carried diff so the
+// two can never drift on seam identity (CLAUDE.md one-source-of-truth) — a drift there
+// would silently misclassify new blindness as carried.
+func (b BlindSpot) DedupKey() string { return b.Kind + "\x00" + b.Site + "\x00" + b.Detail }
+
 // externalBoundaryKind is the wire Kind value of an ExternalBoundaryCall blind spot.
 // A local const (not an import of the producer's blindspots package) keeps groundwork
 // on its own side of the trust boundary — the convention every graph-carried enum

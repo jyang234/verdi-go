@@ -54,14 +54,17 @@ func routeSide(r fitness.RouteIO) *RouteIOSide {
 	return &RouteIOSide{Writes: len(r.Writes), Frontier: f}
 }
 
-// routeIODeltas diffs the per-route write surface. Counts are distinct static
+// RouteIODeltas diffs the per-route write surface. Counts are distinct static
 // write targets, not runtime volume (an N+1 is the same target either way),
 // which is why this section discloses every delta rather than gating on any
 // threshold. Routes present on one side only get a row when they carry writes.
+// Exported so the review-triage summary consumes the SAME per-route delta rather
+// than re-deriving it (one source of truth).
 //
 // The rw maps are the ones fitness.Check computed for the io_budget; they are
-// recomputed here only when the policy declares no budget and Check never did.
-func routeIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index, baseRW, branchRW map[string]fitness.RouteIO) []RouteIODelta {
+// recomputed here only when the policy declares no budget and Check never did
+// (a nil map ⇒ compute via fitness.RouteWrites).
+func RouteIODeltas(p *policy.Policy, baseIx, branchIx *graph.Index, baseRW, branchRW map[string]fitness.RouteIO) []RouteIODelta {
 	if baseRW == nil {
 		baseRW = fitness.RouteWrites(p, baseIx)
 	}
@@ -153,7 +156,7 @@ func blindTag(s *RouteIOSide) string {
 // branch, absent from the base, and not covered by the policy's allow-list.
 // Labels are diffed as sets over the whole graph (not the edge delta), so a
 // new edge to an already-written target is correctly not "new surface" — that
-// per-route movement is routeIODeltas' job.
+// per-route movement is RouteIODeltas' job.
 func newWriteTargets(p *policy.Policy, base, branch *graph.Graph) []string {
 	baseL := edgeSet(base.Edges, fitness.WriteLabel)
 	var out []string

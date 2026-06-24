@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/capture"
@@ -28,6 +29,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/impact"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/review"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/reviewtriage"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/transcript"
 	"github.com/jyang234/golang-code-graph/internal/impeach"
 	"github.com/jyang234/golang-code-graph/ir"
@@ -95,6 +97,8 @@ func run(args []string) error {
 		return cmdFitness(args[1:])
 	case "review":
 		return cmdReview(args[1:])
+	case "review-triage":
+		return cmdReviewTriage(args[1:])
 	case "verify":
 		return cmdVerify(args[1:])
 	case "diff":
@@ -166,6 +170,7 @@ usage:
   groundwork chains <graph.json>... [--service <name>=<graph.json>]... [--policy <p.json>]...  cross-service effect chains (CX-5, observational)
   groundwork fitness <policy.json> <graph.json> [--expect <sha>] evaluate the policy's invariants (non-zero exit on violation)
   groundwork review <policy> <base.json> <branch.json> [--expect <sha>] [--json]   computed MR review artifact (BLOCK exits non-zero)
+  groundwork review-triage <base.json> <branch.json> [--json|--mermaid|--summary] [--policy <p.json>] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage; --summary is an MR-comment digest; --policy adds per-route write movement
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--json] pre-flight gate: new violations, scope creep, breaking contract
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
@@ -641,6 +646,78 @@ func ruleCount(p *policy.Policy) int {
 	return n
 }
 
+// cmdReviewTriage is the PROTOTYPE reviewer-triage surface: it partitions the MR's
+// changed functions into vouched (fully resolved — complete evidence shown) and focus
+// (touches a blind spot — look here). No policy, no verdict, no stamp gate: it is a
+// comprehension aid, not a gate, so it never exits non-zero on content.
+func cmdReviewTriage(args []string) error {
+	asJSON, rest := takeFlag(args, "--json", "-json")
+	asMermaid, rest := takeFlag(rest, "--mermaid", "-mermaid")
+	asSummary, rest := takeFlag(rest, "--summary", "-summary")
+	full, rest := takeFlag(rest, "--full", "-full")
+	maxArg, _, rest := takeValueFlag(rest, "--max-nodes", "-max-nodes")
+	policyArg, hasPolicy, rest := takeValueFlag(rest, "--policy", "-policy")
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: groundwork review-triage <base-graph.json> <branch-graph.json> [--json | --mermaid | --summary] [--policy <policy.json>] [--full] [--max-nodes N]")
+	}
+	if b2i(asJSON)+b2i(asMermaid)+b2i(asSummary) > 1 {
+		return fmt.Errorf("review-triage: choose at most one of --json, --mermaid, --summary")
+	}
+	opts := reviewtriage.Options{Full: full}
+	if maxArg != "" {
+		n, err := strconv.Atoi(maxArg)
+		// Require a POSITIVE budget: 0 would otherwise pass and then be silently treated
+		// as the default by Options.budget() (which maps 0 → default), ignoring the flag.
+		if err != nil || n < 1 {
+			return fmt.Errorf("--max-nodes: want a positive integer, got %q", maxArg)
+		}
+		opts.MaxNodes = n
+	}
+	// An optional policy enables the per-route write-movement section (it is what
+	// fitness.RouteWrites needs to enumerate routes/roots); without it the rest still works.
+	var p *policy.Policy
+	if hasPolicy {
+		loaded, err := policy.Load(policyArg)
+		if err != nil {
+			return err
+		}
+		p = loaded
+	}
+	base, err := graph.LoadFile(rest[0])
+	if err != nil {
+		return err
+	}
+	branch, err := graph.LoadFile(rest[1])
+	if err != nil {
+		return err
+	}
+	rep := reviewtriage.Build(base, branch, p)
+	switch {
+	case asJSON:
+		b, err := canonjson.Marshal(rep)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(b)
+		return err
+	case asMermaid:
+		fmt.Print(rep.RenderMermaid(opts))
+	case asSummary:
+		fmt.Print(rep.RenderSummary(opts))
+	default:
+		fmt.Print(rep.RenderMarkdown(opts))
+	}
+	return nil
+}
+
+// b2i is 1 for true, 0 for false — for counting how many mutually-exclusive flags are set.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // cmdReview computes the base-vs-branch MR review artifact. With --json it emits
 // the canonical artifact (the form a verifier reads); otherwise the human report.
 // A BLOCK verdict exits non-zero so the same command can back a CI gate.
@@ -717,11 +794,14 @@ func cmdVerify(args []string) error {
 	// impeachment_gate.gate (observe-first).
 	var opts []review.GateOption
 	if hasCorpus {
-		blockers, err := committedImpeachmentBlockers(p, branch, corpusDir, captureArg)
+		blockers, notes, err := committedImpeachmentBlockers(p, branch, corpusDir, captureArg)
 		if err != nil {
 			return err
 		}
-		opts = append(opts, review.WithImpeachment(blockers))
+		// WithImpeachmentNotes carries the binding disclosures so a corpus that did
+		// not bind (VERSION-SKEW / CAPTURE-UNTRUSTED) cannot read as a clean PASS —
+		// the silent-PASS this path previously had.
+		opts = append(opts, review.WithImpeachment(blockers), review.WithImpeachmentNotes(notes))
 	}
 	g := review.Gate(p, base, branch, scope, opts...)
 
@@ -904,16 +984,20 @@ func loadReviewInputs(policyPath, basePath, branchPath string) (*policy.Policy, 
 // candidate to a gating impeachment; a corpus that self-describes neither (and no
 // caller assertion) never blocks. GateBlockers additionally fences to a committed
 // corpus, so a live trace can never reach here.
-func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, capture string) ([]impeach.GateFinding, error) {
+// It also returns the binding disclosures (Resolution.BindingDisclosures): when the
+// corpus produced candidates but none bound (VERSION-SKEW / CAPTURE-UNTRUSTED), the
+// gate must say so rather than pass silently — a non-binding corpus that reads as a
+// clean PASS is the trust-corroding default this surfaces.
+func committedImpeachmentBlockers(p *policy.Policy, branch *graph.Graph, dir, capture string) ([]impeach.GateFinding, []string, error) {
 	traces, err := loadCommittedCorpus(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ix := graph.NewIndex(branch)
 	prov := impeach.Provenance{TraceIdentity: branch.Stamp, Capture: capture}
 	r := impeach.Audit(p.Service, ix, traces, prov)
 	res := impeach.Resolve(r, ix, p.MustNotReach, impeach.OriginCommitted)
-	return res.GateBlockers(), nil
+	return res.GateBlockers(), res.BindingDisclosures(), nil
 }
 
 // loadCommittedCorpus reads every committed canonical-trace golden (*.golden.json)

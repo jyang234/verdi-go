@@ -13,7 +13,9 @@ surfaces `fitness`, `review`, `verify`, `diff`, `verify-artifact`,
 `policy-check`; the lenses `reach`, `triage`, `ground`, `exceptions`,
 `transcript`; the adoption shell `init` (+ SARIF, setup action); and the `mcp`
 server through all three tiers (stdio, `--service` fleet serving, `--http`
-team transport). The zero-touch CI trust anchor (Phase 4) is intentionally
+team transport). A reviewer-triage **prototype** (`review-triage`) is built and
+unit-locked but field-unproven — graded ⚠️ on value in the scorecard, documented in
+the usage guide. The zero-touch CI trust anchor (Phase 4) is intentionally
 deferred; until it exists groundwork is a sound *local/advisory* tool, not yet
 an adversary-resistant gate (see the trust boundary in the usage guide).
 
@@ -30,6 +32,16 @@ an adversary-resistant gate (see the trust boundary in the usage guide).
 - **[`scorecard.md`](scorecard.md)** — the capability scorecard, graded by
   evidence class: what is proven, what is measured, and what is honestly
   unproven from inside this repo.
+- **[`ab-testing-postmortem.md`](ab-testing-postmortem.md)** — the A/B +
+  adversarial-control ledger: every test run to pin down groundwork's
+  distinctive value against a grep-armed agent, why each "capability edge"
+  claim died to its own control, and the systematic/reliability value that
+  survived.
+- **[`evaluation-playbook.md`](evaluation-playbook.md)** — the reusable
+  *method* distilled from that engagement: how to honestly test whether a
+  dev tool beats or merely complements a capable agent, without fooling
+  yourself (the de-biasing kit, the trap-design rules, the convergence and
+  treadmill meta-tests, and a one-page run-sheet).
 - **[`usage.md`](usage.md)** — the practical guide: how groundwork and flowmap fit
   together, every command with real examples, a worked end-to-end review, and the
   trust boundary. Read this first to *use* it.

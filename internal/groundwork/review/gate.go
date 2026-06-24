@@ -41,9 +41,12 @@ type GateResult struct {
 	// Algo and Caveats record the call-graph substrate the judged branch graph
 	// was built on — provenance baked into the gate digest so the verdict
 	// self-certifies which algorithm produced it (R3). Caveats also carries the
-	// committed-corpus code-identity disclosure when a behavioral impeachment is
-	// present (committedCorpusIdentityCaveat) — a trust assumption on the same line,
-	// not a call-graph property.
+	// corpus trust disclosures when a behavioral corpus is supplied: the committed-
+	// corpus code-identity assumption (committedCorpusIdentityCaveat, when a breach
+	// is present) and the binding disclosures (WithImpeachmentNotes — e.g. a corpus
+	// that did not bind to this commit, surfaced even when no breach blocks, so an
+	// inert corpus cannot read as a clean PASS). All are trust assumptions on the
+	// same line, not call-graph properties.
 	Algo    string   `json:"algo,omitempty"`
 	Caveats []string `json:"caveats,omitempty"`
 	Digest  string   `json:"digest"`
@@ -52,7 +55,8 @@ type GateResult struct {
 // gateConfig holds the optional behavioral input a caller threads into the
 // otherwise base/branch-static gate. The zero value is the pure static gate.
 type gateConfig struct {
-	impeachment []impeach.GateFinding
+	impeachment      []impeach.GateFinding
+	impeachmentNotes []string
 }
 
 // GateOption configures an optional input to Gate. The default (no option) is the
@@ -66,6 +70,17 @@ type GateOption func(*gateConfig)
 // when the policy opts in via impeachment_gate.gate (§9/§10 observe-first).
 func WithImpeachment(blockers []impeach.GateFinding) GateOption {
 	return func(c *gateConfig) { c.impeachment = blockers }
+}
+
+// WithImpeachmentNotes supplies non-blocking disclosures about the behavioral
+// corpus itself — most importantly that a supplied corpus did NOT bind to this
+// commit (impeach.Resolution.BindingDisclosures: VERSION-SKEW / CAPTURE-UNTRUSTED).
+// Without this, a corpus that bound to nothing produces no blockers and the gate
+// passes SILENTLY, letting an operator believe a behavioral check ran when it did
+// not. The notes are surfaced as caveats (disclosure, never a Pass=false reason);
+// empty notes leave the gate byte-identical, so the default static gate is unchanged.
+func WithImpeachmentNotes(notes []string) GateOption {
+	return func(c *gateConfig) { c.impeachmentNotes = notes }
 }
 
 // committedCorpusIdentityCaveat discloses the one rung of the impeachment downgrade
@@ -132,6 +147,11 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string, opts ...G
 	if len(cfg.impeachment) > 0 {
 		caveats = append(caveats, committedCorpusIdentityCaveat)
 	}
+	// Corpus-binding disclosures (e.g. "the corpus did not bind to this commit") are
+	// appended in their caller-supplied deterministic order. They surface even when
+	// cfg.impeachment is empty — that empty-blockers-yet-corpus-supplied case is
+	// exactly the silent-PASS this disclosure exists to break.
+	caveats = append(caveats, cfg.impeachmentNotes...)
 
 	g := GateResult{
 		Service:             p.Service,
@@ -270,6 +290,9 @@ func (g GateResult) Render() string {
 // VIOLATED (observed must_not_reach breach) or a require_proof proof downgraded to
 // CANT-PROVE. Disclosed always; blocking only when impeachment_gate.gate is set
 // (the verdict line at the top conveys whether it did). "" when there are none.
+// Each finding is followed by its severance localization (the seam static was
+// blind to) — the distinctive payload of the behavioral join, not just "a proof
+// was unproved" (§6).
 func renderImpeachmentBreaches(bs []impeach.GateFinding) string {
 	if len(bs) == 0 {
 		return ""
@@ -278,8 +301,38 @@ func renderImpeachmentBreaches(bs []impeach.GateFinding) string {
 	fmt.Fprintf(&b, "🔭 %d behavioral impeachment(s) — gated by impeachment_gate (disclosed always; blocks only when ratified)\n", len(bs))
 	for _, f := range bs {
 		fmt.Fprintf(&b, "- %s: %s on flow %q reaching %q — %s\n", f.Verdict, f.Rule, f.Flow, f.Effect, f.Reason)
+		if loc := impeachLocalization(f); loc != "" {
+			fmt.Fprintf(&b, "    ↳ %s\n", loc)
+		}
 	}
 	return b.String()
+}
+
+// impeachLocalization renders WHERE static lost the effect — the severance the
+// impeachment is built on (§6). This is the payload the gate previously buried:
+// "a proof was unproved" tells an operator nothing actionable; "missed-root: static
+// never discovered the entry DELETE /admin/ledger" tells them exactly which seam to
+// look at. "" when the finding carries no localized kind (defensive).
+func impeachLocalization(f impeach.GateFinding) string {
+	switch f.Kind {
+	case impeach.SeveranceMissedRoot:
+		return fmt.Sprintf("missed-root: static never discovered the entry %q (%s)", f.Entry, siteClause(f.Site))
+	case impeach.SeveranceSeveredEmitter:
+		return fmt.Sprintf("severed-emitter: static reached the entry but a dispatch seam upstream of the effect is unresolved (%s)", siteClause(f.Site))
+	case impeach.SeveranceUnmodeledEffect:
+		return fmt.Sprintf("unmodeled-effect: static modeled no emitter for this effect on the observed path (%s)", siteClause(f.Site))
+	default:
+		return ""
+	}
+}
+
+// siteClause names the precise severed node, or discloses the coarse-L0 case where
+// only the flavor (not a node) is localized — never silently empty.
+func siteClause(site string) string {
+	if site == "" {
+		return "no precise site localized — coarse L0"
+	}
+	return "site: " + site
 }
 
 // Marshal renders the gate result as canonical JSON.

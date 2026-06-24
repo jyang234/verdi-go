@@ -33,7 +33,7 @@ func Review(p *policy.Policy, base, branch *graph.Graph) Artifact {
 		NewViolations:    newViolations,
 		Contract:         contractChanges(baseIx, branchIx),
 		Effects:          ioEffects(d),
-		RouteIO:          routeIODeltas(p, baseIx, branchIx, baseRW, branchRW),
+		RouteIO:          RouteIODeltas(p, baseIx, branchIx, baseRW, branchRW),
 		NewWriteTargets:  newWriteTargets(p, base, branch),
 		Reach:            reachExisting(d, baseIx, branchIx),
 		NewCautions:      newCautions,

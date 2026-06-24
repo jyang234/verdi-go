@@ -96,6 +96,62 @@ func ForFault(ix *graph.Index, fqns []string) Card {
 	return c
 }
 
+// gatherBlindSpots collects, deduped and sorted, the function- and package-level
+// blind spots at each node in `nodes`, plus a synthesized DynamicEffect for each
+// dynamic boundary effect in `dynEffects`. The two inputs let a caller scope the node
+// walk — the bidirectional blast radius (ForNodes) or the forward cone alone
+// (ForwardBlindSpots) — while keeping the dedup key AND the dynamic-effect synthesis
+// identical, so the two surfaces can never disagree on what a blind spot IS (one
+// source of truth, CLAUDE.md). The DynamicEffect Detail drops the internal "boundary:"
+// prefix — the same human-readable form ground.go emits, so every surface renders (and
+// diffs) the identical blind spot the same way.
+func gatherBlindSpots(ix *graph.Index, nodes []string, dynEffects []graph.Edge) []graph.BlindSpot {
+	var blind []graph.BlindSpot
+	seen := map[string]bool{}
+	add := func(bs []graph.BlindSpot) {
+		for _, b := range bs {
+			// Detail is part of the identity: two DynamicEffect blind spots at the same
+			// site with different effect labels are distinct disclosures (Detail is rendered).
+			// graph.BlindSpot.DedupKey is the one source for this identity (shared with
+			// reviewtriage's new-vs-carried diff).
+			k := b.DedupKey()
+			if !seen[k] {
+				seen[k] = true
+				blind = append(blind, b)
+			}
+		}
+	}
+	for _, fn := range nodes {
+		add(ix.BlindSpotsAt(fn))
+		add(ix.BlindSpotsAt(fitness.PkgOf(fn)))
+	}
+	for _, e := range dynEffects {
+		if e.IsDynamic() {
+			add([]graph.BlindSpot{{Kind: "DynamicEffect", Site: e.From, Detail: strings.TrimPrefix(e.To, "boundary:")}})
+		}
+	}
+	graph.SortBlindSpots(blind)
+	return blind
+}
+
+// ForwardBlindSpots returns the blind spots on the FORWARD cone of fqns (the seeds
+// plus everything they can reach) — where the tool's view of what these functions can
+// DO becomes incomplete — and whether that cone crosses a HighFanOut seam (so the
+// reachable-effect surface is an upper bound). Unlike ForNodes, which gathers blind
+// spots over the bidirectional blast radius for incident triage, this is the
+// forward-only set a review surface needs: a change's trustworthiness is about what it
+// can cause, not who can reach it — a blind spot in a CALLER does not make the change
+// itself unverifiable. Deterministic (sorted, intrinsic).
+func ForwardBlindSpots(ix *graph.Index, fqns []string) (blind []graph.BlindSpot, effectsOverApprox bool) {
+	forward := ix.Reachable(fqns...)
+	cone := setutil.StringSet(fqns)
+	for _, fn := range forward {
+		cone[fn] = true
+	}
+	coneSorted := setutil.SortedKeys(cone)
+	return gatherBlindSpots(ix, coneSorted, ix.Effects(coneSorted...)), ix.CrossesHighFanOut(coneSorted)
+}
+
 // ForNodes assembles the card for a set of suspect function FQNs.
 func ForNodes(ix *graph.Index, fqns []string) Card {
 	suspects := setutil.SortedKeys(setutil.StringSet(fqns))
@@ -127,40 +183,15 @@ func ForNodes(ix *graph.Index, fqns []string) Card {
 		effects[e.To] = true
 	}
 
-	// Blind spots on any traversed node (function- or package-level), plus
-	// dynamic boundary effects in the forward cone: the frontier where the
-	// card's reachability claims are no longer sound.
+	// Blind spots over the bidirectional blast radius: function- and package-level
+	// disclosures on any traversed node (callers and forward cone), plus a
+	// synthesized DynamicEffect for each dynamic boundary effect in the forward cone
+	// — the frontier where the card's reachability claims are no longer sound.
 	traversed := setutil.StringSet(callers)
 	for fn := range cone {
 		traversed[fn] = true
 	}
-	var blind []graph.BlindSpot
-	seen := map[string]bool{}
-	addBlind := func(bs []graph.BlindSpot) {
-		for _, b := range bs {
-			// Detail is part of the identity: two DynamicEffect blind spots at the
-			// same site with different effect labels are distinct disclosures and
-			// must not collapse to one row (Detail is rendered on the card).
-			k := b.Kind + "\x00" + b.Site + "\x00" + b.Detail
-			if !seen[k] {
-				seen[k] = true
-				blind = append(blind, b)
-			}
-		}
-	}
-	for _, fn := range setutil.SortedKeys(traversed) {
-		addBlind(ix.BlindSpotsAt(fn))
-		addBlind(ix.BlindSpotsAt(fitness.PkgOf(fn)))
-	}
-	for _, e := range coneEffects {
-		if e.IsDynamic() {
-			// Detail without the internal "boundary:" prefix — the same human-
-			// readable form ground.go emits, so the triage and ground surfaces
-			// render (and diff) the identical blind spot the same way.
-			addBlind([]graph.BlindSpot{{Kind: "DynamicEffect", Site: e.From, Detail: strings.TrimPrefix(e.To, "boundary:")}})
-		}
-	}
-	graph.SortBlindSpots(blind)
+	blind := gatherBlindSpots(ix, setutil.SortedKeys(traversed), coneEffects)
 	// Annotation context for those blind spots, collected once per (Site, Kind) in
 	// the sorted order so the card is deterministic and a seam with several blind
 	// spots does not repeat its shared annotation.
