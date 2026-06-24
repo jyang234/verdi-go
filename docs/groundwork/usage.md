@@ -404,7 +404,7 @@ groundwork chains <graph>… [--service <name>=<graph>]… [--policy <p>]…   c
 groundwork transcript <calls.jsonl> [--json]            summarize an mcp --log transcript (the E4 reader)
 groundwork fitness <policy> <graph> [--expect <sha>] [--sarif]   evaluate invariants against one graph
 groundwork review <policy> <base> <branch> [--expect <sha>] [--json]     computed MR review artifact
-groundwork review-triage <base> <branch> [--summary|--mermaid|--json] [--policy <p>] [--full] [--max-nodes N]   PROTOTYPE: reviewer triage — what the MR does (verified) and where to look
+groundwork review-triage <base> <branch> [--summary|--mermaid|--json] [--policy <p>] [--scope-fqns <file|->] [--full] [--max-nodes N]   PROTOTYPE: reviewer triage — what the MR does (verified) and where to look; --scope-fqns marks the author-edited functions
 groundwork verify <policy> <base> <branch> [--scope …] [--expect <sha>] [--corpus <dir> [--capture production|integration]] [--json]  fail-closed pre-flight gate (--corpus arms the impeachment gate)
 groundwork diff <base-contract> <branch-contract>       inter-service contract diff
 groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]   prove an artifact authentic
@@ -593,6 +593,30 @@ With **`--policy <p>`** the digest adds a **per-route write movement** line — 
 /x` now writes `db INSERT read_audit`" — reusing `review`'s `route_io_deltas` (the one
 per-route delta), so this surface and the review artifact never disagree about what a
 route writes.
+
+**`--scope-fqns <file|->`** supplies the one signal the call graph cannot derive on its
+own: which functions the author **textually edited** (a newline-separated FQN set, read
+from a file or stdin; `#` comments and blanks ignored). A function that only changed
+*structurally* — it gained an out-edge because a callee moved — is not the same as one
+the author edited, and on an AI-scale diff the gap between the two is most of the noise.
+With a matching set, `--summary` partitions the new-blind zone:
+
+- **In scope (lead, marked ✎)** — blindness in code you edited. Plus, by the seam-level
+  soundness rule, a caller marked **↳** that is routed into an authored *callee*: an
+  author can blind a callee with a body-only edit that does not move the call graph, so
+  that blindness surfaces only through a caller — folding it would hide author-introduced
+  blindness (fail-closed).
+- **Dragged in by a changed callee** — folded into its own `<details>`, disclosed but
+  demoted; nothing is dropped.
+
+The effect surface also narrows to "what your change reaches." **Fail-loud:** a set that
+matches *zero* branch functions (an FQN-format slip) does not silently empty the review
+list — it surfaces a loud caution and falls back to the unscoped report. The FQNs are
+the SSA form the graph uses (`example.com/svc/pkg.Func`,
+`(*example.com/svc/pkg.T).Method`); produce them from flowmap, which has the source
+positions to map a `git diff` range to enclosing-function FQNs. The scope fields ride in
+`--json` (`scoped`, `authored_scope`, `scope_note`, per-function `authored`) only when a
+set is supplied, so an unscoped report's JSON is byte-identical to before.
 
 ### `verify` — the fail-closed pre-flight gate
 

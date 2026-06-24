@@ -376,6 +376,107 @@ func TestSummaryFoldsNotTruncates(t *testing.T) {
 	}
 }
 
+// TestScopePartitionsAuthoredFromDragged pins the core of --scope-fqns: a new-blind function
+// the author EDITED leads (in scope, marked ✎), while one a changed callee dragged in (the
+// author did not touch it and none of its seams sit at an authored site) folds into the
+// dragged-in <details> — disclosed, never dropped.
+func TestScopePartitionsAuthoredFromDragged(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Edited", Sig: "o"}, {FQN: "svc.Dragged", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.Edited", Sig: "n"}, {FQN: "svc.Dragged", Sig: "n"}},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "NonConstantBoundaryArg", Site: "svc.Edited", Detail: "edited dyn"},
+			{Kind: "NonConstantBoundaryArg", Site: "svc.Dragged", Detail: "dragged dyn"},
+		},
+	}
+	rep := BuildScoped(base, branch, nil, []string{"svc.Edited"})
+	if !rep.Scoped || len(rep.AuthoredScope) != 1 || rep.AuthoredScope[0] != "svc.Edited" {
+		t.Fatalf("scope should be active and echo svc.Edited: %+v", rep)
+	}
+	out := rep.RenderSummary(Options{})
+	iEdited := strings.Index(out, "Edited")
+	iDragged := strings.Index(out, "Dragged in by a changed callee")
+	if iEdited < 0 || iDragged < 0 || iEdited > iDragged {
+		t.Errorf("the edited function must lead and the dragged-in <details> follow:\n%s", out)
+	}
+	// The dragged function appears only in the dragged-in section (below that summary), not
+	// promoted to a lead callout.
+	if strings.Index(out, "Dragged") < iDragged {
+		t.Errorf("the dragged-in function must not be promoted to a lead callout:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of them you edited directly") {
+		t.Errorf("framing must report how many changed functions the author edited:\n%s", out)
+	}
+}
+
+// TestScopeSeamLevelPromotesAuthoredCalleeViaCaller pins the seam-level soundness rule: when
+// the author edits a callee with a body-only change (its signature is unchanged and it gains
+// no out-edge, so it is NOT itself a "changed function"), the blindness it introduces
+// surfaces only through a CALLER. That caller must be promoted (in scope) even though the
+// author did not edit it — folding it would hide author-introduced blindness (fail-closed).
+func TestScopeSeamLevelPromotesAuthoredCalleeViaCaller(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Caller", Sig: "o"}, {FQN: "svc.Callee", Sig: "same"}}}
+	branch := &graph.Graph{
+		// Caller gains an edge to Callee (so Caller is a changed function); Callee's sig is
+		// UNCHANGED (a body-only edit), so Callee is not itself in the changed set.
+		Nodes: []graph.Node{{FQN: "svc.Caller", Sig: "n"}, {FQN: "svc.Callee", Sig: "same"}},
+		Edges: []graph.Edge{{From: "svc.Caller", To: "svc.Callee"}},
+		// The blindness the author introduced lives at Callee, surfacing on Caller's cone.
+		BlindSpots: []graph.BlindSpot{{Kind: "UnresolvedCall", Site: "svc.Callee", Detail: "new func value"}},
+	}
+	// The author edited Callee (body-only) — NOT Caller.
+	rep := BuildScoped(base, branch, nil, []string{"svc.Callee"})
+	out := rep.RenderSummary(Options{})
+	if strings.Contains(out, "Dragged in by a changed callee") {
+		t.Errorf("an authored seam must promote its caller, not fold it as dragged-in:\n%s", out)
+	}
+	if !strings.Contains(out, "can't resolve at all") || !strings.Contains(out, "Caller ↳") {
+		t.Errorf("the caller routed into the author's edited (blind) callee must be promoted and marked ↳:\n%s", out)
+	}
+}
+
+// TestScopeFailLoudOnNoMatch pins the fail-loud rule: a scope set that matches NO branch
+// function (an FQN-format slip) must NOT silently empty the review list — it falls back to
+// the unscoped report and surfaces a loud caution.
+func TestScopeFailLoudOnNoMatch(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Real", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes:      []graph.Node{{FQN: "svc.Real", Sig: "n"}},
+		BlindSpots: []graph.BlindSpot{{Kind: "NonConstantBoundaryArg", Site: "svc.Real", Detail: "dyn"}},
+	}
+	rep := BuildScoped(base, branch, nil, []string{"wrong.Format", "also.Wrong"})
+	if rep.Scoped {
+		t.Fatalf("a zero-match scope set must leave scoping INACTIVE (fall back to unscoped)")
+	}
+	if rep.ScopeNote == "" {
+		t.Fatalf("a zero-match scope set must surface a fail-loud note, got none")
+	}
+	out := rep.RenderSummary(Options{})
+	if !strings.Contains(out, "showing UNSCOPED") {
+		t.Errorf("the fail-loud caution must be visible in the summary:\n%s", out)
+	}
+	// The unscoped review list is intact — the real change is still surfaced.
+	if !strings.Contains(out, "spot(s) need judgment") || strings.Contains(out, "you edited directly") {
+		t.Errorf("fallback must show the UNSCOPED list (no scope framing):\n%s", out)
+	}
+}
+
+// TestUnscopedJSONStable pins the non-goal: without --scope-fqns the new fields are absent
+// from the report's JSON (omitempty), so existing machine consumers are unaffected.
+func TestUnscopedJSONStable(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.A", Sig: "o"}}}
+	branch := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.A", Sig: "n"}}}
+	rep := Build(base, branch, nil)
+	if rep.Scoped || rep.AuthoredScope != nil || rep.ScopeNote != "" {
+		t.Errorf("an unscoped report must carry no scope state: %+v", rep)
+	}
+	for i := range rep.NewBlind {
+		if rep.NewBlind[i].Authored {
+			t.Errorf("no ChangedFn may be Authored without a scope set")
+		}
+	}
+}
+
 // TestPerRouteWriteMovement pins the per-route refinement (reusing fitness.RouteWrites):
 // a route whose surface moves from a read to a write is reported as "GET /x now writes …",
 // displayed by route name, and only when a policy is supplied.

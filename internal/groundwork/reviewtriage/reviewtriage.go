@@ -103,6 +103,13 @@ type ChangedFn struct {
 
 	NewOverApprox     bool `json:"new_over_approx,omitempty"`     // a forward HighFanOut over-approximation introduced by this MR
 	CarriedOverApprox bool `json:"carried_over_approx,omitempty"` // a forward HighFanOut that pre-existed
+
+	// Authored is true when this function's FQN was in the --scope-fqns set: the author
+	// textually edited it (as opposed to the function merely changing STRUCTURALLY because
+	// a callee moved). Only set when a scope set was supplied AND matched the graph;
+	// omitempty so an unscoped report's JSON is byte-identical to before the field existed.
+	// Disclosure + ranking input only — never a verdict.
+	Authored bool `json:"authored,omitempty"`
 }
 
 // Report is the three-zone triage of an MR's changed functions, ordered by descending
@@ -129,6 +136,22 @@ type Report struct {
 	// RouteIO is the per-route refinement of the write surface ("GET /x now writes Y"),
 	// present only when Build was given a policy. Reuses fitness.RouteWrites.
 	RouteIO []RouteMove `json:"route_io,omitempty"`
+
+	// Scope fields — present only when BuildScoped was given a changed-FQN set (the
+	// --scope-fqns input) that matched the graph. They carry the one signal the graph
+	// cannot derive on its own: which functions the author TEXTUALLY edited, versus which
+	// only changed structurally because a callee moved. All omitempty, so an unscoped
+	// report serializes exactly as before.
+	//
+	// Scoped marks that scoping is ACTIVE (a set was supplied and matched ≥1 function), so
+	// a render partitions author-edited blindness from callee-dragged-in blindness.
+	// AuthoredScope echoes the matched author-edited functions present in the branch graph
+	// (sorted) — the membership set a render tests seam SITES against. ScopeNote is a
+	// fail-loud caution: a non-empty note means scoping fell back or matched nothing (an
+	// FQN-format mismatch is surfaced, never silently swallowed).
+	Scoped        bool     `json:"scoped,omitempty"`
+	AuthoredScope []string `json:"authored_scope,omitempty"`
+	ScopeNote     string   `json:"scope_note,omitempty"`
 }
 
 // RouteMove is one route (non-root entrypoint) whose verified WRITE surface changed
@@ -158,10 +181,40 @@ type RouteMove struct {
 // consequence-ranked (#4). A non-nil policy enables the per-route write-movement section
 // (it is the input fitness.RouteWrites needs to enumerate routes and roots); pass nil to
 // skip it (the service-level effect delta is still computed).
+//
+// Build is the unscoped form; BuildScoped layers on the author-changed-FQN signal.
 func Build(base, branch *graph.Graph, p *policy.Policy) Report {
+	return BuildScoped(base, branch, p, nil)
+}
+
+// BuildScoped is Build plus the one signal the graph cannot derive on its own: the set of
+// FQNs the author TEXTUALLY edited (the --scope-fqns input). A function's structural change
+// (it gained an out-edge because a callee moved) is not the same as the author editing it,
+// and on an AI-scale diff the gap between the two is most of the noise. With a matching
+// scope set the report marks each changed function Authored and a render partitions
+// author-edited blindness from callee-dragged-in blindness.
+//
+// Fail-loud (CLAUDE.md tenet 2): a scope set that matches ZERO branch functions is almost
+// certainly an FQN-format mismatch. Rather than silently empty the review list, BuildScoped
+// records a ScopeNote caution and leaves scoping INACTIVE (the report is identical to the
+// unscoped one but for the note). A nil/empty scope set is simply unscoped, no note.
+func BuildScoped(base, branch *graph.Graph, p *policy.Policy, scope []string) Report {
 	branchIx, baseIx := graph.NewIndex(branch), graph.NewIndex(base)
 	baseNode := nodeSet(base)
 	tier := tierLookup(branch)
+
+	// Resolve the scope set against the branch graph. authored holds only FQNs that name a
+	// real branch function (the membership set seam SITES are later tested against); a
+	// supplied-but-unmatched set is the fail-loud case.
+	authored, scopeNote := resolveScope(scope, nodeSet(branch))
+	scoped := len(authored) > 0
+	// Echo the matched authored set only when scoping is active, so an unscoped report's
+	// AuthoredScope is nil (absent from JSON), not an empty slice.
+	var authoredEcho []string
+	if scoped {
+		authoredEcho = setutil.SortedKeys(authored)
+	}
+
 	var newBlind, carried, accounted []ChangedFn
 	for _, fqn := range changedFns(base, branch) {
 		card := impact.ForNodes(branchIx, []string{fqn})                             // evidence: reverse cover + forward effects
@@ -190,6 +243,7 @@ func Build(base, branch *graph.Graph, p *policy.Policy) Report {
 			BenignSeams:       benignNotes(benign),
 			NewOverApprox:     branchOver && !baseOver,
 			CarriedOverApprox: branchOver && baseOver,
+			Authored:          authored[fqn], // false (omitempty) when unscoped
 		}
 		switch {
 		case len(cf.NewSeams) > 0 || cf.NewOverApprox:
@@ -224,7 +278,40 @@ func Build(base, branch *graph.Graph, p *policy.Policy) Report {
 		EntrypointsAdded:   epsAdded,
 		EntrypointsRemoved: epsRemoved,
 		RouteIO:            routeIO,
+		Scoped:             scoped,
+		AuthoredScope:      authoredEcho,
+		ScopeNote:          scopeNote,
 	}
+}
+
+// resolveScope intersects the supplied author-edited FQN set with the branch's functions.
+// It returns the matched set (the membership map a render tests function FQNs and seam
+// sites against) and a fail-loud note. The three cases:
+//   - nil/empty scope ⇒ unscoped: empty set, no note.
+//   - supplied but ZERO matches ⇒ likely an FQN-format mismatch: empty set (scoping stays
+//     inactive — the unscoped report is shown intact) AND a loud note, never a silent
+//     empty review list.
+//   - ≥1 match ⇒ the matched set (a partial match is fine: an authored FQN absent from the
+//     graph is a deleted or body-only function the triage has nothing to say about).
+//
+// Determinism: the result is a set; callers echo it via setutil.SortedKeys.
+func resolveScope(scope []string, branchNodes map[string]bool) (authored map[string]bool, note string) {
+	if len(scope) == 0 {
+		return nil, ""
+	}
+	authored = map[string]bool{}
+	for _, fqn := range scope {
+		if branchNodes[fqn] {
+			authored[fqn] = true
+		}
+	}
+	if len(authored) == 0 {
+		return nil, fmt.Sprintf("scope: none of the %d supplied --scope-fqns matched any branch function (FQN-format mismatch?) — showing UNSCOPED, every change in attention scope", len(scope))
+	}
+	if len(authored) < len(scope) {
+		note = fmt.Sprintf("scope: %d of %d supplied --scope-fqns matched the branch graph (the rest name no current function — deleted or body-only)", len(authored), len(scope))
+	}
+	return authored, note
 }
 
 // routeIODelta is the verified per-route write movement: which routes gained or lost a

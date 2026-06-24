@@ -232,8 +232,11 @@ func effectDomain(effect string) string {
 // (masking first), aggregates routine telemetry/cache handoffs into one line, and folds
 // everything else into <details> so nothing is truncated. It speaks to a reviewer, not to
 // the analyzer; the by-tier / carried / accounted detail and the verified-delta orientation
-// are all preserved, just demoted out of the lead. FQNs, effect labels, and seam kinds are
-// backtick-wrapped so a <dynamic> label renders literally rather than as stray HTML.
+// are all preserved, just demoted out of the lead. When the report is scoped (a --scope-fqns
+// set matched), the new-blind zone is partitioned into the author-edited blindness (the
+// lead) and what a changed callee dragged in (folded), with ✎ / ↳ scope markers. FQNs,
+// effect labels, and seam kinds are backtick-wrapped so a <dynamic> label renders literally
+// rather than as stray HTML.
 func (r Report) RenderSummary(o Options) string {
 	var b strings.Builder
 	n, c, a := len(r.NewBlind), len(r.Carried), len(r.Accounted)
@@ -244,9 +247,17 @@ func (r Report) RenderSummary(o Options) string {
 		return b.String()
 	}
 
-	masking := detectMasking(r)
-	groups := groupPromoted(r.NewBlind)
-	routine := routineHandoffs(r.NewBlind)
+	// Scope partition: when a --scope-fqns set was supplied and matched, split the new-blind
+	// zone into what the author EDITED (inScope) and what a changed callee dragged in
+	// (dragged). Unscoped, everything is inScope and dragged is empty — exactly the prior
+	// shape. inScope drives the lead (callouts, routine, judgment count); dragged folds into
+	// its own <details>, never dropped.
+	authored := authoredSet(r)
+	inScope, dragged := partitionByScope(r.NewBlind, r.Scoped, authored)
+
+	masking := detectMasking(r) // over all blind seams — the catch is too valuable to scope away
+	groups := groupPromoted(inScope)
+	routine := routineHandoffs(inScope)
 
 	// Render order, most-blind first. The instrumentation-masking group is folded in only
 	// when NO report-level masking callout fired — otherwise those functions are already
@@ -264,14 +275,30 @@ func (r Report) RenderSummary(o Options) string {
 	}
 	judgment := len(masking) + rendered
 
-	// Framing line: what the diff is, then how many spots need a judgment call.
+	// Fail-loud scope caution, when scoping fell back or partially matched. Surfaced at the
+	// top so a reviewer never mistakes an FQN-format slip for "nothing to review".
+	if r.ScopeNote != "" {
+		fmt.Fprintf(&b, "> ⚠️ %s\n\n", r.ScopeNote)
+	}
+
+	// Framing line: what the diff is, then how many spots need a judgment call. When scoped,
+	// it names how much of the diff the author actually edited and frames judgment as "in
+	// your changes" — the noise reduction the scope set buys.
 	fmt.Fprintf(&b, "**%d function(s) changed.** ", total)
+	if r.Scoped {
+		fmt.Fprintf(&b, "**%d of them you edited directly.** ", authoredChangedCount(r))
+	}
 	if routine.total > 0 {
 		b.WriteString("Much of this diff is telemetry/cache handoffs the analyzer can't see into (expected). ")
 	}
-	if judgment == 0 {
+	switch {
+	case judgment == 0 && r.Scoped:
+		b.WriteString("Nothing in your changes needs a judgment call from the tool's view — but \"accounted\" is structural completeness, never approval; verify the resolved effects below are the ones you intend.\n")
+	case judgment == 0:
 		b.WriteString("Nothing in it needs a judgment call from the tool's view — but \"accounted\" is structural completeness, never approval; verify the resolved effects below are the ones you intend.\n")
-	} else {
+	case r.Scoped:
+		fmt.Fprintf(&b, "Underneath that, **%d spot(s) in your changes need judgment:**\n", judgment)
+	default:
 		fmt.Fprintf(&b, "Underneath that, **%d spot(s) need judgment:**\n", judgment)
 	}
 
@@ -289,7 +316,7 @@ func (r Report) RenderSummary(o Options) string {
 	for _, cls := range order {
 		if g := groups[cls]; len(g) > 0 {
 			num++
-			writeGroupCallout(&b, num, cls, g, lim)
+			writeGroupCallout(&b, num, cls, g, lim, authored)
 		}
 	}
 
@@ -305,15 +332,99 @@ func (r Report) RenderSummary(o Options) string {
 	writeVerifiedDelta(&b, r, lim)
 	writeRouteMovement(&b, r, o, lim)
 
-	// Folded detail — nothing truncated. The full by-tier blind list, carried, and accounted
-	// all live here; GitHub renders <details> collapsed.
-	writeEffectSurface(&b, r)
-	writeBlindByTier(&b, r.NewBlind)
+	// Folded detail — nothing truncated. The in-scope by-tier list, the dragged-in callees
+	// (when scoped), carried, and accounted all live here; GitHub renders <details> collapsed.
+	writeEffectSurface(&b, r, authored)
+	writeBlindByTier(&b, inScope, authored)
+	writeDraggedIn(&b, dragged, o)
 	writeCarriedDetails(&b, r, o)
 	writeAccountedDetails(&b, r, o)
 
-	b.WriteString("\n— ⚠️ marks where the tool STOPS seeing: the call there is yours to make, not a bug it found. \"Accounted\" means the tool can show the complete structure, not that it is correct — you still verify. Masking is a heuristic (removed effect × instrumentation wrapper), so confirm rather than assume. `groundwork review-triage --full` for per-function evidence.\n")
+	b.WriteString("\n— ⚠️ marks where the tool STOPS seeing: the call there is yours to make, not a bug it found. \"Accounted\" means the tool can show the complete structure, not that it is correct — you still verify. Masking is a heuristic (removed effect × instrumentation wrapper), so confirm rather than assume.")
+	if r.Scoped {
+		b.WriteString(" ✎ = a function you edited; ↳ = a caller routed into code you edited.")
+	}
+	b.WriteString(" `groundwork review-triage --full` for per-function evidence.\n")
 	return b.String()
+}
+
+// authoredChangedCount is how many of the report's CHANGED functions (across all zones) the
+// author edited directly — the honest "M of N you edited" for the framing line. An authored
+// function the diff did not structurally move (a body-only edit to a blind callee) is not a
+// changed function and so is not counted here, though its blindness still surfaces through a
+// promoted caller (↳).
+func authoredChangedCount(r Report) int {
+	n := 0
+	for _, z := range [][]ChangedFn{r.NewBlind, r.Carried, r.Accounted} {
+		for _, cf := range z {
+			if cf.Authored {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// authoredSet rebuilds the author-edited membership set from the report's echoed scope, so
+// a render tests both function FQNs and seam SITES against the same set Build resolved.
+func authoredSet(r Report) map[string]bool {
+	if !r.Scoped {
+		return nil
+	}
+	m := make(map[string]bool, len(r.AuthoredScope))
+	for _, fqn := range r.AuthoredScope {
+		m[fqn] = true
+	}
+	return m
+}
+
+// partitionByScope splits the new-blind zone into the functions whose blindness is IN the
+// author's edits and those a changed callee dragged in. Unscoped (scoped=false), every
+// function is in scope and dragged is empty — the prior behaviour. A function is in scope
+// when the author edited it OR one of its new seams sits at an authored SITE: the latter is
+// the soundness rule — an author can blind a callee with a body-only edit that does not move
+// the call graph, so the seam surfaces only through a caller; folding that caller would hide
+// author-introduced blindness (fail-closed). Input order (consequence) is preserved.
+func partitionByScope(newBlind []ChangedFn, scoped bool, authored map[string]bool) (inScope, dragged []ChangedFn) {
+	if !scoped {
+		return newBlind, nil
+	}
+	for _, cf := range newBlind {
+		if inAuthorScope(cf, authored) {
+			inScope = append(inScope, cf)
+		} else {
+			dragged = append(dragged, cf)
+		}
+	}
+	return inScope, dragged
+}
+
+// inAuthorScope reports whether a new-blind function is the author's concern: either they
+// edited the function itself, or one of its new seams lives at a function they edited.
+func inAuthorScope(cf ChangedFn, authored map[string]bool) bool {
+	if cf.Authored {
+		return true
+	}
+	for _, s := range cf.NewSeams {
+		if authored[s.Site] {
+			return true
+		}
+	}
+	return false
+}
+
+// scopedName renders a function's short name with its scope marker: ✎ when the author edited
+// it, ↳ when it is only a caller routed into an authored seam. Plain when unscoped.
+func scopedName(cf ChangedFn, authored map[string]bool) string {
+	name := fitness.ShortName(cf.FQN)
+	switch {
+	case authored == nil:
+		return name
+	case cf.Authored:
+		return "✎ " + name
+	default:
+		return name + " ↳"
+	}
 }
 
 // writeMaskingCallout renders the "an effect reads as removed — it likely isn't" finding.
@@ -326,11 +437,11 @@ func writeMaskingCallout(b *strings.Builder, num int, m maskingCallout) {
 
 // writeGroupCallout renders one promoted seam-class group: a plain-language reason plus the
 // functions in it (capped + folded, never truncated — the full list is in the by-tier
-// <details>).
-func writeGroupCallout(b *strings.Builder, num int, cls string, fns []ChangedFn, lim int) {
+// <details>). Names carry their scope marker (✎ edited / ↳ caller routed in) when scoped.
+func writeGroupCallout(b *strings.Builder, num int, cls string, fns []ChangedFn, lim int, authored map[string]bool) {
 	names := make([]string, len(fns))
 	for i, cf := range fns {
-		names[i] = fitness.ShortName(cf.FQN)
+		names[i] = scopedName(cf, authored)
 	}
 	var reason, check string
 	switch cls {
@@ -466,17 +577,23 @@ func writeRouteMovement(b *strings.Builder, r Report, o Options, lim int) {
 	}
 }
 
-// writeEffectSurface folds the union boundary-effect surface of the changed functions into
-// a <details>, split into writes / reads / bus / other so a reviewer sees the state the diff
-// can reach. Disclosure-only and best-effort: it pairs with the per-function why-blind tags
-// (a blind handler's writes may be hidden), so it is a floor, not a complete inventory.
-func writeEffectSurface(b *strings.Builder, r Report) {
-	writes, reads, bus, other := classifyEffects(r)
+// writeEffectSurface folds the boundary-effect surface of the changed functions into a
+// <details>, split into writes / reads / bus / other so a reviewer sees the state the diff
+// can reach. When scoped it narrows to the functions the AUTHOR edited — so the surface
+// reads "what your change reaches", not "everything reachable" (the FR's reachable-vs-new
+// fix). Disclosure-only and best-effort: it pairs with the per-function why-blind tags (a
+// blind handler's writes may be hidden), so it is a floor, not a complete inventory.
+func writeEffectSurface(b *strings.Builder, r Report, authored map[string]bool) {
+	writes, reads, bus, other := classifyEffects(r, authored)
 	if len(writes)+len(reads)+len(bus)+len(other) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "\n<details><summary>📊 Effect surface — %d write(s) · %d read(s) · %d bus · %d other</summary>\n\n",
-		len(writes), len(reads), len(bus), len(other))
+	scopeNote := ""
+	if authored != nil {
+		scopeNote = " reachable from code you edited"
+	}
+	fmt.Fprintf(b, "\n<details><summary>📊 Effect surface%s — %d write(s) · %d read(s) · %d bus · %d other</summary>\n\n",
+		scopeNote, len(writes), len(reads), len(bus), len(other))
 	writeEffectGroup(b, "writes", writes)
 	writeEffectGroup(b, "reads", reads)
 	writeEffectGroup(b, "bus", bus)
@@ -491,13 +608,17 @@ func writeEffectGroup(b *strings.Builder, label string, effs []string) {
 	fmt.Fprintf(b, "- **%s** (%d): %s\n", label, len(effs), backtickList(effs, 0))
 }
 
-// classifyEffects gathers the deduped, sorted boundary effects reachable from every changed
-// function and bins them: a mutating SQL verb is a write, a SELECT a read, a bus op its own
-// bin, everything else "other" (surfaced, never silently a read — fail-loud).
-func classifyEffects(r Report) (writes, reads, bus, other []string) {
+// classifyEffects gathers the deduped, sorted boundary effects reachable from the changed
+// functions and bins them: a mutating SQL verb is a write, a SELECT a read, a bus op its own
+// bin, everything else "other" (surfaced, never silently a read — fail-loud). When authored
+// is non-nil (scoped) it counts only effects reachable from the author-edited functions.
+func classifyEffects(r Report, authored map[string]bool) (writes, reads, bus, other []string) {
 	seen := map[string]bool{}
 	all := append(append(append([]ChangedFn(nil), r.NewBlind...), r.Carried...), r.Accounted...)
 	for _, cf := range all {
+		if authored != nil && !authored[cf.FQN] {
+			continue
+		}
 		for _, e := range cf.Effects {
 			if seen[e] {
 				continue
@@ -523,18 +644,58 @@ func classifyEffects(r Report) (writes, reads, bus, other []string) {
 	return writes, reads, bus, other
 }
 
-// writeBlindByTier folds the COMPLETE newly-blind list (every function, including the
-// telemetry-only ones aggregated above) into a <details>, so the routine aggregate and the
-// callout caps never drop a name from the record.
-func writeBlindByTier(b *strings.Builder, newBlind []ChangedFn) {
-	if len(newBlind) == 0 {
+// writeBlindByTier folds the in-scope newly-blind list (every one aggregated into the
+// routine line or capped in a callout) into a <details>, so nothing is dropped from the
+// record. When scoped this is the author-edited slice; the dragged-in callees have their own
+// <details>. Scope markers (✎ / ↳) ride each line.
+func writeBlindByTier(b *strings.Builder, inScope []ChangedFn, authored map[string]bool) {
+	if len(inScope) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "\n<details><summary>🔬 All %d newly-blind function(s), by consequence</summary>\n\n", len(newBlind))
-	for _, cf := range newBlind {
-		fmt.Fprintf(b, "- %s\n", summaryLine(cf, distinctKinds(cf.NewSeams)))
+	heading := fmt.Sprintf("🔬 All %d newly-blind function(s), by consequence", len(inScope))
+	if authored != nil {
+		heading = fmt.Sprintf("🔬 %d newly-blind in your changes, by consequence", len(inScope))
+	}
+	fmt.Fprintf(b, "\n<details><summary>%s</summary>\n\n", heading)
+	for _, cf := range inScope {
+		fmt.Fprintf(b, "- %s%s\n", scopeMarker(cf, authored), summaryLine(cf, distinctKinds(cf.NewSeams)))
 	}
 	b.WriteString("\n</details>\n")
+}
+
+// writeDraggedIn folds the new-blind functions a CHANGED CALLEE dragged in — the author did
+// not edit them and none of their seams sit at an authored site — into their own <details>.
+// They are context, demoted out of the lead but never dropped (fail-loud). Present only when
+// scoped and non-empty.
+func writeDraggedIn(b *strings.Builder, dragged []ChangedFn, o Options) {
+	d := len(dragged)
+	if d == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n<details><summary>📉 Dragged in by a changed callee — %d (not introduced by your edits — context)</summary>\n\n", d)
+	shown, overflow := dragged, 0
+	if !o.Full && d > o.budget() {
+		shown, overflow = dragged[:o.budget()], d-o.budget()
+	}
+	for _, cf := range shown {
+		fmt.Fprintf(b, "- %s\n", summaryLine(cf, distinctKinds(cf.NewSeams)))
+	}
+	if overflow > 0 {
+		fmt.Fprintf(b, "- …and %d more\n", overflow)
+	}
+	b.WriteString("\n</details>\n")
+}
+
+// scopeMarker is the leading "✎ " / "↳ " badge for a by-tier line (empty when unscoped).
+func scopeMarker(cf ChangedFn, authored map[string]bool) string {
+	switch {
+	case authored == nil:
+		return ""
+	case cf.Authored:
+		return "✎ "
+	default:
+		return "↳ "
+	}
 }
 
 // writeCarriedDetails folds the carried-blind zone (pre-existing on the path, not this
