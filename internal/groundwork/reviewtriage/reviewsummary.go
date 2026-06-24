@@ -413,18 +413,18 @@ func inAuthorScope(cf ChangedFn, authored map[string]bool) bool {
 	return false
 }
 
-// scopedName renders a function's short name with its scope marker: ✎ when the author edited
-// it, ↳ when it is only a caller routed into an authored seam. Plain when unscoped.
-func scopedName(cf ChangedFn, authored map[string]bool) string {
-	name := fitness.ShortName(cf.FQN)
-	switch {
-	case authored == nil:
-		return name
-	case cf.Authored:
-		return "✎ " + name
-	default:
-		return name + " ↳"
+// authoredFirst returns a stable reordering with the author-edited functions ahead of the
+// rest, preserving the input's (consequence) order within each group. A no-op when unscoped,
+// so an unscoped render is unchanged. Returns a copy — it never mutates the report's slices.
+func authoredFirst(fns []ChangedFn, authored map[string]bool) []ChangedFn {
+	if authored == nil {
+		return fns
 	}
+	out := append([]ChangedFn(nil), fns...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Authored && !out[j].Authored
+	})
+	return out
 }
 
 // writeMaskingCallout renders the "an effect reads as removed — it likely isn't" finding.
@@ -436,13 +436,11 @@ func writeMaskingCallout(b *strings.Builder, num int, m maskingCallout) {
 }
 
 // writeGroupCallout renders one promoted seam-class group: a plain-language reason plus the
-// functions in it (capped + folded, never truncated — the full list is in the by-tier
-// <details>). Names carry their scope marker (✎ edited / ↳ caller routed in) when scoped.
+// functions in it (capped + folded via markedNames, never truncated — the full list is in
+// the by-tier <details>). Each name carries its scope marker OUTSIDE the backticks (✎ edited
+// / ↳ caller routed into your edit) when scoped.
 func writeGroupCallout(b *strings.Builder, num int, cls string, fns []ChangedFn, lim int, authored map[string]bool) {
-	names := make([]string, len(fns))
-	for i, cf := range fns {
-		names[i] = scopedName(cf, authored)
-	}
+	names := markedNames(fns, lim, authored)
 	var reason, check string
 	switch cls {
 	case classRuntime:
@@ -459,7 +457,26 @@ func writeGroupCallout(b *strings.Builder, num int, cls string, fns []ChangedFn,
 		check = "the effect each performs is the one you intend"
 	}
 	fmt.Fprintf(b, "\n> ⚠️ %d · %s\n", num, reason)
-	fmt.Fprintf(b, "> Check: %s — %s.\n", check, backtickList(names, lim))
+	fmt.Fprintf(b, "> Check: %s — %s.\n", check, names)
+}
+
+// markedNames renders a function list as `name` spans, each with its scope marker OUTSIDE
+// the backticks (so the ✎/↳ glyph sits beside the code span rather than inside it), capped
+// at lim with a disclosed "…+N more". Unscoped, it is a plain backtick list.
+func markedNames(fns []ChangedFn, lim int, authored map[string]bool) string {
+	shown, overflow := fns, 0
+	if lim > 0 && len(fns) > lim {
+		shown, overflow = fns[:lim], len(fns)-lim
+	}
+	parts := make([]string, len(shown))
+	for i, cf := range shown {
+		parts[i] = scopeMarker(cf, authored) + "`" + fitness.ShortName(cf.FQN) + "`"
+	}
+	out := strings.Join(parts, ", ")
+	if overflow > 0 {
+		out += fmt.Sprintf(", …+%d more", overflow)
+	}
+	return out
 }
 
 // groupPromoted buckets the newly-blind functions by their promotion class (telemetry-only
@@ -646,18 +663,19 @@ func classifyEffects(r Report, authored map[string]bool) (writes, reads, bus, ot
 
 // writeBlindByTier folds the in-scope newly-blind list (every one aggregated into the
 // routine line or capped in a callout) into a <details>, so nothing is dropped from the
-// record. When scoped this is the author-edited slice; the dragged-in callees have their own
-// <details>. Scope markers (✎ / ↳) ride each line.
+// record. When scoped this is the author-edited slice (the dragged-in callees have their own
+// <details>), the author-edited functions sort FIRST (authoredFirst), and each line carries
+// its ✎ / ↳ scope marker.
 func writeBlindByTier(b *strings.Builder, inScope []ChangedFn, authored map[string]bool) {
 	if len(inScope) == 0 {
 		return
 	}
 	heading := fmt.Sprintf("🔬 All %d newly-blind function(s), by consequence", len(inScope))
 	if authored != nil {
-		heading = fmt.Sprintf("🔬 %d newly-blind in your changes, by consequence", len(inScope))
+		heading = fmt.Sprintf("🔬 %d newly-blind in your changes — edited first, then by consequence", len(inScope))
 	}
 	fmt.Fprintf(b, "\n<details><summary>%s</summary>\n\n", heading)
-	for _, cf := range inScope {
+	for _, cf := range authoredFirst(inScope, authored) {
 		fmt.Fprintf(b, "- %s%s\n", scopeMarker(cf, authored), summaryLine(cf, distinctKinds(cf.NewSeams)))
 	}
 	b.WriteString("\n</details>\n")
@@ -686,32 +704,43 @@ func writeDraggedIn(b *strings.Builder, dragged []ChangedFn, o Options) {
 	b.WriteString("\n</details>\n")
 }
 
-// scopeMarker is the leading "✎ " / "↳ " badge for a by-tier line (empty when unscoped).
+// scopeMarker is the leading scope badge for a line: "✎ " when the author edited the
+// function, "↳ " when they did not but a NEW seam of theirs sits at an authored site (a
+// caller routed into the author's edit — the seam-level promotion case), and "" otherwise.
+// The ↳ is a SPECIFIC claim, so it fires only on an actual authored-seam reach: a merely
+// not-yours accounted/carried function gets no badge, never a false "routed into your edit".
 func scopeMarker(cf ChangedFn, authored map[string]bool) string {
-	switch {
-	case authored == nil:
+	if authored == nil {
 		return ""
-	case cf.Authored:
-		return "✎ "
-	default:
-		return "↳ "
 	}
+	if cf.Authored {
+		return "✎ "
+	}
+	for _, s := range cf.NewSeams {
+		if authored[s.Site] {
+			return "↳ "
+		}
+	}
+	return ""
 }
 
 // writeCarriedDetails folds the carried-blind zone (pre-existing on the path, not this
-// diff's fault) into a <details>, capped with a disclosed overflow.
+// diff's fault) into a <details>, capped with a disclosed overflow. When scoped, the
+// functions the author edited sort first (marked ✎), so a reviewer's own carried blindness
+// leads even in this demoted zone.
 func writeCarriedDetails(b *strings.Builder, r Report, o Options) {
 	c := len(r.Carried)
 	if c == 0 {
 		return
 	}
+	authored := authoredSet(r)
 	fmt.Fprintf(b, "\n<details><summary>🟡 Carried blindness — %d (pre-existing on the path, not introduced here)</summary>\n\n", c)
-	shown, overflow := r.Carried, 0
+	shown, overflow := authoredFirst(r.Carried, authored), 0
 	if !o.Full && c > o.budget() {
-		shown, overflow = r.Carried[:o.budget()], c-o.budget()
+		shown, overflow = shown[:o.budget()], c-o.budget()
 	}
 	for _, cf := range shown {
-		fmt.Fprintf(b, "- %s\n", summaryLine(cf, distinctKinds(cf.CarriedSeams)))
+		fmt.Fprintf(b, "- %s%s\n", scopeMarker(cf, authored), summaryLine(cf, distinctKinds(cf.CarriedSeams)))
 	}
 	if overflow > 0 {
 		fmt.Fprintf(b, "- …and %d more\n", overflow)
@@ -721,20 +750,22 @@ func writeCarriedDetails(b *strings.Builder, r Report, o Options) {
 
 // writeAccountedDetails folds the fully-accounted zone into a <details>, rolling up by
 // package over budget (the same collapse rule the other renders use). "Accounted" is
-// structural completeness, never approval.
+// structural completeness, never approval. When scoped and listed per-function, the
+// author-edited functions sort first (marked ✎); the by-package rollup is unaffected.
 func writeAccountedDetails(b *strings.Builder, r Report, o Options) {
 	a := len(r.Accounted)
 	if a == 0 {
 		return
 	}
+	authored := authoredSet(r)
 	fmt.Fprintf(b, "\n<details><summary>✅ Fully accounted — %d (complete evidence; structural completeness, not approval)</summary>\n\n", a)
 	if o.collapseAccounted(a) {
 		for _, rl := range rollupAccounted(r.Accounted) {
 			fmt.Fprintf(b, "- `%s` — %d change(s)%s\n", shortPkg(rl.Pkg), rl.Count, effSuffix(rl.Effects))
 		}
 	} else {
-		for _, cf := range r.Accounted {
-			fmt.Fprintf(b, "- %s\n", summaryLine(cf, nil))
+		for _, cf := range authoredFirst(r.Accounted, authored) {
+			fmt.Fprintf(b, "- %s%s\n", scopeMarker(cf, authored), summaryLine(cf, nil))
 		}
 	}
 	b.WriteString("\n</details>\n")

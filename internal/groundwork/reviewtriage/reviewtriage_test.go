@@ -430,8 +430,33 @@ func TestScopeSeamLevelPromotesAuthoredCalleeViaCaller(t *testing.T) {
 	if strings.Contains(out, "Dragged in by a changed callee") {
 		t.Errorf("an authored seam must promote its caller, not fold it as dragged-in:\n%s", out)
 	}
-	if !strings.Contains(out, "can't resolve at all") || !strings.Contains(out, "Caller ↳") {
+	if !strings.Contains(out, "can't resolve at all") || !strings.Contains(out, "↳ `svc.Caller`") {
 		t.Errorf("the caller routed into the author's edited (blind) callee must be promoted and marked ↳:\n%s", out)
+	}
+}
+
+// TestScopeMarkerAccuracyAndOrder pins two presentation properties: the ↳ badge ("a caller
+// routed into your edit") is a SPECIFIC claim that must fire only on an actual authored-seam
+// reach — a merely not-yours accounted function gets NO badge — and the author-edited
+// functions sort first within the (demoted) accounted <details>.
+func TestScopeMarkerAccuracyAndOrder(t *testing.T) {
+	base := &graph.Graph{Nodes: []graph.Node{{FQN: "svc.Mine", Sig: "o"}, {FQN: "svc.Theirs", Sig: "o"}}}
+	branch := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "svc.Mine", Sig: "n"}, {FQN: "svc.Theirs", Sig: "n"}},
+		Edges: []graph.Edge{
+			{From: "svc.Mine", To: "boundary:db SELECT users", Boundary: "outbound-sync"},
+			{From: "svc.Theirs", To: "boundary:db SELECT users", Boundary: "outbound-sync"},
+		},
+	}
+	out := BuildScoped(base, branch, nil, []string{"svc.Mine"}).RenderSummary(Options{})
+	// Both are accounted (no blind spots). Mine is ✎ and leads; Theirs gets no badge.
+	iMine := strings.Index(out, "✎ `svc.Mine`")
+	iTheirs := strings.Index(out, "`svc.Theirs`")
+	if iMine < 0 || iTheirs < 0 || iMine > iTheirs {
+		t.Errorf("the author-edited accounted function must be ✎ and sort first:\n%s", out)
+	}
+	if strings.Contains(out, "↳ `svc.Theirs`") {
+		t.Errorf("a not-yours accounted function must not get a false ↳ badge:\n%s", out)
 	}
 }
 
