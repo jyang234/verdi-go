@@ -284,13 +284,11 @@ type Node struct {
 // closing brace — so a caller intersecting a diff sees the function BODY, not its name
 // wherever else it is mentioned (a call site in an edited caller, an FQN string in a
 // committed golden), which is exactly the distinction a grep or hunk-header extractor
-// gets wrong. The path is made relative to baseDir (the absolute service dir) so it is
-// byte-identical across checkouts, falling back — like obligations.site — to the
-// portable "<import-path>/<base>" form for a file outside the dir; baseDir is always set
-// by Build, but an empty one still yields a deterministic base-name form. A synthetic
-// function (nil Syntax) or an invalid start position yields ("", 0, 0): all three fields
-// omitempty away rather than carrying a fabricated line. Pure function of the SSA
-// function and the FileSet.
+// gets wrong. The file path is made service-relative — hence byte-identical across
+// checkouts — through features.RelFile, the SAME predicate obligations.site uses (one
+// source of truth). A synthetic function (nil Syntax) or an invalid start position
+// yields ("", 0, 0): all three fields omitempty away rather than carrying a fabricated
+// line. Pure function of the SSA function and the FileSet.
 func nodePosition(fn *ssa.Function, baseDir string) (file string, start, end int) {
 	syn := fn.Syntax()
 	if syn == nil {
@@ -301,19 +299,11 @@ func nodePosition(fn *ssa.Function, baseDir string) (file string, start, end int
 	if !sp.IsValid() {
 		return "", 0, 0
 	}
-	file = filepath.Base(sp.Filename)
-	if baseDir != "" {
-		if rel, err := filepath.Rel(baseDir, sp.Filename); err == nil && !strings.HasPrefix(rel, "..") {
-			file = filepath.ToSlash(rel)
-		} else {
-			file = features.PkgPath(fn) + "/" + filepath.Base(sp.Filename)
-		}
-	}
 	end = sp.Line
 	if ep := fset.Position(syn.End()); ep.IsValid() {
 		end = ep.Line
 	}
-	return file, sp.Line, end
+	return features.RelFile(sp.Filename, baseDir, features.PkgPath(fn)), sp.Line, end
 }
 
 // Edge is a call from a first-party function to another first-party function or
