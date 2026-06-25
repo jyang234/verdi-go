@@ -43,11 +43,12 @@ import (
 // class that aggregates into the routine line. An unknown seam kind falls to
 // classUnresolved (surfaced), never silently to classTelemetry.
 const (
-	classMasking    = "masking"    // ExternalBoundaryCall into an instrumentation wrapper (otelsql/…)
-	classTelemetry  = "telemetry"  // ExternalBoundaryCall into a known telemetry/cache package (routine)
-	classExternal   = "external"   // ExternalBoundaryCall into any other third-party package (surfaced)
-	classRuntime    = "runtime"    // dynamic destination/dispatch — op seen, target not (surfaced)
-	classUnresolved = "unresolved" // func value / reflection / bypass with no visible callee (surfaced)
+	classMasking    = "masking"     // ExternalBoundaryCall into an instrumentation wrapper (otelsql/…)
+	classTelemetry  = "telemetry"   // ExternalBoundaryCall into a known telemetry/cache package (routine)
+	classExternal   = "external"    // ExternalBoundaryCall into any other third-party package (surfaced)
+	classRuntime    = "runtime"     // dynamic destination/dispatch — op seen, target not (surfaced)
+	classUnresolved = "unresolved"  // func value / reflection / bypass with no visible callee (surfaced)
+	classOverApprox = "over-approx" // forward reach newly crosses a HighFanOut seam; effects are an upper bound
 )
 
 // instrumentationWrappers are the OpenTelemetry-style wrappers whose presence as a new
@@ -56,8 +57,10 @@ const (
 // the effect DOMAIN token it wraps, so a removed `db …` effect pairs only with an
 // otelsql/otelpgx-class wrapper and never a coincidental otelhttp addition (the prototype
 // over-paired on a bare "db × otelsql" join; the domain map narrows it). Matched as a
-// substring of the seam's Package path. FIXED set: an unrecognized wrapper is NOT treated
-// as masking — it falls through to a surfaced external callout (fail-loud).
+// "/"-SEGMENT of the seam's Package path (like telemetryToken), so a coincidental package
+// whose path merely CONTAINS "otelsql" as a substring is not misread as a wrapper. FIXED
+// set: an unrecognized wrapper is NOT treated as masking — it falls through to a surfaced
+// external callout (fail-loud).
 var instrumentationWrappers = map[string]string{
 	"otelsql":   "db",
 	"otelpgx":   "db",
@@ -66,6 +69,11 @@ var instrumentationWrappers = map[string]string{
 	"otelhttp":  "http",
 	"otelgrpc":  "grpc",
 }
+
+// sortedWrapperTokens is the wrapper-token set in a fixed sorted order, computed once. It
+// gives instrWrapperToken a deterministic tie-break (a path matching two tokens always
+// resolves the same one) without re-sorting the constant map on every per-seam call.
+var sortedWrapperTokens = setutil.SortedKeys(instrumentationWrappers)
 
 // telemetryCachePackages are the routine, low-signal handoff destinations — metrics,
 // logging, tracing, and in-process caching/dedup — that an ExternalBoundaryCall into is
@@ -82,14 +90,18 @@ var telemetryCachePackages = map[string]bool{
 	"singleflight": true, "groupcache": true,
 }
 
-// instrWrapperToken returns the instrumentation-wrapper token matched in pkg (and so its
-// effect domain via instrumentationWrappers), or "" when pkg is not a known wrapper.
-// Deterministic: the wrapper tokens are tested in sorted order so a path that somehow
-// matched two always resolves the same one.
+// instrWrapperToken returns the instrumentation-wrapper token matched as a "/"-segment of
+// pkg (and so its effect domain via instrumentationWrappers), or "" when pkg is not a known
+// wrapper. Segment-exact (not substring), mirroring telemetryToken, so a coincidental
+// package such as github.com/acme/notelsql is NOT misread as otelsql. Deterministic: tokens
+// are tested in a fixed sorted order so a path matching two always resolves the same one.
 func instrWrapperToken(pkg string) string {
-	for _, w := range setutil.SortedKeys(instrumentationWrappers) {
-		if strings.Contains(pkg, w) {
-			return w
+	segs := strings.Split(pkg, "/")
+	for _, w := range sortedWrapperTokens {
+		for _, seg := range segs {
+			if seg == w {
+				return w
+			}
 		}
 	}
 	return ""
@@ -130,12 +142,18 @@ func classifySeam(b graph.BlindSpot) string {
 }
 
 // promotionClass is the single bucket a newly-blind function is promoted into, or "" when
-// every one of its new seams is routine telemetry/cache (so it folds into the routine line
-// rather than a callout). Most-blind wins: a function with any unresolved seam is
-// unresolved, else runtime, else external, else (instrumentation-wrapper only) masking. A
-// masking-only function is normally REPRESENTED by the report-level masking callout and so
-// not rendered as its own group; the caller still surfaces it when no masking callout fired
-// (a wrapper with no matching removed effect — fail-loud).
+// it has no callout-worthy signal (every new seam is routine telemetry/cache and it carries
+// no new over-approximation, so it folds into the routine line rather than a callout).
+// Most-blind wins: a function with any unresolved seam is unresolved, else runtime, else
+// external, else (instrumentation-wrapper only) masking, else — when it has NO serious new
+// seam but its forward effect surface newly became an upper bound (NewOverApprox) — over-
+// approx. The last arm is what keeps an over-approx-ONLY new-blind function (zero NewSeams,
+// the HighFanOut case) out of the silent gap: without it such a function classified into no
+// group, contributed nothing to the judgment count, and the lead could falsely read "nothing
+// needs a judgment call" while a genuinely-new blind spot hid in the folded details.
+// A masking-only function is normally REPRESENTED by the report-level masking callout and so
+// not rendered as its own group; the caller still surfaces it when no masking callout
+// covered its domain (a wrapper with no matching removed effect — fail-loud).
 func promotionClass(cf ChangedFn) string {
 	var runtime, external, masking bool
 	for _, s := range cf.NewSeams {
@@ -157,35 +175,50 @@ func promotionClass(cf ChangedFn) string {
 		return classExternal
 	case masking:
 		return classMasking
+	case cf.NewOverApprox:
+		return classOverApprox
 	default:
-		return "" // all telemetry ⇒ routine
+		return "" // all telemetry, no new over-approx ⇒ routine
 	}
 }
 
 // maskingCallout is one "an effect reads as removed, but a new instrumentation wrapper is
 // hiding it, not dropping it" finding: the removed effects in one domain and the wrapper
 // package(s) implicated. Advisory and heuristic by construction (see the legend) — it
-// never claims a proof.
+// never claims a proof. Authored marks (when scoped) that a wrapper seam in this domain
+// sits in code the author edited, so the callout may be attributed to "your changes";
+// false when the masking was dragged in by a changed callee.
 type maskingCallout struct {
 	Domain   string   // effect domain token ("db", "http", …)
 	Effects  []string // the removed effects in that domain
 	Wrappers []string // the instrumentation-wrapper tokens newly present
+	Authored bool     // a contributing wrapper seam is in author scope (always true when unscoped)
 }
 
-// detectMasking joins the verified EffectsRemoved against the new instrumentation-wrapper
-// seams: when an effect in domain D disappeared AND a wrapper that wraps D newly appears,
-// the effect almost certainly moved BEHIND the wrapper rather than out of the code. This
-// is the highest-value catch and the one a reviewer cannot see without hand-joining the
-// blind-spot list against the removed-effect list. Deterministic: domains, effects, and
-// wrappers are all sorted; nothing reads map iteration order.
-func detectMasking(r Report) []maskingCallout {
+// detectMasking joins the verified EffectsRemoved against the NEWLY-INTRODUCED
+// instrumentation-wrapper seams: when an effect in domain D disappeared AND a wrapper that
+// wraps D appears as a NEW seam, the effect almost certainly moved BEHIND the wrapper rather
+// than out of the code. This is the highest-value catch and the one a reviewer cannot see
+// without hand-joining the blind-spot list against the removed-effect list.
+//
+// Only NEW seams count: a PRE-EXISTING (carried) wrapper that was on the path in both base
+// and branch is not why an effect disappeared this MR, so pairing a real dropped dependency
+// with an old wrapper would fabricate a "still there, just instrumented" reassurance — a
+// confidently-wrong result. The wrapper must be introduced by THIS diff to explain a removal.
+//
+// When scoped, each callout records whether a contributing wrapper seam sits in author scope
+// (the function itself authored, or the seam's site authored), so the caller can avoid
+// attributing a callee-dragged-in masking to "your changes". Deterministic: domains, effects,
+// and wrappers are all sorted; nothing reads map iteration order.
+func detectMasking(r Report, authored map[string]bool) []maskingCallout {
 	if len(r.EffectsRemoved) == 0 {
 		return nil
 	}
-	// Wrapper tokens present anywhere in the new/carried blind seams, grouped by domain.
+	// New wrapper tokens, grouped by domain, with whether any in a domain is author-scoped.
 	domainWrappers := map[string]map[string]bool{}
-	for _, cf := range append(append([]ChangedFn(nil), r.NewBlind...), r.Carried...) {
-		for _, s := range append(append([]graph.BlindSpot(nil), cf.NewSeams...), cf.CarriedSeams...) {
+	domainAuthored := map[string]bool{}
+	for _, cf := range r.NewBlind { // a new wrapper seam is an ExternalBoundaryCall NewSeam ⇒ always in NewBlind
+		for _, s := range cf.NewSeams {
 			if s.Kind != "ExternalBoundaryCall" {
 				continue
 			}
@@ -195,6 +228,9 @@ func detectMasking(r Report) []maskingCallout {
 					domainWrappers[d] = map[string]bool{}
 				}
 				domainWrappers[d][w] = true
+				if authored == nil || cf.Authored || authored[s.Site] {
+					domainAuthored[d] = true
+				}
 			}
 		}
 	}
@@ -213,7 +249,12 @@ func detectMasking(r Report) []maskingCallout {
 			continue // a wrapper with no matching removed effect ⇒ no masking claim
 		}
 		sort.Strings(effs)
-		out = append(out, maskingCallout{Domain: d, Effects: effs, Wrappers: setutil.SortedKeys(domainWrappers[d])})
+		out = append(out, maskingCallout{
+			Domain:   d,
+			Effects:  effs,
+			Wrappers: setutil.SortedKeys(domainWrappers[d]),
+			Authored: domainAuthored[d],
+		})
 	}
 	return out
 }
@@ -227,14 +268,66 @@ func effectDomain(effect string) string {
 	return effect
 }
 
+// coveredMaskingDomains is the set of effect domains a masking callout already explained —
+// the PER-DOMAIN gate for the masking GROUP. A masking-class function whose wrapper domain
+// is covered is represented by that callout (and still listed in the by-tier details); one
+// whose domain is NOT covered must surface as its own callout (fail-loud).
+func coveredMaskingDomains(masking []maskingCallout) map[string]bool {
+	covered := map[string]bool{}
+	for _, m := range masking {
+		covered[m.Domain] = true
+	}
+	return covered
+}
+
+// uncoveredMasking keeps the masking-class functions with a wrapper domain NO callout
+// covered. A function is dropped only when EVERY one of its wrapper domains is covered, so a
+// function mixing a covered (db) and an uncovered (http) wrapper still surfaces for the http
+// one — the per-domain fail-loud rule, replacing the old global "any callout fired" gate.
+func uncoveredMasking(fns []ChangedFn, covered map[string]bool) []ChangedFn {
+	var out []ChangedFn
+	for _, cf := range fns {
+		for _, s := range cf.NewSeams {
+			if classifySeam(s) != classMasking {
+				continue
+			}
+			if d := instrumentationWrappers[instrWrapperToken(s.Package)]; !covered[d] {
+				out = append(out, cf)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// countAuthoredMasking is how many masking callouts count toward the judgment total.
+// Unscoped, all do; scoped, only those a wrapper seam in author scope explains, so a
+// callee-dragged-in masking is surfaced but not attributed to "your changes".
+func countAuthoredMasking(masking []maskingCallout, scoped bool) int {
+	if !scoped {
+		return len(masking)
+	}
+	n := 0
+	for _, m := range masking {
+		if m.Authored {
+			n++
+		}
+	}
+	return n
+}
+
 // RenderSummary is the reviewer-legible MR-comment digest (GitHub-flavored Markdown). It
 // leads with a plain-language framing line and the few spots that need a human judgment
 // (masking first), aggregates routine telemetry/cache handoffs into one line, and folds
 // everything else into <details> so nothing is truncated. It speaks to a reviewer, not to
 // the analyzer; the by-tier / carried / accounted detail and the verified-delta orientation
-// are all preserved, just demoted out of the lead. When the report is scoped (a --scope-fqns
-// set matched), the new-blind zone is partitioned into the author-edited blindness (the
-// lead) and what a changed callee dragged in (folded), with ✎ / ↳ scope markers. FQNs,
+// are all preserved, just demoted out of the lead. Every newly-blind reason is promoted —
+// runtime dispatch, unresolved callee, external handoff, an UNCOVERED instrumentation
+// wrapper (per-domain, not a global gate), and an over-approximation-only change — so a real
+// new blind spot can never hide behind a false "nothing needs judgment". When the report is
+// scoped (a --scope-fqns set matched), the new-blind zone is partitioned into author-edited
+// blindness (the lead) and what a changed callee dragged in (folded), with ✎ / ↳ scope
+// markers, and out-of-scope masking is surfaced but not attributed to "your changes". FQNs,
 // effect labels, and seam kinds are backtick-wrapped so a <dynamic> label renders literally
 // rather than as stray HTML.
 func (r Report) RenderSummary(o Options) string {
@@ -255,25 +348,29 @@ func (r Report) RenderSummary(o Options) string {
 	authored := authoredSet(r)
 	inScope, dragged := partitionByScope(r.NewBlind, r.Scoped, authored)
 
-	masking := detectMasking(r) // over all blind seams — the catch is too valuable to scope away
+	masking := detectMasking(r, authored) // tagged per-domain with author-scope (see below)
 	groups := groupPromoted(inScope)
 	routine := routineHandoffs(inScope)
 
-	// Render order, most-blind first. The instrumentation-masking group is folded in only
-	// when NO report-level masking callout fired — otherwise those functions are already
-	// represented by it; when a wrapper is present but no removed effect matched, the group
-	// surfaces (fail-loud).
-	order := []string{classRuntime, classUnresolved, classExternal}
-	if len(masking) == 0 {
-		order = append(order, classMasking)
-	}
+	// A masking-class function (instrumentation wrapper only) is represented by the report-
+	// level masking callout when one covered ITS domain; the group surfaces only the ones a
+	// callout did NOT cover (a wrapper with no matching removed effect — fail-loud). The gate
+	// is PER-DOMAIN, not a global "no callout fired": a matched `db` callout must not suppress
+	// the surfacing of an unmatched `http` wrapper.
+	covered := coveredMaskingDomains(masking)
+	groups[classMasking] = uncoveredMasking(groups[classMasking], covered)
+
+	order := []string{classRuntime, classUnresolved, classExternal, classOverApprox, classMasking}
 	rendered := 0
 	for _, cls := range order {
 		if len(groups[cls]) > 0 {
 			rendered++
 		}
 	}
-	judgment := len(masking) + rendered
+	// "spot(s) need judgment" counts the rendered groups plus the masking callouts. When
+	// scoped, only the masking callouts in author scope count toward the "in your changes"
+	// framing — a callee-dragged-in masking still renders, but is not attributed to the author.
+	judgment := rendered + countAuthoredMasking(masking, r.Scoped)
 
 	// Fail-loud scope caution, when scoping fell back or partially matched. Surfaced at the
 	// top so a reviewer never mistakes an FQN-format slip for "nothing to review".
@@ -307,7 +404,7 @@ func (r Report) RenderSummary(o Options) string {
 	num := 0
 	for _, m := range masking {
 		num++
-		writeMaskingCallout(&b, num, m)
+		writeMaskingCallout(&b, num, m, r.Scoped)
 	}
 	lim := 0
 	if !o.Full {
@@ -336,9 +433,9 @@ func (r Report) RenderSummary(o Options) string {
 	// (when scoped), carried, and accounted all live here; GitHub renders <details> collapsed.
 	writeEffectSurface(&b, r, authored)
 	writeBlindByTier(&b, inScope, authored)
-	writeDraggedIn(&b, dragged, o)
-	writeCarriedDetails(&b, r, o)
-	writeAccountedDetails(&b, r, o)
+	writeDraggedIn(&b, dragged)
+	writeCarriedDetails(&b, r, authored)
+	writeAccountedDetails(&b, r, o, authored)
 
 	b.WriteString("\n— ⚠️ marks where the tool STOPS seeing: the call there is yours to make, not a bug it found. \"Accounted\" means the tool can show the complete structure, not that it is correct — you still verify. Masking is a heuristic (removed effect × instrumentation wrapper), so confirm rather than assume.")
 	if r.Scoped {
@@ -400,12 +497,16 @@ func partitionByScope(newBlind []ChangedFn, scoped bool, authored map[string]boo
 }
 
 // inAuthorScope reports whether a new-blind function is the author's concern: either they
-// edited the function itself, or one of its new seams lives at a function they edited.
+// edited the function itself, or one of its NEW seams lives at a function they edited (the
+// new blindness is theirs). It is the partition predicate; the effect surface reuses it so
+// the two notions of "reachable from your edit" cannot drift.
 func inAuthorScope(cf ChangedFn, authored map[string]bool) bool {
-	if cf.Authored {
-		return true
-	}
-	for _, s := range cf.NewSeams {
+	return cf.Authored || seamSiteAuthored(cf.NewSeams, authored)
+}
+
+// seamSiteAuthored reports whether any seam in the slice sits at an author-edited site.
+func seamSiteAuthored(seams []graph.BlindSpot, authored map[string]bool) bool {
+	for _, s := range seams {
 		if authored[s.Site] {
 			return true
 		}
@@ -428,14 +529,20 @@ func authoredFirst(fns []ChangedFn, authored map[string]bool) []ChangedFn {
 }
 
 // writeMaskingCallout renders the "an effect reads as removed — it likely isn't" finding.
-func writeMaskingCallout(b *strings.Builder, num int, m maskingCallout) {
+// When scoped and the wrapper that explains it sits OUTSIDE the author's edits, it appends a
+// note so the callout is not misread as the reviewer's own change.
+func writeMaskingCallout(b *strings.Builder, num int, m maskingCallout, scoped bool) {
 	fmt.Fprintf(b, "\n> ⚠️ %d · A `%s` effect now reads as **removed** — it likely isn't.\n", num, m.Domain)
 	fmt.Fprintf(b, "> %s disappears because a new instrumentation wrapper (%s) hides the call from static analysis, not a dropped dependency.\n",
 		backtickList(m.Effects, 0), backtickList(m.Wrappers, 0))
 	fmt.Fprintf(b, "> Check: the `%s` call still happens the way it did on the base.\n", m.Domain)
+	if scoped && !m.Authored {
+		b.WriteString("> _(the wrapper was introduced by a changed callee, not your edit)_\n")
+	}
 }
 
-// writeGroupCallout renders one promoted seam-class group: a plain-language reason plus the
+// writeGroupCallout renders one promoted seam-class group — runtime, unresolved, external,
+// over-approx, or an uncovered masking wrapper — as a plain-language reason plus the
 // functions in it (capped + folded via markedNames, never truncated — the full list is in
 // the by-tier <details>). Each name carries its scope marker OUTSIDE the backticks (✎ edited
 // / ↳ caller routed into your edit) when scoped.
@@ -452,6 +559,9 @@ func writeGroupCallout(b *strings.Builder, num int, cls string, fns []ChangedFn,
 	case classMasking:
 		reason = fmt.Sprintf("%d call(s) route through an instrumentation wrapper the tool can't see inside (no dropped effect matched it, so it is surfaced rather than assumed routine).", len(fns))
 		check = "the wrapped call still performs the effect you intend"
+	case classOverApprox:
+		reason = fmt.Sprintf("%d change(s) whose reachable-effect surface became an UPPER BOUND — the forward reach newly crosses a shared dispatch seam (HighFanOut), so the tool over-approximates the effects.", len(fns))
+		check = "which target each dispatch actually takes"
 	default: // classExternal
 		reason = fmt.Sprintf("%d call(s) hand off to a third-party package the tool can't see inside (not a known telemetry/cache lib).", len(fns))
 		check = "the effect each performs is the one you intend"
@@ -628,29 +738,33 @@ func writeEffectGroup(b *strings.Builder, label string, effs []string) {
 // classifyEffects gathers the deduped, sorted boundary effects reachable from the changed
 // functions and bins them: a mutating SQL verb is a write, a SELECT a read, a bus op its own
 // bin, everything else "other" (surfaced, never silently a read — fail-loud). When authored
-// is non-nil (scoped) it counts only effects reachable from the author-edited functions.
+// is non-nil (scoped) it counts only effects reachable from code the author edited, using the
+// SAME seam-level rule as the partition (inAuthorScope) — so a ↳-promoted caller, in scope
+// because a NEW seam sits at an authored callee, contributes its reachable effects rather
+// than being dropped by a function-name-only check.
 func classifyEffects(r Report, authored map[string]bool) (writes, reads, bus, other []string) {
 	seen := map[string]bool{}
-	all := append(append(append([]ChangedFn(nil), r.NewBlind...), r.Carried...), r.Accounted...)
-	for _, cf := range all {
-		if authored != nil && !authored[cf.FQN] {
-			continue
-		}
-		for _, e := range cf.Effects {
-			if seen[e] {
+	for _, z := range [][]ChangedFn{r.NewBlind, r.Carried, r.Accounted} {
+		for _, cf := range z {
+			if authored != nil && !inAuthorScope(cf, authored) {
 				continue
 			}
-			seen[e] = true
-			f := strings.Fields(e)
-			switch {
-			case len(f) >= 2 && f[0] == "db" && sqlverb.Mutating(f[1]):
-				writes = append(writes, e)
-			case len(f) >= 2 && f[0] == "db" && f[1] == "SELECT":
-				reads = append(reads, e)
-			case len(f) >= 1 && f[0] == "bus":
-				bus = append(bus, e)
-			default:
-				other = append(other, e)
+			for _, e := range cf.Effects {
+				if seen[e] {
+					continue
+				}
+				seen[e] = true
+				f := strings.Fields(e)
+				switch {
+				case len(f) >= 2 && f[0] == "db" && sqlverb.Mutating(f[1]):
+					writes = append(writes, e)
+				case len(f) >= 2 && f[0] == "db" && f[1] == "SELECT":
+					reads = append(reads, e)
+				case len(f) >= 1 && f[0] == "bus":
+					bus = append(bus, e)
+				default:
+					other = append(other, e)
+				}
 			}
 		}
 	}
@@ -684,31 +798,28 @@ func writeBlindByTier(b *strings.Builder, inScope []ChangedFn, authored map[stri
 // writeDraggedIn folds the new-blind functions a CHANGED CALLEE dragged in — the author did
 // not edit them and none of their seams sit at an authored site — into their own <details>.
 // They are context, demoted out of the lead but never dropped (fail-loud). Present only when
-// scoped and non-empty.
-func writeDraggedIn(b *strings.Builder, dragged []ChangedFn, o Options) {
-	d := len(dragged)
-	if d == 0 {
+// scoped and non-empty. The list is COMPLETE — no cap: it is already collapsed in a
+// <details>, and the summary's "fold, don't truncate" guarantee means every dragged-in name
+// stays in the record (the by-tier <details> lists only the in-scope set, so a cap here
+// would drop these names from the comment entirely).
+func writeDraggedIn(b *strings.Builder, dragged []ChangedFn) {
+	if len(dragged) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "\n<details><summary>📉 Dragged in by a changed callee — %d (not introduced by your edits — context)</summary>\n\n", d)
-	shown, overflow := dragged, 0
-	if !o.Full && d > o.budget() {
-		shown, overflow = dragged[:o.budget()], d-o.budget()
-	}
-	for _, cf := range shown {
+	fmt.Fprintf(b, "\n<details><summary>📉 Dragged in by a changed callee — %d (not introduced by your edits — context)</summary>\n\n", len(dragged))
+	for _, cf := range dragged {
 		fmt.Fprintf(b, "- %s\n", summaryLine(cf, distinctKinds(cf.NewSeams)))
-	}
-	if overflow > 0 {
-		fmt.Fprintf(b, "- …and %d more\n", overflow)
 	}
 	b.WriteString("\n</details>\n")
 }
 
 // scopeMarker is the leading scope badge for a line: "✎ " when the author edited the
-// function, "↳ " when they did not but a NEW seam of theirs sits at an authored site (a
-// caller routed into the author's edit — the seam-level promotion case), and "" otherwise.
-// The ↳ is a SPECIFIC claim, so it fires only on an actual authored-seam reach: a merely
-// not-yours accounted/carried function gets no badge, never a false "routed into your edit".
+// function, "↳ " when they did not but one of its seams (new OR carried) sits at an authored
+// site (a caller routed into the author's edit), and "" otherwise. The ↳ is a SPECIFIC
+// claim, so it fires only on an actual authored-seam reach: a merely not-yours accounted
+// function with no authored seam gets no badge, never a false "routed into your edit". Both
+// NewSeams and CarriedSeams are checked so the carried zone (whose functions have no
+// NewSeams) still earns the ↳ when the author edited a callee at a carried blind site.
 func scopeMarker(cf ChangedFn, authored map[string]bool) string {
 	if authored == nil {
 		return ""
@@ -716,48 +827,40 @@ func scopeMarker(cf ChangedFn, authored map[string]bool) string {
 	if cf.Authored {
 		return "✎ "
 	}
-	for _, s := range cf.NewSeams {
-		if authored[s.Site] {
-			return "↳ "
-		}
+	if seamSiteAuthored(cf.NewSeams, authored) || seamSiteAuthored(cf.CarriedSeams, authored) {
+		return "↳ "
 	}
 	return ""
 }
 
 // writeCarriedDetails folds the carried-blind zone (pre-existing on the path, not this
-// diff's fault) into a <details>, capped with a disclosed overflow. When scoped, the
-// functions the author edited sort first (marked ✎), so a reviewer's own carried blindness
-// leads even in this demoted zone.
-func writeCarriedDetails(b *strings.Builder, r Report, o Options) {
+// diff's fault) into a <details>. The list is COMPLETE — no cap — since it is already
+// collapsed and these names appear nowhere else (fold, don't truncate). It takes the
+// already-built authored set (not rebuilding it) and, when scoped, sorts the author-edited
+// functions first (marked ✎ / ↳) so a reviewer's own carried blindness leads even here.
+func writeCarriedDetails(b *strings.Builder, r Report, authored map[string]bool) {
 	c := len(r.Carried)
 	if c == 0 {
 		return
 	}
-	authored := authoredSet(r)
 	fmt.Fprintf(b, "\n<details><summary>🟡 Carried blindness — %d (pre-existing on the path, not introduced here)</summary>\n\n", c)
-	shown, overflow := authoredFirst(r.Carried, authored), 0
-	if !o.Full && c > o.budget() {
-		shown, overflow = shown[:o.budget()], c-o.budget()
-	}
-	for _, cf := range shown {
+	for _, cf := range authoredFirst(r.Carried, authored) {
 		fmt.Fprintf(b, "- %s%s\n", scopeMarker(cf, authored), summaryLine(cf, distinctKinds(cf.CarriedSeams)))
-	}
-	if overflow > 0 {
-		fmt.Fprintf(b, "- …and %d more\n", overflow)
 	}
 	b.WriteString("\n</details>\n")
 }
 
 // writeAccountedDetails folds the fully-accounted zone into a <details>, rolling up by
-// package over budget (the same collapse rule the other renders use). "Accounted" is
-// structural completeness, never approval. When scoped and listed per-function, the
-// author-edited functions sort first (marked ✎); the by-package rollup is unaffected.
-func writeAccountedDetails(b *strings.Builder, r Report, o Options) {
+// package over budget (the same collapse rule the other renders use; the rollup discloses
+// every package and its effects, so it summarizes rather than truncates). "Accounted" is
+// structural completeness, never approval. It takes the already-built authored set; when
+// scoped and listed per-function, the author-edited functions sort first (marked ✎ / ↳); the
+// by-package rollup is unaffected.
+func writeAccountedDetails(b *strings.Builder, r Report, o Options, authored map[string]bool) {
 	a := len(r.Accounted)
 	if a == 0 {
 		return
 	}
-	authored := authoredSet(r)
 	fmt.Fprintf(b, "\n<details><summary>✅ Fully accounted — %d (complete evidence; structural completeness, not approval)</summary>\n\n", a)
 	if o.collapseAccounted(a) {
 		for _, rl := range rollupAccounted(r.Accounted) {

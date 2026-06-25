@@ -502,6 +502,124 @@ func TestUnscopedJSONStable(t *testing.T) {
 	}
 }
 
+// TestMaskingIgnoresCarriedWrapper pins the fix for the worst masking bug: a PRE-EXISTING
+// (carried) instrumentation wrapper must NOT be paired with a genuinely-dropped effect, or
+// the highest-value catch fabricates a "still there, just instrumented" reassurance over a
+// real removed dependency. Only a NEW wrapper seam can explain a removal.
+func TestMaskingIgnoresCarriedWrapper(t *testing.T) {
+	rep := Report{
+		BaseNodes: 5, BranchNodes: 5,
+		// The wrapper is CARRIED (pre-existed on base and branch), not introduced here.
+		Carried: []ChangedFn{{
+			FQN:          "svc.Conn",
+			CarriedSeams: []graph.BlindSpot{{Kind: "ExternalBoundaryCall", Site: "svc.Conn", Package: "github.com/XSAM/otelsql"}},
+		}},
+		// An unrelated, genuine effect removal.
+		EffectsRemoved: []string{"db postgres"},
+	}
+	if m := detectMasking(rep, nil); len(m) != 0 {
+		t.Fatalf("a carried (pre-existing) wrapper must not produce a masking claim, got %+v", m)
+	}
+	if out := rep.RenderSummary(Options{}); strings.Contains(out, "reads as **removed**") {
+		t.Errorf("a genuine removal must not be reframed as masking by a carried wrapper:\n%s", out)
+	}
+}
+
+// TestOverApproxOnlyPromoted pins the fix for an over-approximation-only new-blind function
+// (NewOverApprox, zero NewSeams): it must be promoted to a callout, not silently dropped into
+// the folded details under a false "Nothing needs a judgment call" lead.
+func TestOverApproxOnlyPromoted(t *testing.T) {
+	rep := Report{
+		BaseNodes: 3, BranchNodes: 4,
+		NewBlind: []ChangedFn{{FQN: "svc.FanOut", Tier: 1, NewOverApprox: true}}, // no NewSeams
+	}
+	out := rep.RenderSummary(Options{})
+	if strings.Contains(out, "Nothing in it needs a judgment call") {
+		t.Errorf("an over-approx-only new-blind function must not trigger a 'nothing needs judgment' lead:\n%s", out)
+	}
+	if !strings.Contains(out, "UPPER BOUND") || !strings.Contains(out, "spot(s) need judgment") {
+		t.Errorf("an over-approx-only new-blind function must be promoted to a callout:\n%s", out)
+	}
+}
+
+// TestMaskingPerDomainGate pins the per-domain (not global) masking gate: a matched `db`
+// masking callout must NOT suppress the fail-loud surfacing of an unmatched `http` wrapper.
+func TestMaskingPerDomainGate(t *testing.T) {
+	rep := Report{
+		BaseNodes: 5, BranchNodes: 6,
+		NewBlind: []ChangedFn{
+			{FQN: "svc.OpenDB", NewSeams: []graph.BlindSpot{{Kind: "ExternalBoundaryCall", Site: "svc.OpenDB", Package: "github.com/XSAM/otelsql"}}},
+			{FQN: "svc.CallAPI", NewSeams: []graph.BlindSpot{{Kind: "ExternalBoundaryCall", Site: "svc.CallAPI", Package: "go.opentelemetry.io/otelhttp"}}},
+		},
+		EffectsRemoved: []string{"db postgres"}, // matches db domain only
+	}
+	out := rep.RenderSummary(Options{})
+	if !strings.Contains(out, "reads as **removed**") {
+		t.Errorf("the db masking callout must fire:\n%s", out)
+	}
+	// The unmatched http wrapper must still surface as a masking-group callout (fail-loud).
+	if !strings.Contains(out, "route through an instrumentation wrapper") || !strings.Contains(out, "CallAPI") {
+		t.Errorf("a matched db callout must not suppress the unmatched http wrapper's surfacing:\n%s", out)
+	}
+}
+
+// TestScopedMaskingNotAttributedToAuthor pins that, when scoped, a masking callout whose
+// wrapper sits on a DRAGGED-IN (non-authored) function is surfaced but NOT counted as "in
+// your changes" — it carries the dragged-in note and does not inflate the judgment count.
+func TestScopedMaskingNotAttributedToAuthor(t *testing.T) {
+	rep := Report{
+		BaseNodes: 4, BranchNodes: 5,
+		NewBlind: []ChangedFn{{
+			FQN:      "svc.DraggedConn",
+			NewSeams: []graph.BlindSpot{{Kind: "ExternalBoundaryCall", Site: "svc.DraggedConn", Package: "github.com/XSAM/otelsql"}},
+		}},
+		EffectsRemoved: []string{"db postgres"},
+		Scoped:         true,
+		AuthoredScope:  []string{"svc.SomethingElse"}, // the author edited something else
+	}
+	out := rep.RenderSummary(Options{})
+	if !strings.Contains(out, "reads as **removed**") || !strings.Contains(out, "introduced by a changed callee") {
+		t.Errorf("out-of-scope masking must surface AND be marked as not the author's edit:\n%s", out)
+	}
+	if strings.Contains(out, "spot(s) in your changes need judgment") {
+		t.Errorf("out-of-scope masking must not be counted as 'in your changes':\n%s", out)
+	}
+}
+
+// TestScopedEffectSurfaceIncludesRoutedCaller pins the seam-level effect surface: a
+// ↳-promoted caller (in scope because a NEW seam sits at an authored callee) must contribute
+// its reachable effects to the scoped 'reachable from code you edited' surface.
+func TestScopedEffectSurfaceIncludesRoutedCaller(t *testing.T) {
+	rep := Report{
+		BaseNodes: 3, BranchNodes: 4,
+		NewBlind: []ChangedFn{{
+			FQN:      "svc.Caller", // NOT itself authored
+			NewSeams: []graph.BlindSpot{{Kind: "UnresolvedCall", Site: "svc.Callee"}},
+			Effects:  []string{"db INSERT ledger"},
+		}},
+		Scoped:        true,
+		AuthoredScope: []string{"svc.Callee"}, // author edited the callee (the authored seam site)
+	}
+	out := rep.RenderSummary(Options{})
+	if !strings.Contains(out, "reachable from code you edited") || !strings.Contains(out, "db INSERT ledger") {
+		t.Errorf("a ↳-routed caller's effects must appear in the scoped effect surface:\n%s", out)
+	}
+}
+
+// TestWrapperSegmentMatch pins that wrapper matching is "/"-segment-exact (like telemetry),
+// so a coincidental package whose path merely CONTAINS a wrapper token is not misclassified.
+func TestWrapperSegmentMatch(t *testing.T) {
+	if got := instrWrapperToken("github.com/XSAM/otelsql"); got != "otelsql" {
+		t.Errorf("a real wrapper segment must match: got %q", got)
+	}
+	if got := instrWrapperToken("github.com/acme/notelsql"); got != "" {
+		t.Errorf("a coincidental substring must NOT match as a wrapper: got %q", got)
+	}
+	if classifySeam(graph.BlindSpot{Kind: "ExternalBoundaryCall", Package: "github.com/acme/notelsql"}) == classMasking {
+		t.Errorf("notelsql must not classify as a masking wrapper")
+	}
+}
+
 // TestPerRouteWriteMovement pins the per-route refinement (reusing fitness.RouteWrites):
 // a route whose surface moves from a read to a write is reported as "GET /x now writes …",
 // displayed by route name, and only when a policy is supplied.
