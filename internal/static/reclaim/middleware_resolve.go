@@ -73,13 +73,14 @@ func fieldVarOf(fa *ssa.FieldAddr) *types.Var {
 }
 
 // resolveField resolves the complete element set of every middleware slice stored into
-// field fv, anywhere in the program. It walks ssautil.AllFunctions (a COMPLETE function set
-// — pointer-receiver methods, wrappers, nested closures — per CLAUDE.md "collect functions
-// completely"): under-collecting a store would under-approximate the set and could clear a
-// seam that hides a real middleware, a false PROVEN. Every reference to the field's address
-// must be a load or a store of a provable slice; any other use (the address escaping into a
-// call, a store of an unprovable slice) makes the whole field unprovable (ok=false). The
-// union over all stores over-approximates conditional writes, which only costs precision.
+// field fv, anywhere in the program. It visits every address of fv from fieldAddrsOf — an
+// index built from a COMPLETE ssautil.AllFunctions sweep (pointer-receiver methods, wrappers,
+// nested closures — per CLAUDE.md "collect functions completely"): under-collecting a store
+// would under-approximate the set and could clear a seam that hides a real middleware, a
+// false PROVEN. Every reference to the field's address must be a load or a store of a provable
+// slice; any other use (the address escaping into a call, a store of an unprovable slice)
+// makes the whole field unprovable (ok=false). The union over all stores over-approximates
+// conditional writes, which only costs precision.
 func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 	if fv == nil {
 		return fieldSet{ok: false}
@@ -98,40 +99,32 @@ func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 		}
 	}
 	ok := true
-	for fn := range ssautil.AllFunctions(r.prog) {
+	for _, fa := range r.fieldAddrsOf(fv) {
 		if !ok {
 			break
 		}
-		for _, b := range fn.Blocks {
-			for _, instr := range b.Instrs {
-				fa, isFA := instr.(*ssa.FieldAddr)
-				if !isFA || fieldVarOf(fa) != fv {
+		for _, ref := range referrers(fa) {
+			switch x := ref.(type) {
+			case *ssa.UnOp:
+				if x.Op != token.MUL || !sliceReadOnly(x, fv, map[ssa.Value]bool{}) {
+					ok = false
+				}
+			case *ssa.Store:
+				if x.Addr != ssa.Value(fa) {
+					ok = false
 					continue
 				}
-				for _, ref := range referrers(fa) {
-					switch x := ref.(type) {
-					case *ssa.UnOp:
-						if x.Op != token.MUL || !sliceReadOnly(x, fv, map[ssa.Value]bool{}) {
-							ok = false
-						}
-					case *ssa.Store:
-						if x.Addr != ssa.Value(fa) {
-							ok = false
-							continue
-						}
-						elems, eok := sliceElems(x.Val, fv)
-						if !eok {
-							ok = false
-							continue
-						}
-						add(elems)
-					default:
-						// The field's address is used some other way (passed to a call, its
-						// element address taken for a write): it can be mutated past what this
-						// walk sees, so the set is not provable.
-						ok = false
-					}
+				elems, eok := sliceElems(x.Val, fv)
+				if !eok {
+					ok = false
+					continue
 				}
+				add(elems)
+			default:
+				// The field's address is used some other way (passed to a call, its
+				// element address taken for a write): it can be mutated past what this
+				// walk sees, so the set is not provable.
+				ok = false
 			}
 		}
 	}
@@ -147,6 +140,29 @@ func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 	})
 	r.fieldMemo[fv] = res
 	return res
+}
+
+// fieldAddrsOf returns every *ssa.FieldAddr in the program that addresses field fv. The index
+// is built lazily on first use from ONE ssautil.AllFunctions sweep and shared across the pass,
+// so a service with many middleware-backed struct types pays a single whole-program scan
+// rather than one per field (the union of stores resolveField needs is order-insensitive, so
+// the map-iteration order of the build does not reach output — determinism is preserved).
+func (r *mwReclaimer) fieldAddrsOf(fv *types.Var) []*ssa.FieldAddr {
+	if r.fieldAddrs == nil {
+		r.fieldAddrs = map[*types.Var][]*ssa.FieldAddr{}
+		for fn := range ssautil.AllFunctions(r.prog) {
+			for _, b := range fn.Blocks {
+				for _, instr := range b.Instrs {
+					if fa, ok := instr.(*ssa.FieldAddr); ok {
+						if v := fieldVarOf(fa); v != nil {
+							r.fieldAddrs[v] = append(r.fieldAddrs[v], fa)
+						}
+					}
+				}
+			}
+		}
+	}
+	return r.fieldAddrs[fv]
 }
 
 // sliceReadOnly reports whether a field-slice value v (a load of field fv, or a value derived

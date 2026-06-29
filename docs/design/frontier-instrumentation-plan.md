@@ -70,8 +70,23 @@ frontier is one of four kinds; only the first two touch the deterministic verdic
 |---|---|---|---|
 | **Reclaim** — add a statically-true edge the builder missed | deterministic | yes (more complete graph) | **IN** |
 | **Disclose** — describe the residual frontier | deterministic | no (read-only) | **IN** |
+| **Retract** — drop a disclosure once the seam is PROVEN resolved | deterministic | yes (un-blinds an absence proof) | **IN (sound-or-abstain)** |
 | **Observe** — fill a frontier from traces | **non-deterministic** | only a separate lane | **fenced** |
 | **Resolve-by-guess** — narrow a dynamic set to a chosen value | deterministic but unsound | yes | **OUT** |
+
+**Retract is IN but asymmetric to Reclaim.** Adding a true edge is safe even when
+*imprecise* (over-firing only over-blocks a negative check, never manufactures a
+false all-clear), so an approximate reclaimer is doctrine-compatible. Retracting a
+disclosure is the opposite: an *over*-retraction — dropping a blind spot that still
+hides a real edge — directly manufactures a false absence (tenet 3, "never launder
+an unknown into a concrete claim"). So Retract is admitted ONLY sound-or-abstain:
+the seam must be *proven* resolved (the middleware-chain reclaimer clears a loop's
+`UnresolvedCall` only when its element set is provably EMPTY, the threaded handler
+is the sole terminal, and the pass-through edge was recovered — every guard fails
+closed). A reclaimer that adds edges but cannot prove the seam fully resolved leaves
+the disclosure standing. Retraction shares the opt-in flag with its reclaimer's
+edge recovery because the two together are what make an entrypoint-anchored proof
+determinate; the edges alone (disclosure intact) keep the verdict a Caution.
 
 **The load-bearing soundness argument for Reclaim.** Reclamation only ever *adds*
 edges. Adding a real edge to the graph can turn a `provenAbsent` into `reachable`

@@ -116,13 +116,17 @@ func MiddlewareChain(res *analyze.Result) MiddlewareResult {
 }
 
 // mwReclaimer carries the cross-call state of one MiddlewareChain pass: the analyzed
-// result, its program, and a memo for the call-site-independent field-element resolution
-// so a field referenced by many route methods is resolved once. A reclaimer is single-pass
-// and not safe for concurrent use; MiddlewareChain runs it sequentially and deterministically.
+// result, its program, a memo for the call-site-independent field-element resolution so a
+// field referenced by many route methods is resolved once, and a one-time index of every
+// struct-field address in the program keyed by field var (fieldAddrs), so the program-wide
+// store walk costs ONE ssautil.AllFunctions sweep for the whole pass rather than one per
+// field. A reclaimer is single-pass and not safe for concurrent use; MiddlewareChain runs it
+// sequentially and deterministically.
 type mwReclaimer struct {
-	res       *analyze.Result
-	prog      *ssa.Program
-	fieldMemo map[*types.Var]fieldSet
+	res        *analyze.Result
+	prog       *ssa.Program
+	fieldMemo  map[*types.Var]fieldSet
+	fieldAddrs map[*types.Var][]*ssa.FieldAddr
 }
 
 // mwLoop is one recognized middleware-application loop in a function.
@@ -235,7 +239,12 @@ func sliceElementCallee(callee ssa.Value) (ssa.Value, bool) {
 // threadedHandler returns the handler phi `h` of a `h = mw(h)` call and the phi's pre-loop
 // operand (the handler before any middleware runs). The phi is the argument whose own
 // edges include call (the call result loops back into it); the pre-loop operand is the
-// other edge. Returns ok=false if the call's argument is not such a self-threading phi.
+// other edge. A canonical `for _, mw := range s { h = mw(h) }` produces a phi with EXACTLY
+// two edges — the pre-loop value and this call — so threadedHandler requires exactly one
+// non-call edge: a phi with several pre-loop operands (an irreducible CFG, a goto into the
+// loop) has no single intrinsic "initial handler", and picking one arbitrarily could name a
+// terminal real execution does not take. Returns ok=false unless the argument is such a
+// self-threading phi with a single pre-loop operand.
 func threadedHandler(call *ssa.Call, args []ssa.Value) (*ssa.Phi, ssa.Value, bool) {
 	if len(args) != 1 {
 		return nil, nil, false
@@ -245,15 +254,17 @@ func threadedHandler(call *ssa.Call, args []ssa.Value) (*ssa.Phi, ssa.Value, boo
 		return nil, nil, false
 	}
 	var initial ssa.Value
+	nonCall := 0
 	loops := false
 	for _, e := range phi.Edges {
 		if e == ssa.Value(call) {
 			loops = true
 			continue
 		}
+		nonCall++
 		initial = e
 	}
-	if !loops || initial == nil {
+	if !loops || nonCall != 1 {
 		return nil, nil, false
 	}
 	return phi, initial, true
