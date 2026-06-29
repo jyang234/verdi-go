@@ -1,9 +1,9 @@
 package reclaim
 
 import (
-	"go/types"
-
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 )
 
 // recoverTerminals recovers the edge(s) to the business handler the middleware chain
@@ -32,8 +32,12 @@ func (r *mwReclaimer) recoverTerminals(fqn string, f *ssa.Function, lp mwLoop, a
 			return true
 		}
 	}
-	// FACTORED: f returns the threaded handler; the caller dispatches its ServeHTTP.
-	if !functionReturns(f, lp.phi) {
+	// FACTORED: f returns the threaded handler; the caller dispatches its ServeHTTP. EVERY
+	// return must yield the threaded handler — a sibling return of a DIFFERENT handler is an
+	// alternate terminal the caller could dispatch, so binding the terminal solely from the
+	// handler argument would miss that path (and clearing the seam on top would launder it into
+	// a false absence proof). If any return does not yield the threaded handler, abstain.
+	if !everyReturnThreaded(f, lp.phi) {
 		return false
 	}
 	return r.recoverFactoredTerminals(f, lp, addEdge)
@@ -73,17 +77,15 @@ func (r *mwReclaimer) recoverFactoredTerminals(f *ssa.Function, lp mwLoop, addEd
 }
 
 // isServeHTTPReceiverOf reports whether instr is a net/http ServeHTTP invoke whose receiver
-// is exactly result. The method is matched by net/http package + name (not the bare name
-// "ServeHTTP") for the same reason serveHTTPReceivers matches it: the chain's soundness
-// rests on http.HandlerFunc.ServeHTTP invoking the underlying handler.
+// is exactly result. It shares the one net/http-ServeHTTP predicate (isServeHTTPInvoke) with
+// serveHTTPReceivers, so the soundness-load-bearing matcher cannot drift between them.
 func isServeHTTPReceiverOf(instr ssa.Instruction, result ssa.Value) bool {
 	call, ok := instr.(ssa.CallInstruction)
 	if !ok {
 		return false
 	}
 	c := call.Common()
-	return c.IsInvoke() && c.Method != nil && c.Method.Name() == "ServeHTTP" &&
-		c.Method.Pkg() != nil && c.Method.Pkg().Path() == "net/http" && c.Value == result
+	return isServeHTTPInvoke(c) && c.Value == result
 }
 
 // factoredTarget resolves the business handler a factored chain dispatches to. When the
@@ -126,22 +128,15 @@ func (r *mwReclaimer) hasUnresolvedFuncCallOfType(f *ssa.Function, loops []mwLoo
 			if _, isBuiltin := c.Value.(*ssa.Builtin); isBuiltin {
 				continue
 			}
-			if elemTypeName(c.Value.Type()) == typeName {
+			// One source of truth: the same blindspots.FuncValueTypeName the seam TypeName and
+			// the blind-spot Detail are built from, so the producer's exact-equality guard and
+			// the disclosure agree on the type string.
+			if blindspots.FuncValueTypeName(c.Value.Type()) == typeName {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-// elemTypeName names a func-value's defined type the way the blind-spot detector does
-// (blindspots.funcValueTypeName): the unaliased named type's String(), so the MiddlewareSeam
-// TypeName matches the type named in the blind spot's Detail.
-func elemTypeName(t types.Type) string {
-	if named, ok := types.Unalias(t).(*types.Named); ok {
-		return named.String()
-	}
-	return t.String()
 }
 
 // valueReaches reports whether v derives from target through the value constructors a
@@ -173,24 +168,35 @@ func valueReaches(v, target ssa.Value, seen map[ssa.Value]bool) bool {
 	return false
 }
 
-// functionReturns reports whether f has a return statement whose returned value derives
-// from target (the threaded handler phi) — the factored shape where f hands the wrapped
-// handler back to its caller.
-func functionReturns(f *ssa.Function, target ssa.Value) bool {
+// everyReturnThreaded reports whether f returns the threaded handler on EVERY return path:
+// there is at least one return, and every return has a result that derives from target (the
+// threaded handler phi). This is the factored shape where f's SOLE terminal is the wrapped
+// handler — so the caller's ServeHTTP on f's result always dispatches that handler. A return
+// that yields no threaded result (a sibling `return otherHandler`, a post-loop re-wrap whose
+// value is a Call valueReaches cannot trace, or a void return) means f has an alternate
+// terminal this pass cannot bind, so it returns false and the caller abstains.
+func everyReturnThreaded(f *ssa.Function, target ssa.Value) bool {
+	sawThreaded := false
 	for _, b := range f.Blocks {
 		for _, instr := range b.Instrs {
 			ret, ok := instr.(*ssa.Return)
 			if !ok {
 				continue
 			}
+			threaded := false
 			for _, res := range ret.Results {
 				if valueReaches(res, target, map[ssa.Value]bool{}) {
-					return true
+					threaded = true
+					break
 				}
 			}
+			if !threaded {
+				return false
+			}
+			sawThreaded = true
 		}
 	}
-	return false
+	return sawThreaded
 }
 
 // paramIndex returns the index of v among f's parameters and whether v is a parameter at

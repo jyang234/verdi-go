@@ -111,7 +111,7 @@ func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 				for _, ref := range referrers(fa) {
 					switch x := ref.(type) {
 					case *ssa.UnOp:
-						if x.Op != token.MUL || !sliceReadOnly(x, map[ssa.Value]bool{}) {
+						if x.Op != token.MUL || !sliceReadOnly(x, fv, map[ssa.Value]bool{}) {
 							ok = false
 						}
 					case *ssa.Store:
@@ -149,20 +149,30 @@ func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 	return res
 }
 
-// sliceReadOnly reports whether a field-slice value v (a load, or a value derived from one
-// by re-slicing or used as an append base) is used ONLY in ways that cannot write into its
-// backing array beyond what the field-store walk already sees — the soundness guard that
-// keeps the resolved element set complete. A slice that ESCAPES into a write (`s[i] = x`),
-// or into any call that is not a pure read of the header, could swap a middleware element
-// past the walk, so the field becomes unprovable (the conservative direction — abstain).
+// sliceReadOnly reports whether a field-slice value v (a load of field fv, or a value derived
+// from one by re-slicing or appending) is used ONLY in ways that cannot write into fv's backing
+// array beyond what the field-store walk already sees — the soundness guard that keeps the
+// resolved element set complete. A slice that ESCAPES into a write (`s[i] = x`), into a
+// non-builtin call, or into a store anywhere but fv itself could swap a middleware element past
+// the walk, so the field becomes unprovable (the conservative direction — abstain).
 //
-// Recognized read-only uses: len/cap (header reads), append (reads the base/varargs; its
-// result is a fresh value whose own writes are tracked when IT is stored to the field),
-// iteration (`len` + an IndexAddr whose only uses are loads — the range read, and the
-// middleware loop's own element read), and a re-slice (recursively read-only). Anything else
-// — the slice passed to a non-builtin call, stored into another cell, an element address
-// taken for a write — is treated as an escape.
-func sliceReadOnly(v ssa.Value, seen map[ssa.Value]bool) bool {
+// Recognized read-only uses:
+//   - len/cap — header reads.
+//   - append — reads the base/varargs; its RESULT may ALIAS fv's backing array (spare
+//     capacity), so the result is recursed: it may be stored back into fv (the append-chain,
+//     enumerated by the store walk via appendElems) or read, but a write THROUGH the result
+//     (`tmp[i] = x`) is caught and abstains. Without this recursion an in-place append-then-
+//     index-write would swap an element invisibly — a false PROVEN.
+//   - iteration — `len` + an IndexAddr whose only uses are loads (the range read, and the
+//     middleware loop's own element read).
+//   - a re-slice — recursively read-only.
+//   - a store of the slice back into fv itself — the field's own write, which the store walk
+//     already enumerates; a store into ANY OTHER field/cell aliases fv's backing past the walk
+//     and abstains.
+//
+// Anything else — the slice passed to a non-builtin call, an element address taken for a
+// write, a `range` (the map form) — is treated as an escape.
+func sliceReadOnly(v ssa.Value, fv *types.Var, seen map[ssa.Value]bool) bool {
 	if seen[v] {
 		return true
 	}
@@ -170,7 +180,21 @@ func sliceReadOnly(v ssa.Value, seen map[ssa.Value]bool) bool {
 	for _, ref := range referrers(v) {
 		switch x := ref.(type) {
 		case *ssa.Call:
-			if bi, ok := x.Common().Value.(*ssa.Builtin); !ok || !isReadOnlyBuiltin(bi.Name()) {
+			bi, ok := x.Common().Value.(*ssa.Builtin)
+			if !ok || !isReadOnlyBuiltin(bi.Name()) {
+				return false
+			}
+			// append returns a slice that may alias v's backing array; its result must itself
+			// be read-only (len/cap return scalars, so they need no recursion).
+			if bi.Name() == "append" && !sliceReadOnly(x, fv, seen) {
+				return false
+			}
+		case *ssa.Store:
+			// A store of this slice is read-only-equivalent ONLY when it writes the slice back
+			// into fv itself — that write is enumerated by the field-store walk. A store into
+			// any other field/cell publishes an alias of fv's backing array the walk does not
+			// follow, so abstain.
+			if x.Val != v || !isFieldAddrOf(x.Addr, fv) {
 				return false
 			}
 		case *ssa.IndexAddr:
@@ -181,7 +205,7 @@ func sliceReadOnly(v ssa.Value, seen map[ssa.Value]bool) bool {
 				}
 			}
 		case *ssa.Slice:
-			if !sliceReadOnly(x, seen) {
+			if !sliceReadOnly(x, fv, seen) {
 				return false
 			}
 		case *ssa.Range:
@@ -195,9 +219,15 @@ func sliceReadOnly(v ssa.Value, seen map[ssa.Value]bool) bool {
 	return true
 }
 
-// isReadOnlyBuiltin reports whether a builtin call on a slice only READS it (it cannot swap
-// an element past the field-store walk): len/cap read the header; append reads its arguments
-// and returns a fresh slice whose own stores are tracked when it is stored to the field.
+// isFieldAddrOf reports whether addr is the address of field fv (`&x.<fv>`).
+func isFieldAddrOf(addr ssa.Value, fv *types.Var) bool {
+	fa, ok := addr.(*ssa.FieldAddr)
+	return ok && fv != nil && fieldVarOf(fa) == fv
+}
+
+// isReadOnlyBuiltin reports whether a builtin call on a slice only READS its argument: len/cap
+// read the header; append reads its base/varargs and returns a fresh slice (whose own uses
+// sliceReadOnly recurses into, since it may alias the argument's backing array).
 func isReadOnlyBuiltin(name string) bool {
 	return name == "len" || name == "cap" || name == "append"
 }

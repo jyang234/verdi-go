@@ -8,6 +8,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
+	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 )
 
 // ViaMiddlewareChain attributes an edge to the middleware-chain reclaimer.
@@ -16,10 +17,12 @@ const ViaMiddlewareChain = "middleware-chain"
 // MiddlewareSeam names a middleware-application loop the reclaimer fully resolved
 // to an EMPTY middleware set, so the UnresolvedCall blind spot the loop produced
 // can be dropped. Site is the loop function's FQN (it matches blindspots.BlindSpot.Site,
-// which is fn.RelString(nil)); TypeName is the MiddlewareFunc element type's String()
-// (it matches the type named in the blind spot's Detail). The apply pass drops a
-// blind spot only when BOTH match, so a same-function UnresolvedCall of a different
-// func type is never silently cleared.
+// which is fn.RelString(nil)); TypeName is the element type named by
+// blindspots.FuncValueTypeName — the SAME helper the blind spot's Detail is built from, so
+// the two cannot derive the type string differently. The apply pass drops a blind spot only
+// when Site matches AND TypeName matches the ANCHORED type token in Detail ("of type <T>
+// resolved to no callee"), so a same-function UnresolvedCall of a different func type — even
+// one whose name has TypeName as a substring — is never silently cleared.
 type MiddlewareSeam struct {
 	Site     string
 	TypeName string
@@ -58,7 +61,9 @@ type MiddlewareResult struct {
 //     chain CAN be invoked when a request flows through, so the route reaches it. For the
 //     INLINE shape (ServeHTTP in F, on the threaded handler) that is F→T; for the FACTORED
 //     shape (F returns the handler and the CALLER dispatches `F(h).ServeHTTP(...)`) it is
-//     caller→T, traced to the handler argument the caller passed. T is the concrete func a
+//     caller→T, traced to the handler argument the caller passed — and only when the threaded
+//     handler is F's SOLE returned terminal (a sibling return of a different handler is an
+//     alternate terminal this pass cannot bind, so it abstains). T is the concrete func a
 //     net/http.HandlerFunc / closure handler wraps.
 //
 // Soundness (R2): every edge is one real execution can take — adding a true edge only ever
@@ -143,7 +148,11 @@ func (r *mwReclaimer) reclaimFunc(fqn string, f *ssa.Function, addEdge func(from
 	clearableByType := map[string]bool{}
 	seenType := map[string]bool{}
 	for _, lp := range loops {
-		typeName := lp.elemType.String()
+		// One source of truth: name the element type the SAME way the blind-spot Detail and
+		// the same-type guard do (blindspots.FuncValueTypeName), so the seam string the apply
+		// pass matches against Detail cannot derive differently (an alias type would otherwise
+		// diverge from the unaliased name in Detail).
+		typeName := blindspots.FuncValueTypeName(lp.elemType)
 		if !seenType[typeName] {
 			seenType[typeName] = true
 			clearableByType[typeName] = true

@@ -353,14 +353,23 @@ entrypoint-anchored absence proof whose cone crosses it abstains (CANT-PROVE). T
 > edge — `caller → business` for the FACTORED shape (`apply(h).ServeHTTP(...)` at the
 > caller), `loopFn → business` for the INLINE shape — each a may-edge real execution
 > can take (R2). A slice built from an unknown source (a parameter, an opaque global)
-> leaves the seam `UnresolvedCall` — abstaining is correct.
+> leaves the seam `UnresolvedCall` — abstaining is correct. The element-set walk also
+> abstains whenever the field's slice could be mutated past the store walk: the field
+> address or its loaded slice escaping into a non-builtin call, an element written
+> through it (`s[i] = x`), or an `append` RESULT (which may alias the backing array)
+> written in place — any of these makes the set unprovable.
 >
 > **Blind-spot clearing** is the one disclosure this reclaimer retracts, and ONLY
-> when the set is provably EMPTY and every terminal was recovered: an empty loop is
+> when the set is provably EMPTY and the threaded handler is the loop function's SOLE
+> returned terminal (a sibling return of a different handler abstains): an empty loop is
 > dead, so once the pass-through handler edge is recovered its frontier is fully
-> resolved. A NON-empty set is never cleared — each middleware body re-dispatches
-> through its own `next.ServeHTTP`, a residual hop this pass does not chase, so it
-> stays disclosed (the strict-server reclaimer's reconnect-but-disclose discipline).
+> resolved. The drop matches the type as the ANCHORED token blindspots writes into the
+> disclosure ("of type T resolved to no callee"), keyed through the one shared
+> `blindspots.FuncValueTypeName`, so a same-site UnresolvedCall of a different type —
+> even one whose name has T as a substring — is never collaterally cleared. A NON-empty
+> set is never cleared — each middleware body re-dispatches through its own
+> `next.ServeHTTP`, a residual hop this pass does not chase, so it stays disclosed
+> (the strict-server reclaimer's reconnect-but-disclose discipline).
 > This unlocks the entrypoint-anchored rule class (`must_not_reach` /
 > `must_pass_through` for an auth / read-only / correlation-id waypoint) on the
 > nil-in-prod middleware shape, where the read route becomes a determinate proof and

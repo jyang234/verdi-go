@@ -977,12 +977,17 @@ func dropResolvedSeams(g *Graph, seams []reclaim.MiddlewareSeam) int {
 	return cleared
 }
 
-// matchesResolvedSeam reports whether the blind spot b is the UnresolvedCall a resolved
-// empty seam retracts: same site, and the seam's element type named in b's Detail (the same
-// type string blindspots.funcValueTypeName writes into the disclosure).
+// matchesResolvedSeam reports whether the blind spot b is the UnresolvedCall a resolved empty
+// seam retracts: same site, and the seam's element type named in b's Detail. The type is
+// matched as the ANCHORED token blindspots writes ("of type <T> resolved to no callee"), NOT a
+// bare substring: a bare strings.Contains would let a seam for type `pkg.MW` clear an unrelated
+// UnresolvedCall of `pkg.MWAudit` at the same site (one name is a substring of the other),
+// silently retracting a live disclosure — a false PROVEN. The framing brackets the type on both
+// sides, so only the exact type clears. If blindspots ever changes that prose the match fails
+// closed (the seam stays disclosed), never the reverse.
 func matchesResolvedSeam(b blindspots.BlindSpot, seams []reclaim.MiddlewareSeam) bool {
 	for _, s := range seams {
-		if b.Site == s.Site && strings.Contains(b.Detail, s.TypeName) {
+		if b.Site == s.Site && strings.Contains(b.Detail, "of type "+s.TypeName+" resolved to no callee") {
 			return true
 		}
 	}

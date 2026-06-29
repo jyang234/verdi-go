@@ -182,6 +182,37 @@ func TestMiddlewareChainEscapingFieldAbstains(t *testing.T) {
 	}
 }
 
+// Soundness: a factored applier with a SIBLING return (an alternate terminal not derived from
+// the threaded handler) must not be cleared — the caller's ServeHTTP could dispatch that other
+// handler, a path the terminal recovery cannot bind, so clearing would launder it into a false
+// absence proof. The reclaimer abstains: no SibWrapper edge, and its seam is not cleared.
+func TestMiddlewareChainSiblingReturnAbstains(t *testing.T) {
+	edges, seams := mwEdges(t, "mwchainsvc")
+
+	for from, tos := range edges {
+		if strings.Contains(from, "SibWrapper") {
+			t.Errorf("sibling-return applier: must recover no edge; got %s -> %v", from, tos)
+		}
+	}
+	if hasSeam(seams, "SibWrapper).apply") {
+		t.Errorf("sibling-return applier has an alternate terminal; its seam must stay disclosed; got %v", seams)
+	}
+}
+
+// Soundness (the append-result-aliasing guard): when an append RESULT on the field slice is
+// written in place (`tmp := append(field, k); tmp[0] = ...`), the result may alias the field's
+// backing array, so an element can be swapped past the field-store walk. The reclaimer must
+// abstain on that field rather than trust the statically-enumerated element — no edge recovered.
+func TestMiddlewareChainAppendResultMutationAbstains(t *testing.T) {
+	edges, _ := mwEdges(t, "mwchainsvc")
+
+	for from, tos := range edges {
+		if strings.Contains(from, "EscAppendWrapper") {
+			t.Errorf("append-result-mutating field: must recover no edge (the set is not provable); got %s -> %v", from, tos)
+		}
+	}
+}
+
 // Soundness / no false positives: services with no middleware-application loop yield nothing.
 // A reclaimer that fired on any range-over-funcs loop, or any ServeHTTP dispatch, would emit
 // spurious edges here.

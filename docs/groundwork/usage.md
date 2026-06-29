@@ -169,6 +169,18 @@ those route-level invariants provable. `groundwork init` detects this un-reclaim
 seam and recommends it in the proposal guide; feed it the reclaimed graph and
 re-run.
 
+**Add `--reclaim-middleware` when routes apply a middleware chain.** oapi-codegen
+(and hand-written chi/`net/http`) wrappers run `for _, mw := range
+HandlerMiddlewares { h = mw(h) }` before dispatching, and that `mw(h)` func-value
+call is itself an `UnresolvedCall` on every route — so even with `--reclaim` a
+route-anchored `must_not_reach`/`must_pass_through` still abstains. `flowmap graph
+--reclaim-middleware` resolves the loop when the middleware set is statically
+determinable (tagging the recovered edges `via=middleware-chain`) and clears the
+seam when the set is provably empty (the nil-in-prod shape), turning the read route
+into a determinate proof and a genuine write-route violation into a witness. Where
+the set is dynamic, escapes, or the applier has an unbindable alternate terminal,
+it stays `UnresolvedCall` — abstaining, never a false proof.
+
 `init` also records the algorithm it proposed against in the policy's `substrate`
 field, and `fitness`/`verify` flag a **policy-vs-graph** mismatch the same way: a
 policy proposed on `vta` but checked against an `rta` graph (the `flowmap graph`

@@ -29,6 +29,11 @@
 //   - EscapeMW / EscapeWrapper — HandlerMiddlewares whose slice escapes into a helper that
 //     could mutate its backing array past the store walk, so the set is not provable even
 //     though no element is stored: the reclaimer abstains (the completeness guard).
+//   - SibMW / SibWrapper — a factored applier with a SIBLING return (an alternate terminal not
+//     derived from the threaded handler); the reclaimer abstains rather than clear a seam over a
+//     path it cannot bind.
+//   - EscAppendMW / EscAppendWrapper — an append RESULT on the field is written in place, so it
+//     may alias the field's backing array; the reclaimer abstains (the append-result guard).
 package main
 
 import "net/http"
@@ -188,12 +193,73 @@ func (siw *EscapeWrapper) Route(w http.ResponseWriter, r *http.Request) {
 	siw.apply(http.HandlerFunc(businessPostItems)).ServeHTTP(w, r)
 }
 
+// ---- SibMW / SibWrapper: a factored applier with a SIBLING return (an alternate terminal) ----
+
+type SibMW func(http.Handler) http.Handler
+
+type SibWrapper struct {
+	HandlerMiddlewares []SibMW
+	fallback           http.Handler
+}
+
+// apply has TWO returns: the threaded handler AND a sibling `return w.fallback`. The fallback
+// is an alternate terminal a caller's ServeHTTP could dispatch, which the terminal recovery
+// cannot bind from the handler argument — so the reclaimer must abstain (not clear the seam)
+// rather than prove absence over a path it does not see.
+func (siw *SibWrapper) apply(h http.Handler) http.Handler {
+	if siw.fallback != nil {
+		return siw.fallback
+	}
+	for _, mw := range siw.HandlerMiddlewares {
+		h = mw(h)
+	}
+	return h
+}
+
+func (siw *SibWrapper) Route(w http.ResponseWriter, r *http.Request) {
+	siw.apply(http.HandlerFunc(businessGetItems)).ServeHTTP(w, r)
+}
+
+// ---- EscAppendMW / EscAppendWrapper: an append RESULT mutated in place (backing-array alias) ----
+
+type EscAppendMW func(http.Handler) http.Handler
+
+func knownEscMW(next http.Handler) http.Handler { return next }
+
+type EscAppendWrapper struct {
+	HandlerMiddlewares []EscAppendMW
+}
+
+// build appends a KNOWN middleware but then writes through the append RESULT, which may alias
+// the field's backing array (spare capacity). The element set looks statically enumerable
+// (knownEscMW) but the in-place write can swap it past the field-store walk, so the reclaimer
+// must abstain. This pins the sliceReadOnly append-result recursion.
+func (siw *EscAppendWrapper) build() {
+	tmp := append(siw.HandlerMiddlewares, knownEscMW)
+	tmp[0] = knownEscMW
+	siw.HandlerMiddlewares = tmp
+}
+
+func (siw *EscAppendWrapper) apply(h http.Handler) http.Handler {
+	for _, mw := range siw.HandlerMiddlewares {
+		h = mw(h)
+	}
+	return h
+}
+
+func (siw *EscAppendWrapper) Route(w http.ResponseWriter, r *http.Request) {
+	siw.apply(http.HandlerFunc(businessGetItems)).ServeHTTP(w, r)
+}
+
 func main() {
 	empty := &EmptyWrapper{}
 	known := newKnown()
 	app := newAppend()
 	dyn := newDynamic()
 	esc := &EscapeWrapper{}
+	sib := &SibWrapper{}
+	escApp := &EscAppendWrapper{}
+	escApp.build()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /items", empty.GetItems)
@@ -202,6 +268,8 @@ func main() {
 	mux.HandleFunc("GET /append", app.Route)
 	mux.HandleFunc("GET /dyn", dyn.Route)
 	mux.HandleFunc("GET /esc", esc.Route)
+	mux.HandleFunc("GET /sib", sib.Route)
+	mux.HandleFunc("GET /escapp", escApp.Route)
 
 	srv := &http.Server{Addr: ":0", Handler: mux}
 	_ = srv.ListenAndServe()
