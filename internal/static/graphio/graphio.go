@@ -189,6 +189,14 @@ type Graph struct {
 	// Unexported, so it never serializes (no golden churn). Populated only on an unscoped
 	// build (the frontier rides those); a scoped ApplyReclaimers recomputes it.
 	reclaimEdges []reclaim.Edge
+
+	// middlewareReclaim is the dry run of reclaim.MiddlewareChain, computed ONCE at an
+	// unscoped build. Like reclaimEdges it is the single source the frontier dry run reads
+	// (a standalone middleware UnresolvedCall whose loop the reclaimer proves EMPTY is binned
+	// B — reclaimable by --reclaim-middleware — instead of A) and ApplyMiddlewareReclaimer
+	// folds, so prediction and apply cannot diverge. Unexported (never serializes); a scoped
+	// ApplyMiddlewareReclaimer recomputes it.
+	middlewareReclaim reclaim.MiddlewareResult
 }
 
 // nodeSet returns the set of node FQNs in g — the membership map both the reclaim
@@ -747,6 +755,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 	if entry == "" {
 		g.OmittedPackages = omittedPackages(res, g)
 		g.reclaimEdges = reclaimEdges(res, g.nodeSet())
+		g.middlewareReclaim = reclaim.MiddlewareChain(res)
 		g.Frontier = frontierSection(g)
 	}
 	return g, nil
@@ -842,6 +851,13 @@ func frontierInput(g *Graph) *frontier.Input {
 	for _, e := range g.reclaimEdges {
 		in.Reclaimable = append(in.Reclaimable, e.To)
 	}
+	// The middleware-reclaimable set is the SITE of every loop the middleware-chain reclaimer
+	// proves EMPTY (its ResolvedEmpty) — a standalone UnresolvedCall there is binned B
+	// (reclaimable by --reclaim-middleware) rather than A. Same single-source discipline:
+	// derived from the dry run ApplyMiddlewareReclaimer clears, so prediction == apply.
+	for _, s := range g.middlewareReclaim.ResolvedEmpty {
+		in.MiddlewareReclaimable = append(in.MiddlewareReclaimable, s.Site)
+	}
 	for _, n := range g.Nodes {
 		in.Nodes = append(in.Nodes, n.FQN)
 	}
@@ -920,6 +936,84 @@ func ApplyReclaimers(g *Graph, res *analyze.Result) int {
 		}
 	}
 	return added
+}
+
+// ApplyMiddlewareReclaimer runs the middleware-chain reclaimer (reclaim.MiddlewareChain)
+// over res and folds the result into g: it ADDs the recovered edges (tagged
+// via=middleware-chain) that resolve the oapi-codegen / chi middleware-application loop,
+// and DROPs the UnresolvedCall blind spots at loops whose middleware set is provably empty
+// (so the loop body is dead and hides nothing). It is OPT-IN (`flowmap graph
+// --reclaim-middleware`): Build never calls it, so the default graph — every committed
+// golden — is unchanged. Each added edge is one real execution can take (R2) and carries
+// its reclaimer in Via. A blind spot is dropped only when its (Site, type) matches a
+// fully-resolved empty seam, so a non-empty middleware loop (or a same-function func-value
+// call of another type) stays disclosed. Returns the counts of edges added and blind spots
+// cleared; re-sorts and re-classifies the frontier like ApplyReclaimers when anything changed.
+func ApplyMiddlewareReclaimer(g *Graph, res *analyze.Result) (added, cleared int) {
+	// Reuse the dry run Build already computed (the unscoped case, where a frontier rides);
+	// a scoped build never computed it, so recompute there. Either way the SAME helper
+	// produces it, so the folded edges and cleared seams match the frontier's prediction.
+	mw := g.middlewareReclaim
+	if g.Entrypoint != "" {
+		mw = reclaim.MiddlewareChain(res)
+	}
+	present := g.edgeKeySet()
+	nodes := g.nodeSet()
+	for _, e := range mw.Edges {
+		if g.foldEdge(e.From, e.To, e.Via, present, nodes) {
+			added++
+		}
+	}
+	if len(mw.ResolvedEmpty) > 0 {
+		cleared = dropResolvedSeams(g, mw.ResolvedEmpty)
+	}
+	if added > 0 || cleared > 0 {
+		sortGraph(g)
+		// Re-classify only for an unscoped graph — the frontier section is a whole-service
+		// disclosure (see Build), so a scoped reclaim re-sorts its edges but carries no frontier.
+		if g.Entrypoint == "" {
+			g.Frontier = frontierSection(g)
+		}
+	}
+	return added, cleared
+}
+
+// dropResolvedSeams removes from g.BlindSpots every UnresolvedCall whose (Site, defined type
+// named in Detail) matches a fully-resolved empty middleware seam, returning how many were
+// dropped. The match is on BOTH the site (the loop function's FQN) AND the element type
+// (the type the reclaimer resolved), so an UnresolvedCall at the same site for a different
+// func type — or a middleware loop whose set was NOT proven empty — survives untouched. The
+// seam is the one disclosure the reclaimer is allowed to retract, and only because an empty
+// set means the loop hides nothing and the pass-through handler edge was recovered.
+func dropResolvedSeams(g *Graph, seams []reclaim.MiddlewareSeam) int {
+	cleared := 0
+	kept := g.BlindSpots[:0]
+	for _, b := range g.BlindSpots {
+		if b.Kind == blindspots.UnresolvedCall && matchesResolvedSeam(b, seams) {
+			cleared++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	g.BlindSpots = kept
+	return cleared
+}
+
+// matchesResolvedSeam reports whether the blind spot b is the UnresolvedCall a resolved empty
+// seam retracts: same site, and the seam's element type named in b's Detail. The type is
+// matched as the ANCHORED token blindspots writes ("of type <T> resolved to no callee"), NOT a
+// bare substring: a bare strings.Contains would let a seam for type `pkg.MW` clear an unrelated
+// UnresolvedCall of `pkg.MWAudit` at the same site (one name is a substring of the other),
+// silently retracting a live disclosure — a false PROVEN. The framing brackets the type on both
+// sides, so only the exact type clears. If blindspots ever changes that prose the match fails
+// closed (the seam stays disclosed), never the reverse.
+func matchesResolvedSeam(b blindspots.BlindSpot, seams []reclaim.MiddlewareSeam) bool {
+	for _, s := range seams {
+		if b.Site == s.Site && strings.Contains(b.Detail, "of type "+s.TypeName+" resolved to no callee") {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyRebind runs the EXPERIMENTAL de-union pass (rebind package) over res and folds

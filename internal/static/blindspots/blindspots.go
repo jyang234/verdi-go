@@ -451,7 +451,7 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 			// cannot derive the type differently.
 			named, _ := types.Unalias(cc.Value.Type()).(*types.Named)
 			sig := ""
-			if name := funcValueTypeName(named, cc.Signature()); name != "" {
+			if name := FuncValueTypeName(cc.Value.Type()); name != "" {
 				sig = " of type " + name
 			}
 			// A recognized benign stdlib func value (context.CancelFunc — stdlib context
@@ -486,19 +486,25 @@ func unresolvedFuncValueCalls(fn *ssa.Function, site string, resolved map[ssa.Ca
 	return out
 }
 
-// funcValueTypeName names the static type of a func-value call's callee for disclosure:
-// the resolved DEFINED type when the value has one — e.g. "context.CancelFunc" — else the
-// bare signature "func()". named is the value's already-resolved *types.Named (nil for an
-// unnamed func value, computed once at the call site so naming and tiering share it); sig
-// is the fallback signature. Naming the defined type (not just its underlying signature)
-// is what puts the benign-tier key into Detail, so the Severity tier stays a pure function
-// of the sort key. The unnamed case is byte-identical to the bare signature, so an
-// ordinary func() seam reads exactly as before.
-func funcValueTypeName(named *types.Named, sig *types.Signature) string {
-	if named != nil {
+// FuncValueTypeName names the static type of a func value for disclosure: the resolved
+// DEFINED type when it has one — e.g. "context.CancelFunc" — else the bare signature
+// ("func()"). It is alias-safe (types.Unalias before the *types.Named assertion — the Go 1.24
+// gotypesalias=1 case where a defined func type reached through an alias presents as
+// *types.Alias), so the name is byte-identical whether the type is reached directly or
+// through an alias. Naming the defined type (not just its underlying signature) is what puts
+// the benign-tier key into Detail, so the Severity tier stays a pure function of the sort key.
+//
+// Exported as the ONE source of truth for this name (CLAUDE.md "one source of truth"): the
+// reclaim package's middleware-chain reclaimer keys its seam TypeName and its same-type guard
+// on this exact string, so the type named in a blind spot's Detail and the type the reclaimer
+// matches against to clear it cannot derive differently. The unnamed case is byte-identical to
+// the bare signature, so an ordinary func() seam reads exactly as before.
+func FuncValueTypeName(t types.Type) string {
+	u := types.Unalias(t)
+	if named, ok := u.(*types.Named); ok {
 		return named.String()
 	}
-	if sig != nil {
+	if sig, ok := u.Underlying().(*types.Signature); ok {
 		return sig.String()
 	}
 	return ""

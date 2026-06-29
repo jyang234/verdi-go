@@ -70,8 +70,23 @@ frontier is one of four kinds; only the first two touch the deterministic verdic
 |---|---|---|---|
 | **Reclaim** — add a statically-true edge the builder missed | deterministic | yes (more complete graph) | **IN** |
 | **Disclose** — describe the residual frontier | deterministic | no (read-only) | **IN** |
+| **Retract** — drop a disclosure once the seam is PROVEN resolved | deterministic | yes (un-blinds an absence proof) | **IN (sound-or-abstain)** |
 | **Observe** — fill a frontier from traces | **non-deterministic** | only a separate lane | **fenced** |
 | **Resolve-by-guess** — narrow a dynamic set to a chosen value | deterministic but unsound | yes | **OUT** |
+
+**Retract is IN but asymmetric to Reclaim.** Adding a true edge is safe even when
+*imprecise* (over-firing only over-blocks a negative check, never manufactures a
+false all-clear), so an approximate reclaimer is doctrine-compatible. Retracting a
+disclosure is the opposite: an *over*-retraction — dropping a blind spot that still
+hides a real edge — directly manufactures a false absence (tenet 3, "never launder
+an unknown into a concrete claim"). So Retract is admitted ONLY sound-or-abstain:
+the seam must be *proven* resolved (the middleware-chain reclaimer clears a loop's
+`UnresolvedCall` only when its element set is provably EMPTY, the threaded handler
+is the sole terminal, and the pass-through edge was recovered — every guard fails
+closed). A reclaimer that adds edges but cannot prove the seam fully resolved leaves
+the disclosure standing. Retraction shares the opt-in flag with its reclaimer's
+edge recovery because the two together are what make an entrypoint-anchored proof
+determinate; the edges alone (disclosure intact) keep the verdict a Caution.
 
 **The load-bearing soundness argument for Reclaim.** Reclamation only ever *adds*
 edges. Adding a real edge to the graph can turn a `provenAbsent` into `reachable`
@@ -331,6 +346,61 @@ width. That is a *different* facet (too-many-callees at a shared site) from
 forward-starvation (no-callee into the per-handler closure). VTA does not fix
 starvation — we measured `strictsvc` *under VTA* and the cones are still empty. So
 the reclaimer is genuinely new work, complementary to the shipped `--algo` lever.
+
+**Second reclaimer (SHIPPED, opt-in) — the middleware-chain seam.** The strict-server
+reclaimer reconnects the per-handler `$1` closure, but the `MiddlewareFunc`
+*application loop* it leaves disclosed (`for _, mw := range siw.HandlerMiddlewares {
+h = mw(h) }`) is itself a func-value call the builder resolves to no callee — an
+`UnresolvedCall` on the forward path of **every** oapi-codegen / chi route, so any
+entrypoint-anchored absence proof whose cone crosses it abstains (CANT-PROVE). The
+`MiddlewareChain` reclaimer (`reclaim.MiddlewareChain`, folded by
+`graphio.ApplyMiddlewareReclaimer`, exposed as `flowmap graph --reclaim-middleware`
+/ `flowmap frontier --reclaim-middleware`) recovers it, soundly:
+
+> **middleware-chain reclaimer** — recognizes the loop by its SSA signature (a
+> func-value call `mw(h)` whose callee is a slice element and whose handler argument
+> is a phi fed back by the call's own result — the `h = mw(h)` recurrence). It
+> resolves the slice's element set to a COMPLETE set of concrete functions (a const
+> slice/array literal, an `append` chain of known funcs, or provably empty), walking
+> `ssautil.AllFunctions` for every store to a field-backed slice (collect functions
+> completely — under-collection would be a false PROVEN). For a provable set it adds
+> `loopFn → Mi` for each middleware Mi (resolving the call) and the terminal handler
+> edge — `caller → business` for the FACTORED shape (`apply(h).ServeHTTP(...)` at the
+> caller), `loopFn → business` for the INLINE shape — each a may-edge real execution
+> can take (R2). A slice built from an unknown source (a parameter, an opaque global)
+> leaves the seam `UnresolvedCall` — abstaining is correct. The element-set walk also
+> abstains whenever the field's slice could be mutated past the store walk: the field
+> address or its loaded slice escaping into a non-builtin call, an element written
+> through it (`s[i] = x`), or an `append` RESULT (which may alias the backing array)
+> written in place — any of these makes the set unprovable.
+>
+> **Blind-spot clearing** is the one disclosure this reclaimer retracts, and ONLY
+> when the set is provably EMPTY and the threaded handler is the loop function's SOLE
+> returned terminal (a sibling return of a different handler abstains): an empty loop is
+> dead, so once the pass-through handler edge is recovered its frontier is fully
+> resolved. The drop matches the type as the ANCHORED token blindspots writes into the
+> disclosure ("of type T resolved to no callee"), keyed through the one shared
+> `blindspots.FuncValueTypeName`, so a same-site UnresolvedCall of a different type —
+> even one whose name has T as a substring — is never collaterally cleared. A NON-empty
+> set is never cleared — each middleware body re-dispatches through its own
+> `next.ServeHTTP`, a residual hop this pass does not chase, so it stays disclosed
+> (the strict-server reclaimer's reconnect-but-disclose discipline).
+> This unlocks the entrypoint-anchored rule class (`must_not_reach` /
+> `must_pass_through` for an auth / read-only / correlation-id waypoint) on the
+> nil-in-prod middleware shape, where the read route becomes a determinate proof and
+> the write route a determinate violation with a witness. Fixture: `mwchainsvc`.
+>
+> **Frontier prediction (like the strict-server seam).** The classifier predicts
+> middleware-reclaimability the same way it predicts the strict-server seam via
+> `Reclaimable`: a dry run of the reclaimer (`graphio.Build` computes it once,
+> `frontierInput` passes the proven-empty loop sites as `MiddlewareReclaimable`) bins
+> a standalone middleware `UnresolvedCall` it would resolve as **B** (reclaimable by
+> `--reclaim-middleware`) instead of **A** (irreducible). The set is exactly the
+> reclaimer's `ResolvedEmpty`, so prediction and apply cannot diverge (§21.②); a
+> dynamic / escaping / sibling-return loop is absent from it and stays A. This also
+> corrects a prior misclassification: after `--reclaim` closes the strict-server
+> structural seam, strictsvc's residual nil-middleware loops are now disclosed as B
+> (reclaimable by the other flag), not the irreducible A they were binned before.
 
 ---
 

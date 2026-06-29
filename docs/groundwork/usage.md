@@ -165,9 +165,28 @@ call-graph algorithm cannot resolve, so every route entry is an `UnresolvedCall`
 blind spot and a route-anchored `must_not_reach` reads "no path found, but the
 frontier is blind" instead of a real proof. `flowmap graph --reclaim` recovers the
 `wrapper→handler` edge (deterministic generated code, recovered soundly), making
-those route-level invariants provable. `groundwork init` detects this un-reclaimed
-seam and recommends it in the proposal guide; feed it the reclaimed graph and
-re-run.
+those route-level invariants provable. `groundwork init` reads the producer's
+frontier and recommends the matching flag for every seam the classifier bins
+**reclaimable** (`B`) — `--reclaim` for the strict-server dispatch seam,
+`--reclaim-middleware` for the middleware loop — naming each flag with its seam
+count and never recommending one for a genuinely dynamic (`A`) seam. The
+recommendation is self-quieting: a reclaimed graph re-classifies its seam away, so
+the marker (and the recommendation) is gone. The guidance is staged — on a
+strict-server service the middleware seams are masked by the route's severance
+marker until `--reclaim` closes it, so feed `init` the reclaimed graph and re-run
+to surface the `--reclaim-middleware` recommendation.
+
+**Add `--reclaim-middleware` when routes apply a middleware chain.** oapi-codegen
+(and hand-written chi/`net/http`) wrappers run `for _, mw := range
+HandlerMiddlewares { h = mw(h) }` before dispatching, and that `mw(h)` func-value
+call is itself an `UnresolvedCall` on every route — so even with `--reclaim` a
+route-anchored `must_not_reach`/`must_pass_through` still abstains. `flowmap graph
+--reclaim-middleware` resolves the loop when the middleware set is statically
+determinable (tagging the recovered edges `via=middleware-chain`) and clears the
+seam when the set is provably empty (the nil-in-prod shape), turning the read route
+into a determinate proof and a genuine write-route violation into a witness. Where
+the set is dynamic, escapes, or the applier has an unbindable alternate terminal,
+it stays `UnresolvedCall` — abstaining, never a false proof.
 
 `init` also records the algorithm it proposed against in the policy's `substrate`
 field, and `fitness`/`verify` flag a **policy-vs-graph** mismatch the same way: a

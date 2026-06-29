@@ -383,8 +383,8 @@ func ProvenanceLine(algo string, caveats []string) string {
 }
 
 // ReclaimCaveat returns a substrate caveat disclosing that this graph carries
-// reclaimed edges (flowmap's opt-in `--reclaim`), or "" when it carries none. It
-// names each reclaimer and its edge count so a verdict computed over the graph is
+// reclaimed edges (flowmap's opt-in `--reclaim` / `--reclaim-middleware`), or "" when it
+// carries none. It names each reclaimer and its edge count so a verdict computed over the graph is
 // AUDITABLE as reclaim-informed — the Algo/Caveats substrate discipline (R3)
 // extended to the reclaimer provenance. Folded into the caveats every verdict
 // surface already echoes (fitness/verify/review), so a reader sees on the same
@@ -414,7 +414,7 @@ func (g *Graph) ReclaimCaveat() string {
 		parts = append(parts, fmt.Sprintf("%d via %s", counts[v], v))
 	}
 	return "reclaim-informed: " + strings.Join(parts, ", ") +
-		" edge(s) recovered at a dispatch seam (flowmap --reclaim) — a reachable verdict may rest on a reclaimed edge"
+		" edge(s) recovered at a dispatch seam (flowmap --reclaim*) — a reachable verdict may rest on a reclaimed edge"
 }
 
 // SQLFoldCaveat returns a substrate caveat disclosing that this graph carries DB
