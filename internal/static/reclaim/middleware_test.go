@@ -120,21 +120,39 @@ func TestMiddlewareChainDynamicStaysBlind(t *testing.T) {
 	}
 }
 
-// The INLINE oapi-codegen strict-server shape (strictsvc: the loop, the per-handler closure,
-// and ServeHTTP all in one wrapper method, HandlerMiddlewares nil in prod): the reclaimer
-// recovers the inline terminal wrapper→$1 (the same edge the strict-server reclaimer
-// recovers — they agree at the seam) and, the set being empty, resolves the seam for every
-// route.
-func TestMiddlewareChainInlineStrictServer(t *testing.T) {
-	edges, seams := mwEdges(t, "strictsvc")
+// The INLINE empty shape (mwchainsvc.InlineWrapper: the loop, the handler, and ServeHTTP all
+// in one method, HandlerMiddlewares never populated and no field store): the reclaimer
+// recovers the inline terminal (Route→businessGetItems through the ServeHTTP on the threaded
+// handler) and, the set being provably empty, resolves the seam.
+func TestMiddlewareChainInlineEmptyClears(t *testing.T) {
+	edges, seams := mwEdges(t, "mwchainsvc")
 
-	for _, op := range []string{"CreateEventTypeTemplate", "SyncEventTypes", "GetHealth"} {
-		if !hasEdgeSuffix(edges, "ServerInterfaceWrapper)."+op, "ServerInterfaceWrapper)."+op+"$1") {
-			t.Errorf("inline %s: want recovered wrapper→$1 terminal; got %v", op, edges)
+	if !hasEdgeSuffix(edges, "InlineWrapper).Route", "mwchainsvc.businessGetItems") {
+		t.Errorf("inline empty: want recovered Route→businessGetItems terminal; got %v", edges)
+	}
+	if !hasSeam(seams, "InlineWrapper).Route") {
+		t.Errorf("inline empty: a provably-empty inline loop should be a resolved seam; got %v", seams)
+	}
+}
+
+// KNOWN GAP (the oapi-codegen bootstrap shape): strictsvc now faithfully mirrors real
+// oapi-codegen chi-server — `HandlerWithOptions(si, ChiServerOptions{...})` wires
+// `HandlerMiddlewares: options.Middlewares`, a copy from a field of the options PARAMETER. The
+// field's element set therefore enters interprocedurally from the one bootstrap caller, which
+// the current intraprocedural element-set walk does not trace, so the reclaimer SOUNDLY
+// ABSTAINS: no edge, no clear, the seam stays UnresolvedCall. This pins the boundary — sound,
+// but incomplete on the dominant real shape — so a future param-field construction trace that
+// closes it flips this test (it is the regression guard for the gap, not an endorsement of it).
+func TestMiddlewareChainOapiBootstrapAbstains(t *testing.T) {
+	mw := reclaim.MiddlewareChain(analyzeFixture(t, "strictsvc"))
+
+	for _, e := range mw.Edges {
+		if e.Via == reclaim.ViaMiddlewareChain && strings.Contains(e.From, "ServerInterfaceWrapper") {
+			t.Errorf("oapi bootstrap (param-field source): must recover no middleware edge until the construction is traced; got %s -> %s", e.From, e.To)
 		}
-		if !hasSeam(seams, "ServerInterfaceWrapper)."+op) {
-			t.Errorf("inline %s: empty middleware loop should be a resolved seam; got %v", op, seams)
-		}
+	}
+	if len(mw.ResolvedEmpty) != 0 {
+		t.Errorf("oapi bootstrap (param-field source): the seam must stay disclosed (sound abstain), not be cleared; got %v", mw.ResolvedEmpty)
 	}
 }
 

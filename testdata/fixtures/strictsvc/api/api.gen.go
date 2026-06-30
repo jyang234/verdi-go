@@ -79,15 +79,30 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 	handler.ServeHTTP(w, r)
 }
 
-// HandlerWithOptions registers the wrapper methods on a chi router under baseURL,
-// the same r.Post/r.Get-inside-r.Group shape oapi-codegen emits (and the shape
-// flowmap's root discovery keys on).
-func HandlerWithOptions(si ServerInterface, r chi.Router, baseURL string) http.Handler {
-	wrapper := ServerInterfaceWrapper{Handler: si}
+// ChiServerOptions mirrors oapi-codegen's chi-server options struct: the base router,
+// the URL prefix, and the per-operation middleware set the wrapper applies.
+type ChiServerOptions struct {
+	BaseURL     string
+	BaseRouter  chi.Router
+	Middlewares []MiddlewareFunc
+}
+
+// HandlerWithOptions registers the wrapper methods on a chi router, the same
+// r.Post/r.Get-inside-r.Group shape oapi-codegen emits (and the shape flowmap's root
+// discovery keys on). It wires the wrapper's HandlerMiddlewares FROM the options'
+// Middlewares field — `HandlerMiddlewares: options.Middlewares` — exactly as the generated
+// code does; that param-field copy is the real bootstrap shape (the middleware set is
+// statically determinable at the one call site, here nil-in-prod).
+func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handler {
+	r := options.BaseRouter
+	wrapper := ServerInterfaceWrapper{
+		Handler:            si,
+		HandlerMiddlewares: options.Middlewares,
+	}
 	r.Group(func(r chi.Router) {
-		r.Post(baseURL+"/eventTypeTemplates", wrapper.CreateEventTypeTemplate)
-		r.Post(baseURL+"/eventTypes/sync", wrapper.SyncEventTypes)
-		r.Get(baseURL+"/healthz", wrapper.GetHealth)
+		r.Post(options.BaseURL+"/eventTypeTemplates", wrapper.CreateEventTypeTemplate)
+		r.Post(options.BaseURL+"/eventTypes/sync", wrapper.SyncEventTypes)
+		r.Get(options.BaseURL+"/healthz", wrapper.GetHealth)
 	})
 	return r
 }

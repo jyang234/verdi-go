@@ -19,6 +19,8 @@ import (
 func main() {
 	r := chi.NewRouter()
 	srv := server.New(store.New(nil))
-	api.HandlerWithOptions(api.NewStrictHandler(srv), r, "")
+	// nil-in-prod: ChiServerOptions carries no Middlewares, so HandlerMiddlewares is wired
+	// empty through the options param-field — the dominant real oapi-codegen shape.
+	api.HandlerWithOptions(api.NewStrictHandler(srv), api.ChiServerOptions{BaseRouter: r})
 	_ = http.ListenAndServe(":8080", r)
 }
