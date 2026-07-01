@@ -26,6 +26,7 @@ docs/
 ├── groundwork/   the groundwork layer: guides + its design record
 ├── design/       feature plans and design briefs (mostly shipped records)
 │   └── ideas/    pre-plan design discussions (HISTORICAL — refined into plans)
+├── audit/        repo-wide code-quality/soundness audits (ACTIVE until findings land)
 └── archive/      superseded session artifacts (HISTORICAL)
 ```
 
