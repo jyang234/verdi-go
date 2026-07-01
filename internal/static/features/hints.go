@@ -233,7 +233,15 @@ func prefixExempt(pkgPath string, prefixes []string) bool {
 // receiver and a leading context are naturally skipped (they are not strings),
 // so a publish's event name is StringArgs()[0] and an HTTP seam's (peer, method,
 // route) are StringArgs()[0:3].
+//
+// A nil site (the synthetic self-edge nodeTier feeds through Edge, and any edge
+// with no call instruction) has no arguments to read: return nil so the DB/verb
+// classifier falls back to the method-name hint rather than dereferencing a nil
+// Common() and panicking. Fail closed to the dynamic label, never a crash.
 func StringArgs(site ssa.CallInstruction) []ssa.Value {
+	if site == nil {
+		return nil
+	}
 	var out []ssa.Value
 	for _, a := range site.Common().Args {
 		if isStringType(a.Type()) {

@@ -115,6 +115,12 @@ func recoverDBLabelsFromValue(q ssa.Value, useFold bool) (labels []string, via s
 // or "call" when the callee is indirect. Shared so a re-attributed-but-unrecoverable
 // effect re-homes the EXACT label the sink would otherwise have carried.
 func sinkMethodName(site ssa.CallInstruction) string {
+	// A nil site (synthetic self-edge, or an edge with no call instruction) has no
+	// callee to name: fall back to the opaque "call" label rather than derefing a
+	// nil Common(). Fail closed to the safe label, never a crash.
+	if site == nil {
+		return "call"
+	}
 	if c := site.Common().StaticCallee(); c != nil {
 		return c.Name()
 	}
