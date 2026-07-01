@@ -5,6 +5,8 @@
 // executed under static analysis.
 package main
 
+import "fmt"
+
 // Recipient mirrors the real PII carrier. Secret is declared a SOURCE FIELD by the
 // field-read test.
 type Recipient struct {
@@ -91,6 +93,54 @@ func sinkPtr(string) {}
 
 func (p *PtrCarrier) leak() { sinkPtr(p.Token) }
 
+// C-3: taint returned THROUGH an interface (invoke) method. Getter.Get is
+// dispatched dynamically; the concrete getter returns a declared source, so the
+// tainted return must flow through the invoke result to the sink. The old
+// return-flow indexed only STATIC callers, so this was a false NO-FLOW. Truth = FLOW.
+type Getter interface{ Get() string }
+
+type piiGetter struct{}
+
+func (piiGetter) Get() string { return sourceIface() }
+
+func sourceIface() string { return "pii" }
+func sinkIface(string)    {}
+
+func caseIfaceReturn() {
+	var g Getter = piiGetter{}
+	sinkIface(g.Get())
+}
+
+// C-4: a declared SOURCE method invoked via an interface. Provider.Provide IS the
+// declared source; invoked through the interface it must still be seeded — the old
+// seed matched sources only at static call sites, so this read Sources==0 → false
+// NO-FLOW. Truth = FLOW.
+type Provider interface{ Provide() string }
+
+type piiProvider struct{}
+
+func (piiProvider) Provide() string { return "pii" }
+
+func sinkProvide(string) {}
+
+func caseIfaceSource() {
+	var p Provider = piiProvider{}
+	sinkProvide(p.Provide())
+}
+
+// C-5: a struct carrying a tainted field, handed WHOLE to unmodeled code. Storing a
+// source into a field taints (type,field); passing the WHOLE struct to an unmodeled
+// callee (fmt.Println) must ESCAPE, not read as a proven no-flow. Truth = ABSTAIN.
+func sourceCarry() string { return "pii" }
+
+type Carrier struct{ Secret string }
+
+func caseStructCarry() {
+	var c Carrier
+	c.Secret = sourceCarry()
+	fmt.Println(c)
+}
+
 func main() {
 	caseDirect()
 	caseRelay()
@@ -101,4 +151,7 @@ func main() {
 	caseClean()
 	caseSliceIndex()
 	(&PtrCarrier{}).leak()
+	caseIfaceReturn()
+	caseIfaceSource()
+	caseStructCarry()
 }

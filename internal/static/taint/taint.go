@@ -36,6 +36,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
+	"github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/ssabuild"
 )
@@ -142,7 +143,18 @@ type analysis struct {
 	fieldLoads map[fieldKey][]ssa.Value
 	// callsTo maps a first-party callee to the call instructions that invoke it, so a
 	// taint-returning function taints its callers' results (return-flow). Precomputed.
+	// It indexes BOTH static call sites and interface/func-value (invoke) sites
+	// resolved by the call graph, so return-flow through an interface method is not
+	// silently dropped (C-3).
 	callsTo map[*ssa.Function][]ssa.CallInstruction
+
+	// siteCallees maps a call site to its concrete callees as resolved by the RTA/VTA
+	// call graph. It is the ONLY way an invoke (interface / func-value) site is
+	// attributed to concrete functions — StaticCallee is nil for those. Empty when no
+	// call graph was supplied, in which case an invoke site is treated as an
+	// un-enumerable frontier and escapes (fail closed → ABSTAIN, never a false
+	// NO-FLOW). Precomputed.
+	siteCallees map[ssa.CallInstruction][]*ssa.Function
 
 	retTainted map[*ssa.Function]bool
 
@@ -159,19 +171,24 @@ type analysis struct {
 // re-walking the whole program each time. None of the shared maps/slices is mutated by a
 // run (seed/run only read fieldLoads/callsTo), so sharing them across runs is safe.
 type prepared struct {
-	prog       *ssabuild.Program
-	funcs      []*ssa.Function
-	fieldLoads map[fieldKey][]ssa.Value
-	callsTo    map[*ssa.Function][]ssa.CallInstruction
+	prog        *ssabuild.Program
+	funcs       []*ssa.Function
+	fieldLoads  map[fieldKey][]ssa.Value
+	callsTo     map[*ssa.Function][]ssa.CallInstruction
+	siteCallees map[ssa.CallInstruction][]*ssa.Function
 }
 
 // prepare walks prog's first-party code once and builds the cfg-independent indexes.
-func prepare(prog *ssabuild.Program) *prepared {
+// cg (the RTA/VTA call graph) resolves interface/func-value dispatch; a nil cg
+// leaves invoke sites un-enumerable, which the analysis treats as an escape
+// frontier (fail closed → ABSTAIN, never a false NO-FLOW).
+func prepare(prog *ssabuild.Program, cg *callgraph.Graph) *prepared {
 	p := &prepared{
-		prog:       prog,
-		funcs:      firstPartyFuncs(prog),
-		fieldLoads: map[fieldKey][]ssa.Value{},
-		callsTo:    map[*ssa.Function][]ssa.CallInstruction{},
+		prog:        prog,
+		funcs:       firstPartyFuncs(prog),
+		fieldLoads:  map[fieldKey][]ssa.Value{},
+		callsTo:     map[*ssa.Function][]ssa.CallInstruction{},
+		siteCallees: resolveSiteCallees(cg),
 	}
 	for _, fn := range p.funcs {
 		for _, b := range fn.Blocks {
@@ -193,6 +210,13 @@ func prepare(prog *ssabuild.Program) *prepared {
 				if call, ok := instr.(ssa.CallInstruction); ok {
 					if callee := call.Common().StaticCallee(); callee != nil {
 						p.callsTo[callee] = append(p.callsTo[callee], call)
+					} else if call.Common().IsInvoke() {
+						// Return-flow through an interface method: index the invoke site
+						// against each concrete callee the call graph resolved, so a
+						// taint-returning method taints THIS site's result too (C-3).
+						for _, callee := range p.siteCallees[call] {
+							p.callsTo[callee] = append(p.callsTo[callee], call)
+						}
 					}
 				}
 			}
@@ -201,10 +225,31 @@ func prepare(prog *ssabuild.Program) *prepared {
 	return p
 }
 
+// resolveSiteCallees inverts the call graph into a per-call-site concrete-callee
+// index (nil-safe). It carries every resolved edge — static and invoke alike — but
+// is consulted only where StaticCallee is unavailable (invoke sites).
+func resolveSiteCallees(cg *callgraph.Graph) map[ssa.CallInstruction][]*ssa.Function {
+	out := map[ssa.CallInstruction][]*ssa.Function{}
+	if cg == nil {
+		return out
+	}
+	for _, n := range cg.Nodes {
+		for _, e := range n.Out {
+			if e.Site == nil || e.Callee == nil || e.Callee.Func == nil {
+				continue
+			}
+			out[e.Site] = append(out[e.Site], e.Callee.Func)
+		}
+	}
+	return out
+}
+
 // Analyze runs the forward taint analysis over prog's first-party code and returns
-// the trichotomy report.
-func Analyze(prog *ssabuild.Program, cfg Config) Report {
-	return prepare(prog).analyze(cfg)
+// the trichotomy report. cg (the RTA/VTA call graph) resolves interface/func-value
+// dispatch so a flow through an interface method is not silently proven absent
+// (C-3/C-4); a nil cg makes every invoke site an escape frontier (ABSTAIN).
+func Analyze(prog *ssabuild.Program, cg *callgraph.Graph, cfg Config) Report {
+	return prepare(prog, cg).analyze(cfg)
 }
 
 // analyze runs the forward taint analysis for one cfg over the prepared (cfg-independent)
@@ -216,6 +261,7 @@ func (p *prepared) analyze(cfg Config) Report {
 		funcs:        p.funcs,
 		fieldLoads:   p.fieldLoads,
 		callsTo:      p.callsTo,
+		siteCallees:  p.siteCallees,
 		tainted:      map[ssa.Value]bool{},
 		taintedField: map[fieldKey]bool{},
 		retTainted:   map[*ssa.Function]bool{},
@@ -273,8 +319,8 @@ func verdictOf(flows []Finding, escaped bool) Verdict {
 // manufacture a NO-FLOW the aggregate could not prove). TestAnalyzeBySource_Decomposes
 // pins the union identity. The point is that an aggregate FLOW from one source no
 // longer MASKS the others' NO-FLOW/ABSTAIN/FLOW status.
-func AnalyzeBySource(prog *ssabuild.Program, cfg Config) []SourceReport {
-	return prepare(prog).bySource(cfg)
+func AnalyzeBySource(prog *ssabuild.Program, cg *callgraph.Graph, cfg Config) []SourceReport {
+	return prepare(prog, cg).bySource(cfg)
 }
 
 // bySource runs the analysis once per declared source over the prepared (shared) indexes
@@ -307,8 +353,8 @@ func (p *prepared) bySource(cfg Config) []SourceReport {
 // the other declared sinks are typically external, so a tainted value reaching one would
 // ESCAPE (an undeclared external call) instead of being recorded-and-stopped, spuriously
 // downgrading a true NO-FLOW to ABSTAIN. Reported in canonical Sink order.
-func AnalyzeBySink(prog *ssabuild.Program, cfg Config) []SinkReport {
-	return BySink(Analyze(prog, cfg), cfg.Sinks)
+func AnalyzeBySink(prog *ssabuild.Program, cg *callgraph.Graph, cfg Config) []SinkReport {
+	return BySink(Analyze(prog, cg, cfg), cfg.Sinks)
 }
 
 // BySink partitions an aggregate Report (run against the FULL sink set) into one SinkReport
@@ -347,8 +393,8 @@ func BySink(agg Report, sinks []FuncSpec) []SinkReport {
 // source it runs the analysis scoped to that source (against the FULL sink set, so the
 // propagation/escape semantics are correct — see AnalyzeBySink) and partitions that run
 // by sink. Reported in canonical (Source, Sink) order.
-func AnalyzeBySourceAndSink(prog *ssabuild.Program, cfg Config) []SourceSinkReport {
-	return BySourceAndSink(AnalyzeBySource(prog, cfg), cfg.Sinks)
+func AnalyzeBySourceAndSink(prog *ssabuild.Program, cg *callgraph.Graph, cfg Config) []SourceSinkReport {
+	return BySourceAndSink(AnalyzeBySource(prog, cg, cfg), cfg.Sinks)
 }
 
 // BySourceAndSink derives the (source × sink) matrix from already-computed per-source
@@ -386,8 +432,8 @@ type Decomposition struct {
 // prepare: one aggregate run (the authoritative gate verdict) and one per-source pass, with
 // by-sink and the matrix derived as pure partitions. It avoids the redundant aggregate and
 // duplicated per-source runs of calling AnalyzeBySink / AnalyzeBySourceAndSink separately.
-func Decompose(prog *ssabuild.Program, cfg Config) Decomposition {
-	p := prepare(prog)
+func Decompose(prog *ssabuild.Program, cg *callgraph.Graph, cfg Config) Decomposition {
+	p := prepare(prog, cg)
 	agg := p.analyze(cfg)
 	bySource := p.bySource(cfg)
 	return Decomposition{
@@ -402,7 +448,10 @@ func Decompose(prog *ssabuild.Program, cfg Config) Decomposition {
 // seeds matched.
 func (a *analysis) seed() int {
 	n := 0
-	// Source functions: the result of every call to one is tainted.
+	// Source functions: the result of every call to one is tainted. Match at each
+	// call site over its concrete callees — StaticCallee for a direct call, and the
+	// call graph's resolved callees for an interface/func-value (invoke) site, so a
+	// declared source invoked through an interface is still seeded (C-4).
 	for _, fn := range a.funcs {
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
@@ -410,13 +459,14 @@ func (a *analysis) seed() int {
 				if !ok {
 					continue
 				}
-				callee := call.Common().StaticCallee()
-				if callee == nil || !a.isSource(callee) {
-					continue
-				}
-				if v := callResult(call); v != nil {
-					a.taint(v)
-					n++
+				for _, callee := range a.calleesOf(call) {
+					if a.isSource(callee) {
+						if v := callResult(call); v != nil {
+							a.taint(v)
+							n++
+						}
+						break
+					}
 				}
 			}
 		}
@@ -490,6 +540,11 @@ func (a *analysis) handleStore(s *ssa.Store, v ssa.Value) {
 	case *ssa.FieldAddr:
 		if k, ok := fieldKeyOf(addr.X.Type(), addr.Field); ok {
 			a.taintField(k) // a struct field now holds taint — every read of it is tainted
+			// Also taint the enclosing struct value: a value carrying a tainted field,
+			// passed WHOLE to an unmodeled callee (fmt.Println(r)), must escape — the
+			// (type,field) key alone leaves the whole-struct hand-off invisible (C-5).
+			// Over-tainting the container only costs precision (the permitted direction).
+			a.taint(addr.X)
 			return
 		}
 		a.escape(s)
@@ -523,12 +578,13 @@ func (a *analysis) handleReturn(ret *ssa.Return, v ssa.Value) {
 	}
 }
 
-// handleCall propagates taint from an argument into the callee. A declared sink
+// handleCall propagates taint from an argument into the callee(s). A declared sink
 // records a FLOW finding; a first-party callee gets its parameter tainted
-// (arg→param); anything else escapes (taint left analyzable view).
+// (arg→param); anything else escapes (taint left analyzable view). For an invoke
+// (interface/func-value) site the callee set comes from the call graph; an
+// un-enumerable invoke (no resolved callees) escapes — fail closed → ABSTAIN (C-3).
 func (a *analysis) handleCall(call ssa.CallInstruction, v ssa.Value) {
 	common := call.Common()
-	callee := common.StaticCallee()
 
 	// Find the argument position(s) v occupies.
 	var argIdx []int
@@ -546,20 +602,44 @@ func (a *analysis) handleCall(call ssa.CallInstruction, v ssa.Value) {
 		return
 	}
 
-	if callee != nil && a.isSink(callee) {
-		a.recordFlow(call, callee)
-		return // a sink is a known endpoint; no need to descend
-	}
-	if callee != nil && a.isFirstParty(callee) && len(callee.Blocks) > 0 {
-		for _, i := range argIdx {
-			if i < len(callee.Params) {
-				a.taint(callee.Params[i])
-			}
-		}
+	callees := a.calleesOf(call)
+	if len(callees) == 0 {
+		// A statically-resolved call to a bodiless/non-first-party function, or an
+		// invoke the call graph could not enumerate: taint leaves the analyzable view.
+		a.escape(call)
 		return
 	}
-	// Unresolved (interface/func-value) or non-first-party callee: taint left view.
-	a.escape(call)
+	escapes := false
+	for _, callee := range callees {
+		switch {
+		case a.isSink(callee):
+			a.recordFlow(call, callee)
+		case a.isFirstParty(callee) && len(callee.Blocks) > 0:
+			for _, i := range argIdx {
+				if i < len(callee.Params) {
+					a.taint(callee.Params[i])
+				}
+			}
+		default:
+			// A non-first-party or bodiless callee (including one leg of a
+			// polymorphic invoke): taint left view.
+			escapes = true
+		}
+	}
+	if escapes {
+		a.escape(call)
+	}
+}
+
+// calleesOf returns the concrete callees of a call site: the single StaticCallee
+// for a direct call, else the call graph's resolved callees for an invoke
+// (interface / func-value) site. Empty for an invoke the graph could not resolve
+// (or when no graph was supplied) — the caller treats that as an escape frontier.
+func (a *analysis) calleesOf(call ssa.CallInstruction) []*ssa.Function {
+	if callee := call.Common().StaticCallee(); callee != nil {
+		return []*ssa.Function{callee}
+	}
+	return a.siteCallees[call]
 }
 
 func (a *analysis) recordFlow(call ssa.CallInstruction, sink *ssa.Function) {
