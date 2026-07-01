@@ -513,6 +513,14 @@ func Load(r io.Reader) (*Graph, error) {
 	if err := dec.Decode(&g); err != nil {
 		return nil, fmt.Errorf("groundwork/graph: decode: %w", err)
 	}
+	// A trusted graph file is exactly one JSON value. Trailing data (a second
+	// concatenated document, or garbage after the object) means the input is not
+	// the single graph it claims to be — refuse rather than silently gate on only
+	// the first value (tenet 2, fail closed). dec.More() is true iff another token
+	// follows the decoded value.
+	if dec.More() {
+		return nil, fmt.Errorf("groundwork/graph: trailing data after graph JSON (expected a single graph object)")
+	}
 	if g.Nodes == nil {
 		return nil, fmt.Errorf("groundwork/graph: missing nodes (not a flowmap graph?)")
 	}
