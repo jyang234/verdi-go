@@ -40,9 +40,11 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 // than silently gate on only the first value.
 func TestLoadRejectsTrailingData(t *testing.T) {
 	cases := map[string]string{
-		"concatenated graphs": `{"nodes":[],"edges":[],"blind_spots":[]}{"nodes":[],"edges":[],"blind_spots":[]}`,
-		"trailing garbage":    `{"nodes":[],"edges":[],"blind_spots":[]} oops`,
-		"trailing array":      `{"nodes":[],"edges":[],"blind_spots":[]}[1,2,3]`,
+		"concatenated graphs":    `{"nodes":[],"edges":[],"blind_spots":[]}{"nodes":[],"edges":[],"blind_spots":[]}`,
+		"trailing garbage":       `{"nodes":[],"edges":[],"blind_spots":[]} oops`,
+		"trailing array":         `{"nodes":[],"edges":[],"blind_spots":[]}[1,2,3]`,
+		"trailing close brace":   `{"nodes":[],"edges":[],"blind_spots":[]}}`,
+		"trailing close bracket": `{"nodes":[],"edges":[],"blind_spots":[]}]`,
 	}
 	for name, j := range cases {
 		if _, err := Load(strings.NewReader(j)); err == nil {
