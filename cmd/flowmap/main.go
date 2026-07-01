@@ -776,6 +776,14 @@ func cmdIngest(args []string) error {
 	if (*choreography || *contracts != "") && !*merged {
 		return fmt.Errorf("--choreography/--contracts require --merged")
 	}
+	// --update rebases the post-hoc goldens under --flows-dir; without a goldens
+	// directory there is nothing to rebase, so --update is a user error. Validate
+	// here, BEFORE the corpus/render side-effects run, so the command fails fast
+	// with an accurate message instead of writing a corpus/diagram and only then
+	// erroring (which would report "nothing to rebase" after a write did occur).
+	if *update && *flowsDir == "" {
+		return fmt.Errorf("behavior ingest: --update requires --flows-dir (nothing to rebase without a goldens directory)")
+	}
 
 	// Load the canon config from --service-dir (the contract/coverage anchor), so an
 	// opt-in declared in the service's .flowmap.yaml — e.g. messagingShortHexIDs —
@@ -841,12 +849,6 @@ func cmdIngest(args []string) error {
 	}
 
 	switch {
-	case *update && *flowsDir == "":
-		// --update rebases the post-hoc goldens under --flows-dir; without a goldens
-		// directory there is nothing to write. Silently falling through to the
-		// print-exercised default would let an author believe a rebase happened when
-		// none did — refuse loudly instead (tenet 2, fail closed).
-		return fmt.Errorf("behavior ingest: --update requires --flows-dir (nothing to rebase without a goldens directory)")
 	case *update && *flowsDir != "":
 		if err := updateEffectGoldens(*flowsDir, frags); err != nil {
 			return err
