@@ -33,14 +33,22 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - name: golangci-lint
+        # Version kept in lockstep with Makefile's GOLANGCI_LINT_VERSION pin so a
+        # local `make lint` and this step run the same linter build (CLAUDE.md:
+        # "CI mirrors make verify exactly").
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
           golangci-lint run
       - name: gofmt
         run: make fmt-check # names the offending files on failure, unlike a bare test -z
       - run: go test -race ./...
+      # Mirrors Makefile's `fixture` target exactly: both loansvc and impeachsvc
+      # snapshot goldens are gated here, so the behavioral-impeachment golden (a
+      # missed-route DB DELETE) can no longer regress without CI noticing.
       - name: behavioral gate (fixture flow goldens)
-        run: cd testdata/fixtures/loansvc && go build ./... && go test -race ./...
+        run: |
+          cd testdata/fixtures/loansvc && go build ./... && go test -race ./...
+          cd ../impeachsvc && go build ./... && go test -race ./...
 
   # coverage-floor — the engines are the best-covered code, but every verdict is
   # only as sound as the graph the static front-end hands them, and a front-end

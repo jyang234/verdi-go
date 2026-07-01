@@ -473,6 +473,39 @@ func otlpFixture() string {
 // run-varying code-identity Stamp absent). A from-collector export carries no
 // in-process flowmap.fqn tag, so the localization caveat must disclose the L0
 // fallback rather than silently imply L1 precision.
+// TestBehaviorIngestUpdateRequiresFlowsDir pins M-33: `behavior ingest --update`
+// without `--flows-dir` used to fall through to the print-exercised default — a
+// silent no-op that lets an author believe a golden rebase happened when none
+// did. It must now fail loudly, and (per the code-review fix) fail FAST — before
+// the corpus/render side-effects run, so it never leaves a partial write behind a
+// misleading "nothing to rebase" error.
+func TestBehaviorIngestUpdateRequiresFlowsDir(t *testing.T) {
+	fx := otlpFixture()
+	err := run([]string{"behavior", "ingest", "--update", fx})
+	if err == nil {
+		t.Fatal("expected an error for --update without --flows-dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "flows-dir") {
+		t.Errorf("error should name the missing --flows-dir flag, got: %v", err)
+	}
+
+	// --update paired with a side-effecting flag (--corpus-dir) must ALSO fail
+	// fast, and must not have written the corpus first: the guard runs before any
+	// output is produced.
+	corpus := t.TempDir()
+	err = run([]string{"behavior", "ingest", "--update", "--corpus-dir", corpus, fx})
+	if err == nil || !strings.Contains(err.Error(), "flows-dir") {
+		t.Fatalf("--update --corpus-dir without --flows-dir should fail fast naming --flows-dir, got: %v", err)
+	}
+	entries, rerr := os.ReadDir(corpus)
+	if rerr != nil {
+		t.Fatalf("read corpus dir: %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("corpus dir should be empty (guard runs before side-effects), got %d entr(ies)", len(entries))
+	}
+}
+
 func TestBehaviorIngestCorpusDir(t *testing.T) {
 	dir := t.TempDir()
 	fx := otlpFixture()

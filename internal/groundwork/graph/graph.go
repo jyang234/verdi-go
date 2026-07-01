@@ -513,6 +513,19 @@ func Load(r io.Reader) (*Graph, error) {
 	if err := dec.Decode(&g); err != nil {
 		return nil, fmt.Errorf("groundwork/graph: decode: %w", err)
 	}
+	// A trusted graph file is exactly one JSON value. Anything after the decoded
+	// object — a second concatenated document, stray bytes, or an extra closing
+	// delimiter — means the input is not the single graph it claims to be, so
+	// refuse rather than silently gate on only the first value (tenet 2, fail
+	// closed). dec.More() alone is insufficient: it returns false when the trailing
+	// bytes begin with '}' or ']', so a stray delimiter would slip through. Reading
+	// the next token instead must reach clean EOF; any token — or a parse error —
+	// is trailing data. Insignificant trailing whitespace/newline is skipped by the
+	// tokenizer and still reaches io.EOF, so a normal file with a trailing newline
+	// loads fine.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("groundwork/graph: trailing data after graph JSON (expected a single graph object)")
+	}
 	if g.Nodes == nil {
 		return nil, fmt.Errorf("groundwork/graph: missing nodes (not a flowmap graph?)")
 	}

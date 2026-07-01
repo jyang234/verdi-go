@@ -34,6 +34,30 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsTrailingData pins M-15: a trusted graph file is exactly one JSON
+// value. A second concatenated document (or any garbage after the object) means
+// the input is not the single graph it claims to be, so Load must refuse rather
+// than silently gate on only the first value.
+func TestLoadRejectsTrailingData(t *testing.T) {
+	cases := map[string]string{
+		"concatenated graphs":    `{"nodes":[],"edges":[],"blind_spots":[]}{"nodes":[],"edges":[],"blind_spots":[]}`,
+		"trailing garbage":       `{"nodes":[],"edges":[],"blind_spots":[]} oops`,
+		"trailing array":         `{"nodes":[],"edges":[],"blind_spots":[]}[1,2,3]`,
+		"trailing close brace":   `{"nodes":[],"edges":[],"blind_spots":[]}}`,
+		"trailing close bracket": `{"nodes":[],"edges":[],"blind_spots":[]}]`,
+	}
+	for name, j := range cases {
+		if _, err := Load(strings.NewReader(j)); err == nil {
+			t.Errorf("%s: expected an error for trailing data, got nil", name)
+		}
+	}
+	// A single well-formed graph (optionally with trailing whitespace/newline)
+	// must still load cleanly — the guard rejects trailing *values*, not whitespace.
+	if _, err := Load(strings.NewReader(`{"nodes":[],"edges":[],"blind_spots":[]}` + "\n")); err != nil {
+		t.Errorf("single graph with trailing newline should load, got %v", err)
+	}
+}
+
 // A graph carrying flowmap's recorded algo/caveats must round-trip (the schema
 // must accept the provenance keys it now emits), and the substrate line must
 // echo them. An empty algo reads as "unrecorded", never as a substrate (R3).

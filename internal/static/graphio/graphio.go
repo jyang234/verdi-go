@@ -1346,7 +1346,11 @@ func nodeTier(ext *features.Extractor, fn *ssa.Function, isRoot bool, outEdges [
 		return t
 	}
 	// The self-edge (fn→fn) is the function's compute floor: internal,
-	// same-package, no effect — tier 3 under the default rules.
+	// same-package, no effect — tier 3 under the default rules. A function that is
+	// itself a declared boundary sink (a named classify.db/http/publish hint, e.g.
+	// loansvc's client.Call) intentionally surfaces at its boundary tier here, since
+	// the hint switch keys on the callee and callee==fn — that is how a boundary
+	// function shows up salient even when all its outgoing edges are compute.
 	tier, _ := ext.Classify(ext.Edge(fn, fn, nil))
 	for _, e := range outEdges {
 		if e.Tier < tier {
