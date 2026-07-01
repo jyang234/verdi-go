@@ -473,6 +473,21 @@ func otlpFixture() string {
 // run-varying code-identity Stamp absent). A from-collector export carries no
 // in-process flowmap.fqn tag, so the localization caveat must disclose the L0
 // fallback rather than silently imply L1 precision.
+// TestBehaviorIngestUpdateRequiresFlowsDir pins M-33: `behavior ingest --update`
+// without `--flows-dir` used to fall through to the print-exercised default — a
+// silent no-op that lets an author believe a golden rebase happened when none
+// did. It must now fail loudly.
+func TestBehaviorIngestUpdateRequiresFlowsDir(t *testing.T) {
+	fx := otlpFixture()
+	err := run([]string{"behavior", "ingest", "--update", fx})
+	if err == nil {
+		t.Fatal("expected an error for --update without --flows-dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "flows-dir") {
+		t.Errorf("error should name the missing --flows-dir flag, got: %v", err)
+	}
+}
+
 func TestBehaviorIngestCorpusDir(t *testing.T) {
 	dir := t.TempDir()
 	fx := otlpFixture()

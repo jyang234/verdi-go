@@ -841,6 +841,12 @@ func cmdIngest(args []string) error {
 	}
 
 	switch {
+	case *update && *flowsDir == "":
+		// --update rebases the post-hoc goldens under --flows-dir; without a goldens
+		// directory there is nothing to write. Silently falling through to the
+		// print-exercised default would let an author believe a rebase happened when
+		// none did — refuse loudly instead (tenet 2, fail closed).
+		return fmt.Errorf("behavior ingest: --update requires --flows-dir (nothing to rebase without a goldens directory)")
 	case *update && *flowsDir != "":
 		if err := updateEffectGoldens(*flowsDir, frags); err != nil {
 			return err
