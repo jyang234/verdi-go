@@ -1,10 +1,18 @@
 .PHONY: build test vet fmt fmt-check lint verify tidy fixture cover-floor hooks comment-drift
 
+# Pinned to match .github/workflows/gates.yml exactly. CLAUDE.md's trust boundary
+# ("CI mirrors make verify exactly") requires the same linter build both places;
+# `lint` warns loudly when the locally-installed version drifts from this pin.
+GOLANGCI_LINT_VERSION ?= v2.5.0
+
 build:
 	go build ./...
 
+# -race mirrors CI's `go test -race` exactly (gates.yml): a data race that would
+# fail CI must fail `make test`/`make verify` locally first, not cost a round-trip.
+# Trust parity outranks the slower run here (prime directive: speed loses).
 test:
-	go test ./...
+	go test -race ./...
 
 vet:
 	go vet ./...
@@ -21,6 +29,10 @@ fmt-check:
 	@echo "gofmt OK"
 
 lint:
+	@have=$$(golangci-lint version 2>/dev/null | grep -oE 'version v?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1); \
+	if [ -n "$$have" ] && [ "v$${have#v}" != "$(GOLANGCI_LINT_VERSION)" ]; then \
+		echo "warning: golangci-lint $$have differs from CI pin $(GOLANGCI_LINT_VERSION); results may diverge from CI" >&2; \
+	fi
 	golangci-lint run
 
 # fixture builds and gates the hermetic fixture modules (separate modules under
@@ -29,8 +41,8 @@ lint:
 # impeachsvc is the behavioral-impeachment fixture (a missed-route DB DELETE), so
 # its captured trace golden is gated here alongside loansvc's.
 fixture:
-	cd testdata/fixtures/loansvc && go build ./... && go test ./...
-	cd testdata/fixtures/impeachsvc && go build ./... && go test ./...
+	cd testdata/fixtures/loansvc && go build ./... && go test -race ./...
+	cd testdata/fixtures/impeachsvc && go build ./... && go test -race ./...
 
 # verify is the per-phase gate: it must stay green at the end of every phase.
 verify: build vet lint test fixture
