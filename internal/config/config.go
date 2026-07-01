@@ -655,8 +655,32 @@ func (c *CanonConfig) OrderGuard() time.Duration {
 	return 100 * time.Millisecond
 }
 
-// salienceTiers maps a salience name to the maximum tier retained in a snapshot.
-var salienceTiers = map[string]int{"warn": 2, "info": 3, "debug": 4, "all": 4}
+// salienceTierVocab is the ONE source of truth for the salience vocabulary, in
+// canonical (increasing-verbosity) order. Both the salienceTiers lookup map and
+// the SalienceTierNames() error-message string derive from it, so adding or
+// renaming a tier here propagates to validity AND to every diagnostic message with
+// no drift (CLAUDE.md one source of truth). The parity is guarded by
+// TestSalienceTierVocabParity, not just asserted here.
+var salienceTierVocab = []struct {
+	name string
+	tier int
+}{
+	{"warn", 2},
+	{"info", 3},
+	{"debug", 4},
+	{"all", 4},
+}
+
+// salienceTiers maps a salience name to the maximum tier retained in a snapshot,
+// derived from salienceTierVocab so the lookup and the human-readable list cannot
+// disagree.
+var salienceTiers = func() map[string]int {
+	m := make(map[string]int, len(salienceTierVocab))
+	for _, t := range salienceTierVocab {
+		m[t.name] = t.tier
+	}
+	return m
+}()
 
 // ValidSalienceTier reports whether name is a recognized salience-tier name
 // (warn|info|debug|all). It is the ONE vocabulary check shared by config.Validate
@@ -670,8 +694,15 @@ func ValidSalienceTier(name string) bool {
 }
 
 // SalienceTierNames returns the recognized tier names in canonical vocabulary
-// order for use in error messages.
-func SalienceTierNames() string { return "warn|info|debug|all" }
+// order for use in error messages, derived from salienceTierVocab so it can never
+// advertise a stale set that disagrees with ValidSalienceTier.
+func SalienceTierNames() string {
+	names := make([]string, len(salienceTierVocab))
+	for i, t := range salienceTierVocab {
+		names[i] = t.name
+	}
+	return strings.Join(names, "|")
+}
 
 // SalienceThreshold is the maximum (least consequential) tier kept in the
 // canonical snapshot; spans with a higher tier number are dropped and promoted.

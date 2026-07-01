@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -180,6 +181,37 @@ canon:
 func TestCanonRejectsBadSalienceTier(t *testing.T) {
 	if _, err := Load([]byte("canon:\n  salienceTier: loud\n")); err == nil {
 		t.Fatal("expected error on bad salienceTier")
+	}
+}
+
+// TestSalienceTierVocabParity guards CLAUDE.md's one-source-of-truth rule for the
+// salience vocabulary: the validity map (salienceTiers), the human-readable list
+// (SalienceTierNames), and the ValidSalienceTier predicate must all agree, so a
+// tier added to salienceTierVocab can never leave an error message advertising a
+// stale set or a validity check accepting a name the message omits.
+func TestSalienceTierVocabParity(t *testing.T) {
+	names := strings.Split(SalienceTierNames(), "|")
+	if len(names) != len(salienceTiers) {
+		t.Fatalf("SalienceTierNames() lists %d names but salienceTiers has %d entries", len(names), len(salienceTiers))
+	}
+	for _, n := range names {
+		if _, ok := salienceTiers[n]; !ok {
+			t.Errorf("SalienceTierNames() advertises %q, which is not a valid tier in salienceTiers", n)
+		}
+		if !ValidSalienceTier(n) {
+			t.Errorf("SalienceTierNames() advertises %q, which ValidSalienceTier rejects", n)
+		}
+	}
+	// Every map key must appear in the names string (no valid tier omitted from
+	// diagnostics).
+	listed := make(map[string]bool, len(names))
+	for _, n := range names {
+		listed[n] = true
+	}
+	for k := range salienceTiers {
+		if !listed[k] {
+			t.Errorf("valid tier %q is missing from SalienceTierNames() %q", k, SalienceTierNames())
+		}
 	}
 }
 
