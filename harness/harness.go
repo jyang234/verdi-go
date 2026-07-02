@@ -333,8 +333,15 @@ func (a *App) Event(name string, deliver func(ctx context.Context)) *Pending {
 
 // CaptureOptions tune quiescence detection. Zero values fall back to spec
 // defaults (2s quiet, 5s timeout).
+//
+// Fire-and-forget flows MUST declare markers. An async effect (a detached
+// goroutine's span, a late publish) that lands after the root has ended is caught
+// only by a marker or the quiet drain; relying on quiet alone drops an effect that
+// fires after Quiet with Complete=true, and flakes the golden for one that
+// straddles the boundary (M-19). Declare a marker for every late effect the flow
+// is meant to assert.
 type CaptureOptions struct {
-	Markers  []string      // declared expected-exit op keys
+	Markers  []string      // declared expected-exit op keys (required for fire-and-forget effects)
 	Quiet    time.Duration // idle interval required after the last span
 	Timeout  time.Duration // hard deadline before failing loudly
 	MinSpans int           // sanity floor on span count
@@ -368,6 +375,12 @@ func (p *Pending) Capture(opt CaptureOptions) (*capture.CapturedFlow, error) {
 	})
 
 	scoped, root := capture.Scope(spans, p.runID)
+	// Disclose in-window spans that could not be attributed to this run (empty
+	// correlation id — the classic lost-ctx bug where a SUT span is opened from a
+	// fresh context.Background()). Excluding them is the sound direction, but never
+	// silently (M-18): the deterministic count rides on the flow for any consumer
+	// (post-hoc audit, impeach corpus) to surface.
+	correlationLess := capture.CorrelationLess(spans, p.runID)
 	cf := &capture.CapturedFlow{
 		Flow:    p.flow,
 		Service: a.service,
@@ -376,12 +389,13 @@ func (p *Pending) Capture(opt CaptureOptions) (*capture.CapturedFlow, error) {
 		// faked), so its captures are INTEGRATION grade — a trustworthy impeachment
 		// witness. It is structurally incapable of "production": that grade can only
 		// come from a real deployment's resource attribute (§12.6).
-		Provenance: capture.CaptureIntegration,
-		Trigger:    p.trigger,
-		Mode:       capture.ModeInProcess,
-		Spans:      scoped,
-		Root:       root,
-		Complete:   complete && root != nil,
+		Provenance:      capture.CaptureIntegration,
+		Trigger:         p.trigger,
+		Mode:            capture.ModeInProcess,
+		Spans:           scoped,
+		Root:            root,
+		Complete:        complete && root != nil,
+		CorrelationLess: correlationLess,
 	}
 	if !cf.Complete {
 		return cf, errTruncated{flow: p.flow}

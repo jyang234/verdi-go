@@ -194,6 +194,15 @@ type CapturedFlow struct {
 	Spans      []Span
 	Root       *Span
 	Complete   bool
+	// CorrelationLess is the count of in-window spans excluded from Spans because
+	// they carried no correlation id (an empty test.run.id — the classic lost-ctx
+	// bug where a SUT span is opened from a fresh context.Background()). Dropping
+	// them is the sound direction for impeachment, but tenet 3 says disclose: a
+	// non-zero value means this capture had spans it could not attribute to the run.
+	// Deterministic (a count of a filtered set), never a volatile timing artifact,
+	// and excluded from snapshot equality. Zero on the runID=="" fast path (no
+	// correlation filtering happens there).
+	CorrelationLess int
 }
 
 // Attr returns the value of key on s, or "" if absent.
@@ -242,6 +251,26 @@ func Scope(spans []Span, runID string) (scoped []Span, root *Span) {
 		}
 	}
 	return scoped, root
+}
+
+// CorrelationLess counts the spans that Scope(spans, runID) would exclude for
+// carrying NO correlation id (an empty test.run.id) — distinct from spans belonging
+// to a DIFFERENT run, which are correctly filtered without disclosure. When runID is
+// "" (the in-process fast path keeps every span) no correlation filtering happens,
+// so the count is zero. It is the deterministic marker behind CapturedFlow's
+// CorrelationLess disclosure (M-18): a lost-baggage span vanishing from the golden
+// while Complete=true must not be silent.
+func CorrelationLess(spans []Span, runID string) int {
+	if runID == "" {
+		return 0
+	}
+	n := 0
+	for i := range spans {
+		if spans[i].Attr(CorrelationKey) == "" {
+			n++
+		}
+	}
+	return n
 }
 
 // CorrelationKey is the span attribute the harness copies from baggage so a span
