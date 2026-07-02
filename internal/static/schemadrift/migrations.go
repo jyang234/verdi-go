@@ -192,13 +192,17 @@ var (
 	alterRenameRe = regexp.MustCompile(`(?is)\bALTER\s+TABLE\b.*?\bRENAME\s+TO\b`)
 )
 
-// stripSQL removes SQL line comments (-- … EOL), block comments (/* … */), and
-// single-quoted string literals (honoring ” escapes), replacing each with a space.
-// Without this the DDL regexes would match a CREATE/DROP that appears inside a
-// comment or a literal — a phantom CREATE masks real drift (a false "no drift", the
-// unsound direction), a phantom DROP manufactures it. Double-quoted text is KEPT: in
-// SQL "…" is a quoted IDENTIFIER (a table name), not a string literal, so stripping
-// it would lose real table names.
+// stripSQL removes SQL line comments (-- … EOL), block comments (/* … */),
+// single-quoted string literals (honoring ” escapes), and PostgreSQL
+// dollar-quoted bodies ($tag$ … $tag$), replacing each with a space. Without this
+// the DDL regexes would match a CREATE/DROP that appears inside a comment or a
+// literal — a phantom CREATE masks real drift (a false "no drift", the unsound
+// direction), a phantom DROP manufactures it. A dollar-quoted body is a string
+// literal too (typically a plpgsql function body): a `CREATE TABLE` inside it is
+// the function's runtime behavior, not migration-time DDL, so scanning it as real
+// schema would mask drift for a code write to that table (H-12). Double-quoted
+// text is KEPT: in SQL "…" is a quoted IDENTIFIER (a table name), not a string
+// literal, so stripping it would lose real table names.
 func stripSQL(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -232,12 +236,53 @@ func stripSQL(s string) string {
 				i++
 			}
 			b.WriteByte(' ')
+		case s[i] == '$':
+			if d := dollarQuoteDelim(s, i); d > 0 {
+				delim := s[i : i+d]
+				if k := strings.Index(s[i+d:], delim); k >= 0 {
+					i += d + k + d // consume body AND the closing delimiter
+				} else {
+					i = len(s) // unterminated body: consume the rest, never leak it (fail closed)
+				}
+				b.WriteByte(' ')
+				continue
+			}
+			b.WriteByte(s[i]) // a bare '$' (e.g. a $1 placeholder), not a dollar quote
+			i++
 		default:
 			b.WriteByte(s[i])
 			i++
 		}
 	}
 	return b.String()
+}
+
+// dollarQuoteDelim returns the byte length of a PostgreSQL dollar-quote opening
+// delimiter beginning at s[i] ("$$" → 2, "$body$" → 6), or 0 if s[i] does not
+// open one. The tag between the two '$' follows the unquoted-identifier rule
+// (letters, digits, underscores; never starting with a digit) and may be empty,
+// so a "$1" bind placeholder — digit after the first '$' — is correctly NOT a
+// delimiter.
+func dollarQuoteDelim(s string, i int) int {
+	if i >= len(s) || s[i] != '$' {
+		return 0
+	}
+	for j := i + 1; j < len(s); j++ {
+		c := s[j]
+		switch {
+		case c == '$':
+			return j - i + 1
+		case c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			// tag byte
+		case c >= '0' && c <= '9':
+			if j == i+1 {
+				return 0 // a tag cannot start with a digit ($1 is a placeholder)
+			}
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 // scanDDL returns the CREATE/DROP table operations in one migration's SQL, in
@@ -254,8 +299,10 @@ func scanDDL(sqlText string) []ddlOp {
 
 // splitStatements splits stripped SQL into ';'-delimited statements, treating a
 // semicolon INSIDE a double-quoted identifier as part of the name. stripSQL has
-// already removed comments and string literals, so double quotes are the only
-// quoting left — and they are KEPT because "..." is a table name, not a literal.
+// already removed comments, single-quoted literals, AND dollar-quoted bodies
+// ($tag$…$tag$) — so a ';' inside a plpgsql function body can never reach here to
+// split a CREATE FUNCTION statement mid-body — leaving double quotes as the only
+// quoting left, and they are KEPT because "..." is a table name, not a literal.
 // A plain strings.Split on ';' would break a quoted identifier like "weird;name"
 // across two statements, dropping the CREATE/DROP (false drift) — defeating the very
 // reason stripSQL preserves double quotes.
