@@ -827,6 +827,22 @@ func cmdIngest(args []string) error {
 	}
 	flows := ingest.Group(spans)
 	if len(flows) == 0 {
+		// A GATE run (--flows-dir without --update) whose goldens directory carries
+		// committed effect goldens but decoded ZERO flows is not a clean pass — it is
+		// a vacuous one: the committed contract was never asserted. This is exactly
+		// the H-13 fail-open — a snake_case or otherwise-undecodable export yields
+		// zero spans and the gate would print "nothing to map" and exit 0 with every
+		// golden silently unchecked. Fail loudly so an empty capture cannot read as a
+		// green behavioral gate.
+		if *flowsDir != "" && !*update {
+			goldens, gerr := filepath.Glob(filepath.Join(*flowsDir, "*.effects.json"))
+			if gerr != nil {
+				return gerr
+			}
+			if len(goldens) > 0 {
+				return fmt.Errorf("behavior ingest: %d committed golden(s) under %s but 0 flows decoded from %s (no spans tagged %s) — refusing to report a clean gate over an empty capture; check the trace format (e.g. OTLP JSON encoding)", len(goldens), *flowsDir, tracesPath, ingest.FlowKey)
+			}
+		}
 		fmt.Printf("ingest: %d span(s), none tagged %s — nothing to map\n", len(spans), ingest.FlowKey)
 		return nil
 	}

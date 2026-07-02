@@ -731,6 +731,37 @@ func TestBehaviorIngestGate(t *testing.T) {
 	}
 }
 
+// TestBehaviorIngestGateFailsOnEmptyCaptureWithGoldens pins the H-13 second half:
+// a gate run whose flows dir carries committed goldens but decodes ZERO flows
+// (here from an OTLP file whose spans lack the flowmap.flow tag — the same
+// end-state a fully-undecodable snake export used to produce) must FAIL loudly,
+// not print "nothing to map" and exit 0 with the goldens silently unchecked.
+func TestBehaviorIngestGateFailsOnEmptyCaptureWithGoldens(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+
+	// Commit a golden first (via --update over the real fixture).
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, "--update", otlpFixture()}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	// A well-formed OTLP file whose one span carries no flowmap.flow tag → 0 flows.
+	empty := writeOTLP(t, t.TempDir(), "untagged.json", "loansvc",
+		`{"spanId":"01","name":"x","kind":2,"status":{"code":1}}`)
+	err := run([]string{"behavior", "ingest", "--flows-dir", dir, empty})
+	if err == nil {
+		t.Fatal("gate with committed goldens but zero decoded flows must fail loudly, not exit 0")
+	}
+	if !strings.Contains(err.Error(), "0 flows") || !strings.Contains(err.Error(), "golden") {
+		t.Errorf("error should name the empty-capture-with-goldens condition, got: %v", err)
+	}
+
+	// --update over the same empty capture must NOT fail (nothing to rebase is fine).
+	if err := run([]string{"behavior", "ingest", "--flows-dir", dir, "--update", empty}); err != nil {
+		t.Errorf("--update over an empty capture must not fail: %v", err)
+	}
+}
+
 // otlpDoc writes a one-resource OTLP/JSON file with the given spans and returns
 // its path. Each span: id, parent, kind, flow slug, and extra attrs.
 func writeOTLP(t *testing.T, dir, name, service string, spans string) string {

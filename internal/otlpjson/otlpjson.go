@@ -301,6 +301,66 @@ type resourceSpans struct {
 	InstrumentationLibrarySpans []scopeSpans `json:"instrumentationLibrarySpans"`
 }
 
+// canonKey folds a JSON object key to its separator- and case-insensitive form so
+// a value can be found under EITHER the camelCase (OTLP/JSON canonical) or the
+// snake_case (proto-JSON) spelling. encoding/json already matches object keys
+// case-insensitively; the only structural difference between the two OTLP
+// encodings is the '_' separators, so removing them unifies the two. This closes
+// the H-13 half-tolerance: the envelope accepted snake_case (resource_spans) but
+// the inner span/scope fields (span_id, scope_spans, start_time_unix_nano, …) did
+// not, so a fully snake_case document decoded to ZERO spans with no error — a
+// vacuously-green behavioral gate over a silently-empty corpus.
+func canonKey(k string) string {
+	return strings.ToLower(strings.ReplaceAll(k, "_", ""))
+}
+
+// rawObject decodes a JSON object into its fields keyed by canonKey. It returns
+// (nil, nil) for a JSON null and preserves each value as RawMessage, so int64
+// timestamps keep full precision for the caller to decode per field. A non-object
+// (or malformed JSON) is a hard error — fail closed.
+func rawObject(data []byte) (map[string]json.RawMessage, error) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	out := make(map[string]json.RawMessage, len(m))
+	for k, v := range m {
+		out[canonKey(k)] = v
+	}
+	return out, nil
+}
+
+// field decodes the object's value for the (already canonical) key into dst,
+// leaving dst at its zero value when the key is absent. A present-but-malformed
+// value is a hard error, never silently zeroed (fail closed).
+func field(m map[string]json.RawMessage, key string, dst any) error {
+	raw, ok := m[key]
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, dst)
+}
+
+// UnmarshalJSON accepts scope_spans / instrumentation_library_spans as well as
+// their camelCase spellings (H-13). Resource carries no underscore, so the
+// default case-insensitive match already covers it.
+func (rs *resourceSpans) UnmarshalJSON(data []byte) error {
+	m, err := rawObject(data)
+	if err != nil || m == nil {
+		return err
+	}
+	if err := field(m, "resource", &rs.Resource); err != nil {
+		return err
+	}
+	if err := field(m, "scopespans", &rs.ScopeSpans); err != nil {
+		return err
+	}
+	return field(m, "instrumentationlibraryspans", &rs.InstrumentationLibrarySpans)
+}
+
 type resourceJSON struct {
 	Attributes []keyValue `json:"attributes"`
 }
@@ -322,6 +382,38 @@ type spanJSON struct {
 	Status       statusJSON      `json:"status"`
 }
 
+// UnmarshalJSON accepts the snake_case (proto-JSON) span field spellings
+// (trace_id, span_id, parent_span_id, start_time_unix_nano, end_time_unix_nano)
+// alongside camelCase, so a fully snake_case export decodes to real spans instead
+// of silently to zero (H-13). name/kind/attributes/links/status carry no
+// underscore and are matched case-insensitively by the default decoder.
+func (sp *spanJSON) UnmarshalJSON(data []byte) error {
+	m, err := rawObject(data)
+	if err != nil || m == nil {
+		return err
+	}
+	for _, f := range []struct {
+		key string
+		dst any
+	}{
+		{"traceid", &sp.TraceID},
+		{"spanid", &sp.SpanID},
+		{"parentspanid", &sp.ParentSpanID},
+		{"name", &sp.Name},
+		{"kind", &sp.Kind},
+		{"attributes", &sp.Attributes},
+		{"links", &sp.Links},
+		{"status", &sp.Status},
+	} {
+		if err := field(m, f.key, f.dst); err != nil {
+			return err
+		}
+	}
+	sp.Start = m["starttimeunixnano"]
+	sp.End = m["endtimeunixnano"]
+	return nil
+}
+
 // linkJSON is one OTLP span link: a reference to a causally-related span,
 // identified by its (traceId, spanId). flowmap reads links to follow async
 // flow membership across a broker hand-off, where parent_span_id does not
@@ -330,6 +422,18 @@ type spanJSON struct {
 type linkJSON struct {
 	TraceID string `json:"traceId"`
 	SpanID  string `json:"spanId"`
+}
+
+// UnmarshalJSON accepts trace_id / span_id alongside camelCase (H-13).
+func (l *linkJSON) UnmarshalJSON(data []byte) error {
+	m, err := rawObject(data)
+	if err != nil || m == nil {
+		return err
+	}
+	if err := field(m, "traceid", &l.TraceID); err != nil {
+		return err
+	}
+	return field(m, "spanid", &l.SpanID)
 }
 
 // links converts OTLP link records into the capture model, dropping any with
@@ -370,6 +474,34 @@ type anyValue struct {
 	BytesValue  *string         `json:"bytesValue"`
 	ArrayValue  json.RawMessage `json:"arrayValue"`
 	KvlistValue json.RawMessage `json:"kvlistValue"`
+}
+
+// UnmarshalJSON accepts the snake_case AnyValue member spellings (string_value,
+// bool_value, int_value, double_value, bytes_value, array_value, kvlist_value)
+// alongside camelCase, so a fully snake_case export's attribute values are not
+// silently dropped (H-13).
+func (v *anyValue) UnmarshalJSON(data []byte) error {
+	m, err := rawObject(data)
+	if err != nil || m == nil {
+		return err
+	}
+	for _, f := range []struct {
+		key string
+		dst any
+	}{
+		{"stringvalue", &v.StringValue},
+		{"boolvalue", &v.BoolValue},
+		{"doublevalue", &v.DoubleValue},
+		{"bytesvalue", &v.BytesValue},
+	} {
+		if err := field(m, f.key, f.dst); err != nil {
+			return err
+		}
+	}
+	v.IntValue = m["intvalue"]
+	v.ArrayValue = m["arrayvalue"]
+	v.KvlistValue = m["kvlistvalue"]
+	return nil
 }
 
 // intStr renders an OTLP intValue to its canonical decimal string. OTLP encodes

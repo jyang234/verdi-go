@@ -254,6 +254,44 @@ func TestDecodeRejectsNonOTLP(t *testing.T) {
 	}
 }
 
+// TestDecodeFullSnakeCase pins H-13: a FULLY snake_case (proto-JSON) export must
+// decode to real spans, not silently to zero. Before the fix only the envelope
+// key (resource_spans) was tolerated; the inner span/scope/attribute fields
+// accepted camelCase only, so this document decoded to zero spans with no error —
+// a vacuously-green behavioral gate over an empty corpus.
+func TestDecodeFullSnakeCase(t *testing.T) {
+	doc := `{"resource_spans":[{"resource":{"attributes":[{"key":"service.name","value":{"string_value":"loansvc"}}]},
+	  "scope_spans":[{"spans":[
+	    {"trace_id":"aa","span_id":"01","name":"GET /x","kind":2,
+	     "start_time_unix_nano":"1700000000000000000","end_time_unix_nano":"1700000000000000001",
+	     "attributes":[{"key":"http.route","value":{"string_value":"/x"}}],"status":{"code":1}},
+	    {"trace_id":"aa","span_id":"02","parent_span_id":"01","name":"db","kind":3,
+	     "attributes":[{"key":"db.system","value":{"string_value":"postgresql"}}],"status":{"code":1}}
+	  ]}]}]}`
+	spans, err := Decode(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2 (full snake_case must decode)", len(spans))
+	}
+	byID := map[string]capture.Span{}
+	for _, s := range spans {
+		byID[s.ID] = s
+	}
+	root := byID["01"]
+	if root.Kind != ir.KindServer || root.Attr("service.name") != "loansvc" || root.Attr("http.route") != "/x" {
+		t.Errorf("root span mis-decoded: kind=%q service=%q route=%q", root.Kind, root.Attr("service.name"), root.Attr("http.route"))
+	}
+	if root.Start.IsZero() {
+		t.Errorf("start_time_unix_nano was not decoded (zero time)")
+	}
+	child := byID["02"]
+	if child.ParentID != "01" || child.Attr("db.system") != "postgresql" {
+		t.Errorf("child span mis-decoded: parent=%q db.system=%q", child.ParentID, child.Attr("db.system"))
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
