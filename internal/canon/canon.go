@@ -184,10 +184,13 @@ func (c *canonicalizer) build(s *capture.Span, childrenOf map[string][]*capture.
 // data-dependent repetition. Siblings are clustered into concurrency components:
 // two siblings are joined when capture.Concurrent reports they raced — preferring
 // the structural goroutine signal (parentGoroutine) and falling back to
-// caller-clock interval overlap. Each component becomes a group, emitted in
-// happens-before order by its earliest member; a multi-member (concurrent) group
-// stores its members in canonical-key order so a race never perturbs the snapshot
-// (canon §3.3).
+// caller-clock interval overlap. Components are then emitted in start order, but two
+// components that share an equal caller-clock start are NOT a reliable happens-before
+// (a coarse or equal-timestamp clock cannot order them); rather than assert a
+// sequence on the run-random span id, such components are presented together as one
+// Unordered group — the same three-state philosophy the post-hoc path uses. A
+// multi-member (concurrent or unordered) group stores its members in canonical-key
+// order so a race never perturbs the snapshot (canon §3.3).
 func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, childrenOf map[string][]*capture.Span) []ir.ChildGroup {
 	if len(kids) == 0 {
 		return nil
@@ -199,11 +202,24 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 
 	ordered := make([]*capture.Span, len(kids))
 	copy(ordered, kids)
+	// Build each child once so a start-time tie can be broken on intrinsic content
+	// (op key, then canonical subtree signature) rather than the run-random span id.
+	// The manifest claims ids are "dropped"; letting them decide sibling order would
+	// make that claim a lie and the golden non-deterministic (M-3).
+	built := make(map[*capture.Span]*ir.CanonicalSpan, len(ordered))
+	for _, s := range ordered {
+		built[s] = c.build(s, childrenOf)
+	}
 	sort.Slice(ordered, func(i, j int) bool {
-		if !ordered[i].Start.Equal(ordered[j].Start) {
-			return ordered[i].Start.Before(ordered[j].Start)
+		a, b := ordered[i], ordered[j]
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
 		}
-		return ordered[i].ID < ordered[j].ID
+		ba, bb := built[a], built[b]
+		if ba.Op != bb.Op {
+			return ba.Op < bb.Op
+		}
+		return signature(ba) < signature(bb)
 	})
 
 	// Union siblings that ran concurrently into components.
@@ -242,21 +258,55 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 	}
 	sort.SliceStable(roots, func(i, j int) bool { return comps[roots[i]][0] < comps[roots[j]][0] })
 
-	var groups []ir.ChildGroup
+	// Each component becomes a unit carrying its earliest start; a multi-member
+	// component is a genuine (goroutine-signalled or overlapping) race.
+	type unit struct {
+		members []*ir.CanonicalSpan
+		start   time.Time
+	}
+	units := make([]unit, 0, len(roots))
 	for _, r := range roots {
 		idxs := comps[r]
-		members := make([]*ir.CanonicalSpan, 0, len(idxs))
+		u := unit{start: ordered[idxs[0]].Start}
 		for _, idx := range idxs {
-			members = append(members, c.build(ordered[idx], childrenOf))
+			u.members = append(u.members, built[ordered[idx]])
+			if s := ordered[idx].Start; s.Before(u.start) {
+				u.start = s
+			}
 		}
-		concurrent := len(members) > 1
-		if concurrent {
-			// Same tie-break as the post-hoc path: op key then canonical subtree
-			// signature, so two same-op concurrent siblings are ordered
-			// run-independently and a race never perturbs the byte-identical IR.
-			bySig(members)
+		if len(u.members) > 1 {
+			bySig(u.members) // members of a concurrent component
 		}
-		groups = append(groups, ir.ChildGroup{Concurrent: concurrent, Members: members})
+		units = append(units, u)
+	}
+
+	// Partition the start-sorted units into runs. A strictly-later start (both units
+	// carry a non-zero caller-clock start) is a reliable happens-before boundary and
+	// starts a new sequential step; units sharing an equal start (or missing a clock)
+	// cannot be ordered relative to each other and fold into one Unordered group,
+	// never a start-id-decided sequence.
+	reliableBoundary := func(prev, cur unit) bool {
+		return !prev.start.IsZero() && !cur.start.IsZero() && cur.start.After(prev.start)
+	}
+	var groups []ir.ChildGroup
+	for i := 0; i < len(units); {
+		j := i + 1
+		for j < len(units) && !reliableBoundary(units[j-1], units[j]) {
+			j++
+		}
+		block := units[i:j]
+		if len(block) == 1 {
+			u := block[0]
+			groups = append(groups, ir.ChildGroup{Concurrent: len(u.members) > 1, Members: u.members})
+		} else {
+			var all []*ir.CanonicalSpan
+			for _, u := range block {
+				all = append(all, u.members...)
+			}
+			bySig(all)
+			groups = append(groups, ir.ChildGroup{Unordered: len(all) > 1, Members: all})
+		}
+		i = j
 	}
 	return c.collapseLoops(groups)
 }
@@ -558,14 +608,24 @@ func (c *canonicalizer) orphans(spans []capture.Span, byID map[string]*capture.S
 			heads = append(heads, s)
 		}
 	}
+	// Build each head once so a start tie is broken on intrinsic content (op key,
+	// then subtree signature) rather than the run-random span id (M-3).
+	head := make(map[*capture.Span]*ir.CanonicalSpan, len(heads))
+	for _, h := range heads {
+		head[h] = c.build(h, childrenOf)
+	}
 	sort.Slice(heads, func(i, j int) bool {
 		if !heads[i].Start.Equal(heads[j].Start) {
 			return heads[i].Start.Before(heads[j].Start)
 		}
-		return heads[i].ID < heads[j].ID
+		a, b := head[heads[i]], head[heads[j]]
+		if a.Op != b.Op {
+			return a.Op < b.Op
+		}
+		return signature(a) < signature(b)
 	})
 	for _, h := range heads {
-		extra = append(extra, ir.ChildGroup{Members: []*ir.CanonicalSpan{c.build(h, childrenOf)}})
+		extra = append(extra, ir.ChildGroup{Members: []*ir.CanonicalSpan{head[h]}})
 	}
 	return extra
 }

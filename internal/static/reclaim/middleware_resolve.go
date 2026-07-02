@@ -135,8 +135,13 @@ func (r *mwReclaimer) resolveField(fv *types.Var) fieldSet {
 	// ssautil.AllFunctions ranges a map, so the union order is run-dependent; sort on the
 	// intrinsic FQN so the recovered middleware-edge set is byte-identical across runs
 	// (the prime directive — determinism). The SET is already order-independent (a union).
+	// Break FQN ties on Pos(): generic instantiations can share a RelString, so the name
+	// alone is not a total order (mirrors obligations/summaries.go NewSummaries).
 	sort.Slice(res.funcs, func(i, j int) bool {
-		return res.funcs[i].RelString(nil) < res.funcs[j].RelString(nil)
+		if a, b := res.funcs[i].RelString(nil), res.funcs[j].RelString(nil); a != b {
+			return a < b
+		}
+		return res.funcs[i].Pos() < res.funcs[j].Pos()
 	})
 	r.fieldMemo[fv] = res
 	return res
@@ -362,8 +367,13 @@ func (r *mwReclaimer) fieldStoreSet(fv *types.Var) fieldSet {
 	if !ok {
 		res.funcs = nil
 	}
+	// FQN then Pos() so a shared RelString (generic instantiations) still sorts
+	// totally — same intrinsic tie-break as the field-store site above.
 	sort.Slice(res.funcs, func(i, j int) bool {
-		return res.funcs[i].RelString(nil) < res.funcs[j].RelString(nil)
+		if a, b := res.funcs[i].RelString(nil), res.funcs[j].RelString(nil); a != b {
+			return a < b
+		}
+		return res.funcs[i].Pos() < res.funcs[j].Pos()
 	})
 	delete(r.resolving, fv)
 	r.storeMemo[fv] = res

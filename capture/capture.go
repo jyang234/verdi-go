@@ -249,15 +249,29 @@ func Scope(spans []Span, runID string) (scoped []Span, root *Span) {
 const CorrelationKey = "test.run.id"
 
 // sortSpans imposes a deterministic, run-independent order on the flat span set:
-// by start time (so assembly and ordering see a stable sequence), then by id as
-// a tiebreaker. Ordering of *siblings in the tree* is decided separately by
-// Order; this is only to keep the flat list reproducible.
+// by start time, then by intrinsic content (name, kind, parent), with the span id
+// only as an absolute last resort for two otherwise-identical spans. The span id is
+// per-run random in the in-process profile (M-3), so letting it decide a start-time
+// tie made the flat order — and any output that inherits it (orphan-head order) —
+// vary run-to-run despite the manifest's "ids: dropped" claim. Ordering of *siblings
+// in the tree* is decided separately by canon on the canonical op key and subtree
+// signature; this only keeps the flat list reproducible.
 func sortSpans(spans []Span) {
 	sort.Slice(spans, func(i, j int) bool {
-		if !spans[i].Start.Equal(spans[j].Start) {
-			return spans[i].Start.Before(spans[j].Start)
+		a, b := spans[i], spans[j]
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
 		}
-		return spans[i].ID < spans[j].ID
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.ParentID != b.ParentID {
+			return a.ParentID < b.ParentID
+		}
+		return a.ID < b.ID
 	})
 }
 
