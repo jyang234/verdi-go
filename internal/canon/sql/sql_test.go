@@ -188,6 +188,33 @@ func TestNormalizeQuotedIdentifier(t *testing.T) {
 	}
 }
 
+// TestNormalizeStripsDollarQuotedLiteral pins the review fix: a PostgreSQL
+// dollar-quoted string literal ($tag$ … $tag$) is a quoted literal, so no byte of
+// its body may survive into the canonical statement — the same redaction promise
+// the '-literal path makes. A bare $1 bind placeholder is not a dollar quote.
+func TestNormalizeStripsDollarQuotedLiteral(t *testing.T) {
+	cases := []struct {
+		raw, want string
+	}{
+		{"SELECT $$secret token value$$", "SELECT ?"},
+		{"SELECT $tag$O'Brien-secret$tag$ FROM t", "SELECT ? FROM t"},
+		{"INSERT INTO t (a) VALUES ($$multi\nline secret$$)", "INSERT INTO t ( a ) VALUES (?)"},
+		// A $N placeholder is NOT a dollar quote and must stay a single "?".
+		{"SELECT a FROM t WHERE id = $1", "SELECT a FROM t WHERE id = ?"},
+	}
+	for _, c := range cases {
+		got := Normalize(c.raw).Statement
+		if got != c.want {
+			t.Errorf("Normalize(%q).Statement = %q, want %q", c.raw, got, c.want)
+		}
+		for _, leaked := range []string{"secret", "brien", "token"} {
+			if strings.Contains(strings.ToLower(got), leaked) {
+				t.Errorf("dollar-quoted body fragment %q survived into %q", leaked, got)
+			}
+		}
+	}
+}
+
 func TestNormalizeDeterministic(t *testing.T) {
 	// Whitespace and placeholder-style variations of the same logical statement
 	// converge.

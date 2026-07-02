@@ -138,6 +138,27 @@ func (s *Store) ReadDynamicFilter(ctx context.Context, col, val string) error {
 	return err
 }
 
+// WriteFmtDeferred splices a runtime value into the builder through a DEFERRED
+// fmt.Fprintf — an *ssa.Defer, not an *ssa.Call. The H-11 fail-closed guard must
+// still catch it: a deferred (or goroutine) write to the buffer is an append the
+// template cannot place in order, so the fold must abstain rather than mint a
+// constant statement that omits the splice.
+func (w *sqlWriter) WriteFmtDeferred(format string, v any) *sqlWriter {
+	defer fmt.Fprintf(&w.sb, format, v)
+	w.sb.WriteString(" ")
+	return w
+}
+
+// SelectViaDeferredSplice builds a SELECT whose tail is spliced in via a deferred
+// fmt.Fprintf (see WriteFmtDeferred). The fold must ABSTAIN (H-11).
+func (s *Store) SelectViaDeferredSplice(ctx context.Context, filter string) error {
+	w := newSQLWriter()
+	w.Write("SELECT id FROM messages WHERE ").WriteFmtDeferred("%s", filter)
+	query, args := w.Build()
+	_, err := s.db.QueryContext(ctx, query, args...)
+	return err
+}
+
 // SelectViaFmtSplice builds a SELECT whose tail is spliced in through WriteFmt
 // (fmt.Fprintf directly into the builder). The verb is a constant SELECT, but the
 // statement is NOT wholly constant — the splice is invisible to the accumulator

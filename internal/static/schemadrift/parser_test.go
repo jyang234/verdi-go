@@ -145,6 +145,35 @@ func TestDollarQuotedCreateDoesNotMaskDrift(t *testing.T) {
 	}
 }
 
+// A '$' that CONTINUES an identifier (PostgreSQL allows '$' in identifiers, e.g.
+// a$b$c) must not be mis-read as a dollar-quote opener — which would scan for a
+// closing "$b$", not find one, and swallow the rest of the file (masking drift on
+// following DDL).
+func TestScanDDLDollarInIdentifierDoesNotSwallow(t *testing.T) {
+	ops := scanDDL(`CREATE TABLE a$b$c (id int); CREATE TABLE keep (id int);`)
+	if got := ddlNames(ops, true); !eqSet(got, []string{"a$b$c", "keep"}) {
+		t.Errorf("creates = %v, want [a$b$c keep] ('$' in an identifier must not open a dollar quote)", got)
+	}
+}
+
+// A dollar sign (or quote/comment metachar) INSIDE a double-quoted identifier must
+// not be interpreted, or it swallows the closing quote and the following real DDL.
+func TestScanDDLSpecialsInQuotedIdentifier(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want []string
+	}{
+		{`CREATE TABLE "a$$b" (id int); CREATE TABLE keep (id int);`, []string{"a$$b", "keep"}},
+		{`CREATE TABLE "o'brien" (id int); CREATE TABLE keep (id int);`, []string{"keep", "o'brien"}},
+		{`CREATE TABLE "c--x" (id int); CREATE TABLE keep (id int);`, []string{"c--x", "keep"}},
+	}
+	for _, c := range cases {
+		if got := ddlNames(scanDDL(c.sql), true); !eqSet(got, c.want) {
+			t.Errorf("scanDDL(%q) creates = %v, want %v (a metachar in a quoted identifier must not swallow following DDL)", c.sql, got, c.want)
+		}
+	}
+}
+
 // A RENAME inside a comment must not raise a spurious caveat (renameCaveat scans
 // stripped SQL).
 func TestRenameCaveatIgnoresComments(t *testing.T) {

@@ -195,6 +195,18 @@ func TestFoldAbstainsOnFmtSpliceInBuilderMethod(t *testing.T) {
 	}
 }
 
+// TestFoldAbstainsOnDeferredFmtSplice pins the review fix: an accumulator method
+// that splices a runtime value via a DEFERRED fmt.Fprintf(&w.sb, …) (an *ssa.Defer,
+// not an *ssa.Call) must still fail closed. Before the fix the instruction loop
+// only inspected *ssa.Call, so the deferred write bypassed callMayMutateReceiver
+// and the enclosing SELECT folded to a false constant read.
+func TestFoldAbstainsOnDeferredFmtSplice(t *testing.T) {
+	s := foldFixture(t)["SelectViaDeferredSplice"]
+	if s.ok {
+		t.Errorf("SelectViaDeferredSplice: a deferred fmt.Fprintf splice must abstain, got %+v", s)
+	}
+}
+
 func TestFoldAbstainsWhenVerbIsDynamic(t *testing.T) {
 	// The verb itself is a runtime value: nothing is recoverable, so the fold must
 	// abstain (fail closed) rather than guess.

@@ -236,18 +236,47 @@ func stripSQL(s string) string {
 				i++
 			}
 			b.WriteByte(' ')
-		case s[i] == '$':
-			if d := dollarQuoteDelim(s, i); d > 0 {
-				delim := s[i : i+d]
-				if k := strings.Index(s[i+d:], delim); k >= 0 {
-					i += d + k + d // consume body AND the closing delimiter
-				} else {
-					i = len(s) // unterminated body: consume the rest, never leak it (fail closed)
+		case s[i] == '"':
+			// Double-quoted identifier: KEEP it (a table name), but consume it as a
+			// UNIT so an embedded '$', '\'', '--' or '/*' inside the quoted name is not
+			// mis-lexed as a dollar quote / literal / comment — which would swallow the
+			// closing quote and any following real DDL, masking drift. A doubled "" is
+			// an escaped quote inside the identifier.
+			b.WriteByte(s[i])
+			i++
+			for i < len(s) {
+				if s[i] == '"' {
+					b.WriteByte(s[i])
+					i++
+					if i < len(s) && s[i] == '"' {
+						b.WriteByte(s[i])
+						i++
+						continue
+					}
+					break
 				}
-				b.WriteByte(' ')
-				continue
+				b.WriteByte(s[i])
+				i++
 			}
-			b.WriteByte(s[i]) // a bare '$' (e.g. a $1 placeholder), not a dollar quote
+		case s[i] == '$':
+			// A '$' that continues an identifier (previous byte is an identifier byte —
+			// PostgreSQL allows '$' inside identifiers, e.g. a$b$c) is NOT a dollar-quote
+			// opener. Treating it as one would read a legal identifier as a dollar body
+			// and swallow following DDL (a false "no drift"), so only attempt the
+			// dollar-quote scan at a token boundary.
+			if i == 0 || !isIdentByte(s[i-1]) {
+				if d := dollarQuoteDelim(s, i); d > 0 {
+					delim := s[i : i+d]
+					if k := strings.Index(s[i+d:], delim); k >= 0 {
+						i += d + k + d // consume body AND the closing delimiter
+					} else {
+						i = len(s) // unterminated body: consume the rest, never leak it (fail closed)
+					}
+					b.WriteByte(' ')
+					continue
+				}
+			}
+			b.WriteByte(s[i]) // a bare '$' (a $1 placeholder or an identifier's '$'), not a dollar quote
 			i++
 		default:
 			b.WriteByte(s[i])
@@ -255,6 +284,14 @@ func stripSQL(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// isIdentByte reports whether c can appear inside an SQL identifier. PostgreSQL
+// permits '$' (never as the first character), which is why a '$' following one of
+// these is an identifier continuation, not a dollar-quote delimiter.
+func isIdentByte(c byte) bool {
+	return c == '_' || c == '$' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 // dollarQuoteDelim returns the byte length of a PostgreSQL dollar-quote opening

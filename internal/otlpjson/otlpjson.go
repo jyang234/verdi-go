@@ -328,7 +328,15 @@ func rawObject(data []byte) (map[string]json.RawMessage, error) {
 	}
 	out := make(map[string]json.RawMessage, len(m))
 	for k, v := range m {
-		out[canonKey(k)] = v
+		ck := canonKey(k)
+		if _, dup := out[ck]; dup {
+			// The same field carried under BOTH spellings (e.g. "spanId" and
+			// "span_id") folds to one canonKey; picking a winner would depend on
+			// randomized map-iteration order — a nondeterministic decode. Refuse
+			// instead of silently dropping one (fail closed; determinism first).
+			return nil, fmt.Errorf("otlpjson: object carries two spellings of the same field %q — ambiguous, refusing", ck)
+		}
+		out[ck] = v
 	}
 	return out, nil
 }

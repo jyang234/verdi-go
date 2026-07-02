@@ -348,6 +348,33 @@ func TestAllowlistedDBStatementStaysNormalized(t *testing.T) {
 	}
 }
 
+// TestAllowlistBothStatementSpellingsDeterministic pins the review fix: with BOTH
+// db.statement and db.query.text allowlisted and a span carrying both with
+// different SQL, the projected db.statement must be the deterministic,
+// priority-ordered (db.statement-over-query.text) normalized form — never the
+// last-writer of a map-iteration race. Run it many times; a map-order bug would
+// flip the value across iterations.
+func TestAllowlistBothStatementSpellingsDeterministic(t *testing.T) {
+	cfg := mustConfig(t, "canon:\n  attributeAllowlist: [\"db.statement\", \"db.query.text\"]\n")
+	want := "SELECT a FROM t WHERE id = ?"
+	for i := 0; i < 50; i++ {
+		spans := []capture.Span{
+			{ID: "root", Kind: ir.KindServer, Status: capture.StatusOK, Start: ms(0, 0), End: ms(0, 100),
+				Attrs: map[string]string{"http.request.method": "GET", "http.route": "/x"}},
+			{ID: "sel", ParentID: "root", Kind: ir.KindClient, Start: ms(0, 1), End: ms(0, 5),
+				Attrs: map[string]string{
+					"db.system":     "postgresql",
+					"db.statement":  "SELECT a FROM t WHERE id = 1",
+					"db.query.text": "SELECT a FROM t WHERE id = 2 /* different */",
+				}},
+		}
+		tr := mustCanonCfg(t, capture.CapturedFlow{Flow: "f", Service: "s", Spans: spans, Root: &spans[0], Complete: true}, cfg)
+		if got := tr.Root.Children[0].Members[0].Attrs["db.statement"]; got != want {
+			t.Fatalf("iteration %d: db.statement = %q, want deterministic %q (map-order nondeterminism)", i, got, want)
+		}
+	}
+}
+
 // TestInternalKindDBSpanTiered is the regression for DB spans opened as
 // internal-kind (some ORMs do this): opkey keys them as DB operations, so the
 // classifier must tier them as DB (ext-read = 2 / mutate = 1) and retain them,

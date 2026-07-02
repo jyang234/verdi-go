@@ -292,6 +292,18 @@ func TestDecodeFullSnakeCase(t *testing.T) {
 	}
 }
 
+// TestDecodeRejectsAmbiguousSpelling pins the review fix: an object carrying BOTH
+// the camelCase and snake_case spelling of one field folds to a single canonKey;
+// picking a winner would depend on randomized map-iteration order. Decode must
+// refuse (fail closed) rather than silently, nondeterministically drop one.
+func TestDecodeRejectsAmbiguousSpelling(t *testing.T) {
+	doc := `{"resourceSpans":[{"scopeSpans":[{"spans":[
+	  {"spanId":"01","span_id":"02","name":"x","kind":2,"status":{"code":1}}]}]}]}`
+	if _, err := Decode(strings.NewReader(doc)); err == nil {
+		t.Fatal("an object with both spanId and span_id must be refused, not decoded nondeterministically")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

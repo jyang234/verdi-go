@@ -123,8 +123,31 @@ func tokenize(raw string) []string {
 				i++
 			}
 			toks = append(toks, strings.ToLower(ident.String()))
-		case c == '$' || c == ':' || c == '@':
-			// Driver placeholder ($1, :name, @p1): consume the run.
+		case c == '$':
+			// PostgreSQL dollar-quoted string literal ($tag$ … $tag$): consume the
+			// whole body so NO byte inside it survives into the canonical statement,
+			// the same redaction promise this file makes for '-literals (H-1). A bare
+			// $N bind placeholder ($1) is NOT a dollar quote and falls through to the
+			// placeholder run below. (schemadrift.stripSQL strips the same construct;
+			// keep the two in step.)
+			if d := dollarQuoteDelim(raw, i); d > 0 {
+				delim := raw[i : i+d]
+				if k := strings.Index(raw[i+d:], delim); k >= 0 {
+					i += d + k + d // consume body AND the closing delimiter
+				} else {
+					i = n // unterminated body: consume the rest, never leak it
+				}
+				toks = append(toks, "?")
+				continue
+			}
+			// Driver placeholder ($1): consume the run.
+			i++
+			for i < n && (isIdent(raw[i]) || isDigit(raw[i])) {
+				i++
+			}
+			toks = append(toks, "?")
+		case c == ':' || c == '@':
+			// Driver placeholder (:name, @p1): consume the run.
 			i++
 			for i < n && (isIdent(raw[i]) || isDigit(raw[i])) {
 				i++
@@ -242,6 +265,34 @@ func identAfter(toks []string, after map[string]bool) string {
 		}
 	}
 	return ""
+}
+
+// dollarQuoteDelim returns the byte length of a PostgreSQL dollar-quote opening
+// delimiter beginning at raw[i] ("$$" → 2, "$body$" → 6), or 0 if raw[i] does not
+// open one. The tag between the two '$' follows the unquoted-identifier rule
+// (letters, digits, underscores; never starting with a digit) and may be empty,
+// so a "$1" bind placeholder — a digit right after the first '$' — is correctly
+// NOT a delimiter. Parallels schemadrift.dollarQuoteDelim (same grammar).
+func dollarQuoteDelim(raw string, i int) int {
+	if i >= len(raw) || raw[i] != '$' {
+		return 0
+	}
+	for j := i + 1; j < len(raw); j++ {
+		c := raw[j]
+		switch {
+		case c == '$':
+			return j - i + 1
+		case isIdent(c):
+			// tag byte (isIdent covers letters and '_')
+		case isDigit(c):
+			if j == i+1 {
+				return 0 // a tag cannot start with a digit ($1 is a placeholder)
+			}
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }

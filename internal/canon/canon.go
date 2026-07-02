@@ -505,14 +505,16 @@ func (c *canonicalizer) projectAttrs(s *capture.Span) map[string]string {
 		}
 		switch k {
 		case "db.statement", "db.query.text":
-			// A raw-SQL key in the allowlist must NOT re-inject the unnormalized
-			// statement: raw SQL matches no placeholder shape, so redact() would
-			// pass it through verbatim, silently defeating both the SQL redaction
-			// and byte-identity (every run's literals differ). Route it through the
-			// same normalizer the explicit projection above uses, and land it under
-			// the canonical db.statement key regardless of spelling so the allow
-			// path and the explicit projection can never disagree (H-3).
-			out["db.statement"] = sqlnorm.Normalize(v).Statement
+			// Already handled by the explicit projection above: out["db.statement"]
+			// is set from opkey.Statement (deterministic db.statement-over-query.text
+			// priority) and SQL-normalized. Skip both spellings here so a raw-SQL key
+			// in the allowlist can NEITHER re-inject the unnormalized statement (H-3)
+			// NOR — when both spellings are allowlisted — race to the SAME
+			// out["db.statement"] slot under nondeterministic map iteration of c.allow,
+			// nor let the lower-priority db.query.text overwrite the projected value.
+			// The explicit projection is the single, order-independent source of truth
+			// for the statement.
+			continue
 		case capture.FQNTagKey:
 			// Already projected verbatim above (a structural code identifier, not a
 			// volatile value); keep it, do not run it through redact().
