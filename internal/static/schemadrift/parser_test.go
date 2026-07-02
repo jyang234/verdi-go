@@ -145,6 +145,29 @@ func TestDollarQuotedCreateDoesNotMaskDrift(t *testing.T) {
 	}
 }
 
+// TestScanDDLUnterminatedDollarQuoteFailsClosed pins the H-12 §3 gap: an
+// UNTERMINATED dollar-quoted body ($$… with no closing $$) must consume to input
+// end (never leak its contents as DDL), the conservative fail-closed direction —
+// so a CREATE the scanner can no longer see cannot become a phantom table that
+// masks drift. A write to a table "created" only after an unterminated body must
+// therefore still drift.
+func TestScanDDLUnterminatedDollarQuoteFailsClosed(t *testing.T) {
+	// The $$ opens but never closes; the trailing CREATE is swallowed with it.
+	ops := scanDDL(`CREATE TABLE keep (id int); CREATE FUNCTION f() AS $$ CREATE TABLE ghost (id int);`)
+	names := ddlNames(ops, true)
+	if !eqSet(names, []string{"keep"}) {
+		t.Errorf("creates = %v, want [keep] — an unterminated $$ body must swallow the rest, never leak 'ghost'", names)
+	}
+	// End-to-end: a write to a table whose only CREATE is inside the unterminated
+	// body must drift, not be masked by a phantom create.
+	files := []MigrationFile{mig("V1__init.sql",
+		"CREATE FUNCTION seed() RETURNS void AS $$ CREATE TABLE ghost (id int);")}
+	r := Check([]Edge{dbEdge("svc.W", "INSERT ghost")}, files, nil)
+	if len(r.Drift) != 1 || r.Drift[0].Table != "ghost" {
+		t.Fatalf("write to a table 'created' only inside an unterminated $$ body must drift; got %v", r.Drift)
+	}
+}
+
 // A '$' that CONTINUES an identifier (PostgreSQL allows '$' in identifiers, e.g.
 // a$b$c) must not be mis-read as a dollar-quote opener — which would scan for a
 // closing "$b$", not find one, and swallow the rest of the file (masking drift on
