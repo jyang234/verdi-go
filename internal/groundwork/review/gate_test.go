@@ -63,6 +63,56 @@ func TestGateSurfacesStandingCautionOnPass(t *testing.T) {
 	}
 }
 
+// TestGateSurfacesNewCautionOnPass pins H-7: a branch that INTRODUCES an
+// unproven caution (here a route made newly-unenforceable by swapping a
+// classified write for an unclassified "db call") must disclose it on a passing
+// gate — it is non-blocking but must not be silent, since the diff created it and
+// the agent loop converges on the gate verdict. Pre-fix newFindings computed the
+// new caution and Gate dropped it on the floor.
+func TestGateSurfacesNewCautionOnPass(t *testing.T) {
+	const (
+		route = "(*example.com/svc/internal/handler.Server).Do"
+		store = "(*example.com/svc/internal/store.Store).Save"
+	)
+	mk := func(sink string) *graph.Graph {
+		return &graph.Graph{
+			Nodes: []graph.Node{
+				{FQN: route, Sig: "func()", Tier: 1},
+				{FQN: store, Sig: "func() error", Tier: 1},
+			},
+			Edges: []graph.Edge{
+				{From: route, To: store, Tier: 2},
+				{From: store, To: sink, Tier: 1, Boundary: "outbound-sync"},
+			},
+		}
+	}
+	// Base: a classified write within budget — no caution. Branch: the same route
+	// now mutates through an unclassified "db call" — a NEW unenforceable caution.
+	base := mk("boundary:db INSERT users")
+	branch := mk("boundary:db call")
+	p := &policy.Policy{Service: "svc", Version: 1, IOBudget: &policy.IOBudget{MaxWritesPerRoute: 2}}
+
+	res := Gate(p, base, branch, nil)
+	if !res.Pass {
+		t.Fatalf("a new caution must not block the gate; got violations %v", res.NewViolations)
+	}
+	if len(res.StandingCautions) != 0 {
+		t.Fatalf("the caution is branch-introduced, not standing; got standing %v", res.StandingCautions)
+	}
+	var found bool
+	for _, c := range res.NewCautions {
+		if c.Rule == "io_budget" && strings.Contains(c.Summary, "unenforceable") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a new io_budget unenforceable caution, got %v", res.NewCautions)
+	}
+	if !strings.Contains(res.Render(), "new caution") {
+		t.Errorf("the human gate report must show the new caution; got:\n%s", res.Render())
+	}
+}
+
 func TestGateNewViolationBlocks(t *testing.T) {
 	p := loadPolicy(t)
 	base := loadGraph(t, "layeredsvc.graph.json")

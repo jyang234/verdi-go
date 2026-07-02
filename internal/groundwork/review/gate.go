@@ -31,6 +31,16 @@ type GateResult struct {
 	// against stops being silent about a standing budget the diff suppresses
 	// (R1). This is the only GateResult field that is not a reason the gate failed.
 	StandingCautions []Violation `json:"standing_cautions,omitempty"`
+	// NewCautions are the "the graph cannot prove this" disclosures the BRANCH
+	// introduces that the base did not — a newly-unenforceable io_budget, a fresh
+	// blind-frontier must_not_reach. Like StandingCautions they are NON-BLOCKING
+	// (they never set Pass=false), but the gate's own R1 rationale holds they are
+	// MORE attention-worthy than standing ones: the diff created them. Before this
+	// field they were computed by newFindings and silently dropped, so a branch
+	// that made a budget newly unenforceable rendered "PASS — no new violations"
+	// with zero disclosure — the disclosure channel failing open exactly where the
+	// agent loop converges (H-7). Digest-covered like every other field.
+	NewCautions []Violation `json:"new_cautions,omitempty"`
 	// ImpeachmentBreaches are the behaviorally-confirmed impeachment gate-blockers
 	// (a committed-corpus VIOLATED, or a require_proof proof downgraded to
 	// CANT-PROVE) supplied via WithImpeachment. They are ALWAYS disclosed here
@@ -110,7 +120,7 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string, opts ...G
 	baseIx, branchIx := graph.NewIndex(base), graph.NewIndex(branch)
 	d := diffGraphs(base, branch)
 
-	newViolations, _, standingCautions, _, _ := newFindings(p, baseIx, branchIx)
+	newViolations, newCautions, standingCautions, _, _ := newFindings(p, baseIx, branchIx)
 
 	var breaking []ContractChange
 	for _, c := range contractChanges(baseIx, branchIx) {
@@ -161,6 +171,7 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string, opts ...G
 		NewBlindSpots:       blindSpots,
 		NewWriteTargets:     writeTargets,
 		StandingCautions:    standingCautions,
+		NewCautions:         newCautions,
 		ImpeachmentBreaches: cfg.impeachment,
 		Algo:                branch.Algo,
 		Caveats:             caveats,
@@ -172,8 +183,8 @@ func Gate(p *policy.Policy, base, branch *graph.Graph, scope []string, opts ...G
 	if p.GatesImpeachment() {
 		blockingImpeach = len(cfg.impeachment)
 	}
-	// StandingCautions are deliberately absent from this conjunction: they
-	// disclose, they do not gate.
+	// StandingCautions and NewCautions are deliberately absent from this
+	// conjunction: they disclose, they do not gate.
 	g.Pass = len(newViolations) == 0 && len(escapes) == 0 && len(breaking) == 0 && len(blindSpots) == 0 && len(writeTargets) == 0 && blockingImpeach == 0
 	g.Digest = gateDigest(g)
 	return g
@@ -227,9 +238,15 @@ func (g GateResult) Render() string {
 
 	if g.Pass {
 		b.WriteString("\nNo new violations, no scope escapes, no breaking contract changes.\n")
-		// A passing gate still surfaces standing cautions: this is the gate path
-		// R1 found silent — a steady-state unenforceable budget must be visible
-		// where the agent actually converges, not only in the fitness lens.
+		// A passing gate still surfaces cautions: this is the gate path R1 found
+		// silent. New cautions the branch introduced come first (the diff created
+		// them, so they are the more attention-worthy per R1), then the standing
+		// ones the diff would otherwise suppress — both must be visible where the
+		// agent actually converges, not only in the fitness lens.
+		if s := renderNewCautions(g.NewCautions); s != "" {
+			b.WriteString("\n")
+			b.WriteString(s)
+		}
 		if s := renderStandingCautions(g.StandingCautions); s != "" {
 			b.WriteString("\n")
 			b.WriteString(s)
@@ -278,6 +295,9 @@ func (g GateResult) Render() string {
 		}
 	}
 	if s := renderImpeachmentBreaches(g.ImpeachmentBreaches); s != "" {
+		b.WriteString(s)
+	}
+	if s := renderNewCautions(g.NewCautions); s != "" {
 		b.WriteString(s)
 	}
 	if s := renderStandingCautions(g.StandingCautions); s != "" {

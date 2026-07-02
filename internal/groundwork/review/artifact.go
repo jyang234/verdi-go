@@ -328,6 +328,22 @@ func renderStandingCautions(cs []Violation) string {
 	return b.String()
 }
 
+// renderNewCautions discloses the cautions the branch introduces that the base
+// did not — a newly-unenforceable budget, a fresh blind-frontier reach. Non-
+// blocking, but surfaced on both PASS and BLOCK so the diff that created them is
+// never a silent green (H-7). "" when there are none.
+func renderNewCautions(cs []Violation) string {
+	if len(cs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "⚠️  %d new caution(s) — introduced by this MR, unproven on the branch (non-blocking)\n", len(cs))
+	for _, c := range cs {
+		fmt.Fprintf(&b, "- %s — %s\n", c.Rule, c.Summary)
+	}
+	return b.String()
+}
+
 // String renders a package's node delta, e.g. "handler(+1)" or "store(+2,-1)".
 func (p PkgDelta) String() string {
 	name := p.Package
