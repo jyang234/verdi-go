@@ -194,14 +194,17 @@ type CapturedFlow struct {
 	Spans      []Span
 	Root       *Span
 	Complete   bool
-	// CorrelationLess is the count of in-window spans excluded from Spans because
-	// they carried no correlation id (an empty test.run.id — the classic lost-ctx
-	// bug where a SUT span is opened from a fresh context.Background()). Dropping
-	// them is the sound direction for impeachment, but tenet 3 says disclose: a
-	// non-zero value means this capture had spans it could not attribute to the run.
-	// Deterministic (a count of a filtered set), never a volatile timing artifact,
-	// and excluded from snapshot equality. Zero on the runID=="" fast path (no
-	// correlation filtering happens there).
+	// CorrelationLess is the count of captured spans that carried no correlation id
+	// (an empty test.run.id — the classic lost-ctx bug where a SUT span is opened
+	// from a fresh context.Background()). Such spans are excluded from Spans by Scope;
+	// dropping them is the sound direction for impeachment, but tenet 3 says disclose:
+	// a non-zero value means this capture had spans it could not attribute to the run.
+	// It is counted over the RAW in-process recorder, which is process-shared, so in a
+	// test binary that captures several flows this ACCUMULATES across them — read a
+	// non-zero value as "un-attributable spans exist in this run", a signal to act on,
+	// not a per-flow exact count. Advisory only: excluded from snapshot equality and
+	// never written to a golden. Zero on the runID=="" fast path (no correlation
+	// filtering happens there).
 	CorrelationLess int
 }
 
@@ -257,9 +260,11 @@ func Scope(spans []Span, runID string) (scoped []Span, root *Span) {
 // carrying NO correlation id (an empty test.run.id) — distinct from spans belonging
 // to a DIFFERENT run, which are correctly filtered without disclosure. When runID is
 // "" (the in-process fast path keeps every span) no correlation filtering happens,
-// so the count is zero. It is the deterministic marker behind CapturedFlow's
-// CorrelationLess disclosure (M-18): a lost-baggage span vanishing from the golden
-// while Complete=true must not be silent.
+// so the count is zero. It is the marker behind CapturedFlow's CorrelationLess
+// disclosure (M-18): a lost-baggage span vanishing from the golden while
+// Complete=true must not be silent. It MUST be given the RAW recorder set, never a
+// Scope-filtered slice — every element of a scoped slice carries the run id, so the
+// count over it is trivially zero.
 func CorrelationLess(spans []Span, runID string) int {
 	if runID == "" {
 		return 0

@@ -375,12 +375,18 @@ func (p *Pending) Capture(opt CaptureOptions) (*capture.CapturedFlow, error) {
 	})
 
 	scoped, root := capture.Scope(spans, p.runID)
-	// Disclose in-window spans that could not be attributed to this run (empty
-	// correlation id — the classic lost-ctx bug where a SUT span is opened from a
-	// fresh context.Background()). Excluding them is the sound direction, but never
-	// silently (M-18): the deterministic count rides on the flow for any consumer
-	// (post-hoc audit, impeach corpus) to surface.
-	correlationLess := capture.CorrelationLess(spans, p.runID)
+	// Disclose spans that could not be attributed to this run (empty correlation id —
+	// the classic lost-ctx bug where a SUT span is opened from a fresh
+	// context.Background()). Excluding them is the sound direction, but never silently
+	// (M-18). The count MUST be taken over the RAW recorder set (a.collect()), not the
+	// scoped `spans`: `spans` is already Scope-filtered, so every element carries this
+	// run's id and a correlation-less-count over it is trivially zero. Because the
+	// in-process recorder is process-shared, this raw count is recorder-wide — in a
+	// test binary that captures several flows it accumulates across them, so a
+	// non-zero value means "this run produced un-attributable spans somewhere", a
+	// signal to act on, not a per-flow exact count. It is advisory and never reaches a
+	// golden (snapshot equality lives on ir.CanonicalTrace).
+	correlationLess := capture.CorrelationLess(a.collect(), p.runID)
 	cf := &capture.CapturedFlow{
 		Flow:    p.flow,
 		Service: a.service,

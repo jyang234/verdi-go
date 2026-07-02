@@ -210,16 +210,13 @@ func (c *canonicalizer) group(parentGoroutine uint64, kids []*capture.Span, chil
 	for _, s := range ordered {
 		built[s] = c.build(s, childrenOf)
 	}
+	sig := memoSignature()
 	sort.Slice(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
 		if !a.Start.Equal(b.Start) {
 			return a.Start.Before(b.Start)
 		}
-		ba, bb := built[a], built[b]
-		if ba.Op != bb.Op {
-			return ba.Op < bb.Op
-		}
-		return signature(ba) < signature(bb)
+		return lessBySig(built[a], built[b], sig)
 	})
 
 	// Union siblings that ran concurrently into components.
@@ -614,15 +611,12 @@ func (c *canonicalizer) orphans(spans []capture.Span, byID map[string]*capture.S
 	for _, h := range heads {
 		head[h] = c.build(h, childrenOf)
 	}
+	sig := memoSignature()
 	sort.Slice(heads, func(i, j int) bool {
 		if !heads[i].Start.Equal(heads[j].Start) {
 			return heads[i].Start.Before(heads[j].Start)
 		}
-		a, b := head[heads[i]], head[heads[j]]
-		if a.Op != b.Op {
-			return a.Op < b.Op
-		}
-		return signature(a) < signature(b)
+		return lessBySig(head[heads[i]], head[heads[j]], sig)
 	})
 	for _, h := range heads {
 		extra = append(extra, ir.ChildGroup{Members: []*ir.CanonicalSpan{head[h]}})
@@ -696,17 +690,41 @@ func signature(s *ir.CanonicalSpan) string {
 	return string(b)
 }
 
-// bySig orders members by op key then canonical subtree signature. It is the
-// single ordering both the in-process and post-hoc paths apply to concurrent /
+// lessBySig is THE canonical sibling order: op key, then canonical subtree
+// signature. It is the single comparator every ordering path applies (bySig for
+// concurrent/unordered members, and the start-tie-break in group/orphans), so a
+// same-op tie is always broken by subtree content, never by run-dependent start
+// time or span id — one source of truth, so the paths cannot drift. sig computes the
+// signature (pass memoSignature() to marshal each subtree at most once per sort).
+func lessBySig(a, b *ir.CanonicalSpan, sig func(*ir.CanonicalSpan) string) bool {
+	if a.Op != b.Op {
+		return a.Op < b.Op
+	}
+	return sig(a) < sig(b)
+}
+
+// memoSignature returns a signature function that caches by span pointer, so a
+// subtree is marshaled at most once across the O(n log n) comparisons of a single
+// sort rather than re-marshaled on every tie.
+func memoSignature() func(*ir.CanonicalSpan) string {
+	cache := map[*ir.CanonicalSpan]string{}
+	return func(s *ir.CanonicalSpan) string {
+		if v, ok := cache[s]; ok {
+			return v
+		}
+		v := signature(s)
+		cache[s] = v
+		return v
+	}
+}
+
+// bySig orders members by op key then canonical subtree signature (lessBySig). It is
+// the single ordering both the in-process and post-hoc paths apply to concurrent /
 // unordered siblings: a same-op tie is broken by subtree content, never by
 // run-dependent start time, so a race cannot perturb the byte-identical IR.
 func bySig(ms []*ir.CanonicalSpan) {
-	sort.SliceStable(ms, func(i, j int) bool {
-		if ms[i].Op != ms[j].Op {
-			return ms[i].Op < ms[j].Op
-		}
-		return signature(ms[i]) < signature(ms[j])
-	})
+	sig := memoSignature()
+	sort.SliceStable(ms, func(i, j int) bool { return lessBySig(ms[i], ms[j], sig) })
 }
 
 func normalizeStatus(s string) string {

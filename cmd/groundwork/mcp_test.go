@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,6 +318,25 @@ func TestMaxLoggedSessionContinuesAcrossRestart(t *testing.T) {
 	fleet.sessionN = maxLoggedSession(prior)
 	if sid := fleet.newSession(); sid != "4" {
 		t.Errorf("first session after restart = %q, want \"4\" (no collision with prior run)", sid)
+	}
+
+	// Writer↔reader parity: maxLoggedSession must be able to read the session ids
+	// the server actually WRITES, so the two hand-rolled string forms cannot drift
+	// (a silent regex miss would return 0 and reintroduce the M-34 collision). Drive
+	// real sessions through serveMCP into a log, then feed that log back.
+	var log strings.Builder
+	logged := newMCPFleet(map[string]*mcpServer{})
+	logged.log = &log
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"initialize"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"initialize"}`,
+	}, "\n") + "\n"
+	if err := serveMCP(strings.NewReader(in), io.Discard, logged); err != nil {
+		t.Fatal(err)
+	}
+	if got := maxLoggedSession([]byte(log.String())); got != 3 {
+		t.Errorf("maxLoggedSession over real writer output = %d, want 3 — reader/writer session format drifted", got)
 	}
 }
 
