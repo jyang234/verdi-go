@@ -93,6 +93,87 @@ func TestScanDDLQuotedIdentifierWithSemicolon(t *testing.T) {
 	}
 }
 
+// A CREATE/DROP inside a PostgreSQL dollar-quoted body ($$…$$, a plpgsql function
+// body) is the function's runtime behavior, not migration-time schema DDL, so the
+// scan must ignore it in BOTH directions: a phantom CREATE inside a body must not
+// enter the defined set (which would mask real drift — the unsound direction),
+// and a phantom DROP must not leave it (H-12).
+func TestScanDDLIgnoresDollarQuotedBodies(t *testing.T) {
+	sqlText := `
+CREATE TABLE real_one (id int);
+CREATE FUNCTION audit() RETURNS trigger AS $$
+BEGIN
+  CREATE TABLE ghost (id int);
+  DROP TABLE real_one;
+END;
+$$ LANGUAGE plpgsql;
+`
+	ops := scanDDL(sqlText)
+	if got := ddlNames(ops, true); !eqSet(got, []string{"real_one"}) {
+		t.Errorf("creates = %v, want [real_one] (DDL inside a $$ body must be ignored)", got)
+	}
+	if got := ddlNames(ops, false); len(got) != 0 {
+		t.Errorf("drops = %v, want none (the DROP lives only inside a $$ body)", got)
+	}
+}
+
+// A TAGGED dollar quote ($body$…$body$) must be handled like the empty-tag form,
+// and a bare "$1" placeholder must NOT be mistaken for a dollar-quote delimiter.
+func TestScanDDLTaggedDollarQuoteAndPlaceholder(t *testing.T) {
+	sqlText := `
+CREATE TABLE keep (id int);
+CREATE FUNCTION f(x int) RETURNS void AS $body$ SELECT $1; DROP TABLE keep; $body$ LANGUAGE plpgsql;
+`
+	ops := scanDDL(sqlText)
+	if got := ddlNames(ops, true); !eqSet(got, []string{"keep"}) {
+		t.Errorf("creates = %v, want [keep]", got)
+	}
+	if got := ddlNames(ops, false); len(got) != 0 {
+		t.Errorf("drops = %v, want none (DROP inside a tagged $body$ must be ignored)", got)
+	}
+}
+
+// End-to-end: a CREATE only inside a dollar-quoted body must not become a phantom
+// table that masks a real drift on that name (the H-12 unsound direction).
+func TestDollarQuotedCreateDoesNotMaskDrift(t *testing.T) {
+	files := []MigrationFile{mig("V1__init.sql",
+		"CREATE FUNCTION seed() RETURNS void AS $$ CREATE TABLE audit_x (id int); $$ LANGUAGE plpgsql;\nCREATE TABLE real (id int);")}
+	edges := []Edge{dbEdge("svc.W", "INSERT audit_x")}
+	r := Check(edges, files, nil)
+	if len(r.Drift) != 1 || r.Drift[0].Table != "audit_x" {
+		t.Fatalf("a write to a table only 'defined' inside a $$ body must drift; got %v", r.Drift)
+	}
+}
+
+// A '$' that CONTINUES an identifier (PostgreSQL allows '$' in identifiers, e.g.
+// a$b$c) must not be mis-read as a dollar-quote opener — which would scan for a
+// closing "$b$", not find one, and swallow the rest of the file (masking drift on
+// following DDL).
+func TestScanDDLDollarInIdentifierDoesNotSwallow(t *testing.T) {
+	ops := scanDDL(`CREATE TABLE a$b$c (id int); CREATE TABLE keep (id int);`)
+	if got := ddlNames(ops, true); !eqSet(got, []string{"a$b$c", "keep"}) {
+		t.Errorf("creates = %v, want [a$b$c keep] ('$' in an identifier must not open a dollar quote)", got)
+	}
+}
+
+// A dollar sign (or quote/comment metachar) INSIDE a double-quoted identifier must
+// not be interpreted, or it swallows the closing quote and the following real DDL.
+func TestScanDDLSpecialsInQuotedIdentifier(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want []string
+	}{
+		{`CREATE TABLE "a$$b" (id int); CREATE TABLE keep (id int);`, []string{"a$$b", "keep"}},
+		{`CREATE TABLE "o'brien" (id int); CREATE TABLE keep (id int);`, []string{"keep", "o'brien"}},
+		{`CREATE TABLE "c--x" (id int); CREATE TABLE keep (id int);`, []string{"c--x", "keep"}},
+	}
+	for _, c := range cases {
+		if got := ddlNames(scanDDL(c.sql), true); !eqSet(got, c.want) {
+			t.Errorf("scanDDL(%q) creates = %v, want %v (a metachar in a quoted identifier must not swallow following DDL)", c.sql, got, c.want)
+		}
+	}
+}
+
 // A RENAME inside a comment must not raise a spurious caveat (renameCaveat scans
 // stripped SQL).
 func TestRenameCaveatIgnoresComments(t *testing.T) {

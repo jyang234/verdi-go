@@ -311,21 +311,36 @@ func (a Artifact) Render() string {
 	return b.String()
 }
 
-// renderStandingCautions renders the absolute standing-caution section, or ""
-// when there are none. It is the shared form for the review artifact and the
-// pre-flight gate so the two surfaces word the disclosure identically. Standing
-// cautions are non-blocking; the framing says so, so a reviewer never reads this
-// as a failure reason.
-func renderStandingCautions(cs []Violation) string {
+// renderCautions renders a non-blocking caution section under the given headline
+// (which must already state the count context and "(non-blocking)"), or "" when
+// there are none. ONE form for both the standing and the new-caution sections so
+// the two surfaces word the disclosure identically and cannot drift.
+func renderCautions(cs []Violation, headline string) string {
 	if len(cs) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "⚠️  %d standing caution(s) — unchanged by this MR, still unproven (non-blocking)\n", len(cs))
+	fmt.Fprintf(&b, "%s\n", headline)
 	for _, c := range cs {
 		fmt.Fprintf(&b, "- %s — %s\n", c.Rule, c.Summary)
 	}
 	return b.String()
+}
+
+// renderStandingCautions renders the standing-caution section (unchanged by this
+// MR, still unproven) — the shared form for the review artifact and the pre-flight
+// gate. Non-blocking; the framing says so, so a reviewer never reads it as a
+// failure reason.
+func renderStandingCautions(cs []Violation) string {
+	return renderCautions(cs, fmt.Sprintf("⚠️  %d standing caution(s) — unchanged by this MR, still unproven (non-blocking)", len(cs)))
+}
+
+// renderNewCautions discloses the cautions the branch INTRODUCES that the base did
+// not — a newly-unenforceable budget, a fresh blind-frontier reach. Non-blocking,
+// but surfaced on both PASS and BLOCK so the diff that created them is never a
+// silent green (H-7). "" when there are none.
+func renderNewCautions(cs []Violation) string {
+	return renderCautions(cs, fmt.Sprintf("⚠️  %d new caution(s) — introduced by this MR, unproven on the branch (non-blocking)", len(cs)))
 }
 
 // String renders a package's node delta, e.g. "handler(+1)" or "store(+2,-1)".

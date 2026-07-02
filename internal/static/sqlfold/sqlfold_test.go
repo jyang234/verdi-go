@@ -182,6 +182,31 @@ func TestFoldAbstainsOnNonConstantTableField(t *testing.T) {
 	}
 }
 
+// TestFoldAbstainsOnFmtSpliceInBuilderMethod pins H-11: an accumulator method
+// that mixes a visible WriteString with an invisible fmt.Fprintf(&w.sb, …) splice
+// leaves a hole the template scanner cannot see. The fold must NOT fold the
+// enclosing SELECT to a complete constant read — that would classify a
+// runtime-spliced statement as wholly constant, the SQL-injection-smuggling case
+// the package doc says read-classification must prevent.
+func TestFoldAbstainsOnFmtSpliceInBuilderMethod(t *testing.T) {
+	s := foldFixture(t)["SelectViaFmtSplice"]
+	if s.ok {
+		t.Errorf("SelectViaFmtSplice: an invisible fmt.Fprintf splice must abstain, got %+v", s)
+	}
+}
+
+// TestFoldAbstainsOnDeferredFmtSplice pins the review fix: an accumulator method
+// that splices a runtime value via a DEFERRED fmt.Fprintf(&w.sb, …) (an *ssa.Defer,
+// not an *ssa.Call) must still fail closed. Before the fix the instruction loop
+// only inspected *ssa.Call, so the deferred write bypassed callMayMutateReceiver
+// and the enclosing SELECT folded to a false constant read.
+func TestFoldAbstainsOnDeferredFmtSplice(t *testing.T) {
+	s := foldFixture(t)["SelectViaDeferredSplice"]
+	if s.ok {
+		t.Errorf("SelectViaDeferredSplice: a deferred fmt.Fprintf splice must abstain, got %+v", s)
+	}
+}
+
 func TestFoldAbstainsWhenVerbIsDynamic(t *testing.T) {
 	// The verb itself is a runtime value: nothing is recoverable, so the fold must
 	// abstain (fail closed) rather than guess.

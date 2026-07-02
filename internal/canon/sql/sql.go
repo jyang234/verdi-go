@@ -42,6 +42,8 @@ func Normalize(raw string) Normalized {
 // tokenize splits raw SQL into tokens, replacing every literal and driver
 // placeholder with the single placeholder token "?". Keywords are upper-cased;
 // other identifiers keep their (lower-cased) form so table names stay stable.
+// Comments (-- …, /* … */) are dropped entirely, and quoted identifiers
+// ("T", `t`) are unwrapped and lower-cased so they key like the bare form.
 func tokenize(raw string) []string {
 	var toks []string
 	i := 0
@@ -51,13 +53,43 @@ func tokenize(raw string) []string {
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
-		case c == '\'' || c == '"':
-			// String literal: scan to the matching quote, honoring '' escapes.
-			q := c
+		case c == '-' && i+1 < n && raw[i+1] == '-':
+			// Line comment (-- …): drop to end of line (or input). Comment payloads
+			// carry per-request volatile data (sqlcommenter key=value pairs) and
+			// identifier-shaped fragments — neither may reach the canonical form
+			// (golden churn + a hidden disclosure channel; M-24).
+			i += 2
+			for i < n && raw[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && raw[i+1] == '*':
+			// Block comment (/* … */): drop to the closing delimiter, or to input
+			// end if unterminated (conservative — an unterminated comment eats the
+			// rest, never leaks it). Same rationale as the line comment (M-24).
+			i += 2
+			for i < n {
+				if raw[i] == '*' && i+1 < n && raw[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+		case c == '\'':
+			// String literal: scan to the matching quote, honoring '' doubling AND
+			// backslash escapes (\' \\ …, MySQL/MariaDB default). A backslash consumes
+			// the next byte so an escaped quote does not terminate the literal early
+			// and spill its remainder out as identifier tokens — the redaction promise
+			// is that NO byte from inside a quoted literal survives into the canonical
+			// statement (H-1). Over-consuming (treating \ as an escape even under
+			// NO_BACKSLASH_ESCAPES) only ever widens the "?", never narrows it.
 			i++
 			for i < n {
-				if raw[i] == q {
-					if i+1 < n && raw[i+1] == q {
+				if raw[i] == '\\' {
+					i += 2
+					continue
+				}
+				if raw[i] == '\'' {
+					if i+1 < n && raw[i+1] == '\'' {
 						i += 2
 						continue
 					}
@@ -67,8 +99,55 @@ func tokenize(raw string) []string {
 				i++
 			}
 			toks = append(toks, "?")
-		case c == '$' || c == ':' || c == '@':
-			// Driver placeholder ($1, :name, @p1): consume the run.
+		case c == '"' || c == '`':
+			// Quoted identifier ("Applicants", `orders`): unwrap and lower-case so it
+			// keys identically to the same identifier written bare and Table extraction
+			// still finds it (M-24, M-25). A doubled delimiter ("" or ``) is an escaped
+			// delimiter inside the identifier. Note: unlike a '-literal, an identifier's
+			// bytes DO survive (lower-cased) — a table/column name is structure, not the
+			// volatile value the redaction promise covers.
+			q := c
+			i++
+			var ident strings.Builder
+			for i < n {
+				if raw[i] == q {
+					if i+1 < n && raw[i+1] == q {
+						ident.WriteByte(q)
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				ident.WriteByte(raw[i])
+				i++
+			}
+			toks = append(toks, strings.ToLower(ident.String()))
+		case c == '$':
+			// PostgreSQL dollar-quoted string literal ($tag$ … $tag$): consume the
+			// whole body so NO byte inside it survives into the canonical statement,
+			// the same redaction promise this file makes for '-literals (H-1). A bare
+			// $N bind placeholder ($1) is NOT a dollar quote and falls through to the
+			// placeholder run below. (schemadrift.stripSQL strips the same construct;
+			// keep the two in step.)
+			if d := dollarQuoteDelim(raw, i); d > 0 {
+				delim := raw[i : i+d]
+				if k := strings.Index(raw[i+d:], delim); k >= 0 {
+					i += d + k + d // consume body AND the closing delimiter
+				} else {
+					i = n // unterminated body: consume the rest, never leak it
+				}
+				toks = append(toks, "?")
+				continue
+			}
+			// Driver placeholder ($1): consume the run.
+			i++
+			for i < n && (isIdent(raw[i]) || isDigit(raw[i])) {
+				i++
+			}
+			toks = append(toks, "?")
+		case c == ':' || c == '@':
+			// Driver placeholder (:name, @p1): consume the run.
 			i++
 			for i < n && (isIdent(raw[i]) || isDigit(raw[i])) {
 				i++
@@ -186,6 +265,34 @@ func identAfter(toks []string, after map[string]bool) string {
 		}
 	}
 	return ""
+}
+
+// dollarQuoteDelim returns the byte length of a PostgreSQL dollar-quote opening
+// delimiter beginning at raw[i] ("$$" → 2, "$body$" → 6), or 0 if raw[i] does not
+// open one. The tag between the two '$' follows the unquoted-identifier rule
+// (letters, digits, underscores; never starting with a digit) and may be empty,
+// so a "$1" bind placeholder — a digit right after the first '$' — is correctly
+// NOT a delimiter. Parallels schemadrift.dollarQuoteDelim (same grammar).
+func dollarQuoteDelim(raw string, i int) int {
+	if i >= len(raw) || raw[i] != '$' {
+		return 0
+	}
+	for j := i + 1; j < len(raw); j++ {
+		c := raw[j]
+		switch {
+		case c == '$':
+			return j - i + 1
+		case isIdent(c):
+			// tag byte (isIdent covers letters and '_')
+		case isDigit(c):
+			if j == i+1 {
+				return 0 // a tag cannot start with a digit ($1 is a placeholder)
+			}
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
