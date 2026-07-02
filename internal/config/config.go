@@ -513,6 +513,9 @@ func Load(b []byte) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if c.Version < 0 {
+		return fmt.Errorf("flowmap config: version %d must be >= 0", c.Version)
+	}
 	if c.Static.HighFanOutThreshold < 0 {
 		return fmt.Errorf("flowmap config: static.highFanOutThreshold %d must be >= 0", c.Static.HighFanOutThreshold)
 	}
@@ -525,6 +528,12 @@ func (c *Config) validate() error {
 		}
 	}
 	for i, p := range c.Pins {
+		if strings.TrimSpace(p.Identity) == "" {
+			// A pin with no identity glob matches nothing — a silently-disabled pin
+			// (the author meant to force a tier for SOME symbol). Fail closed rather
+			// than let it read as configured.
+			return fmt.Errorf("flowmap config: pins[%d]: identity is required (an empty identity pins nothing)", i)
+		}
 		if p.Tier < 1 || p.Tier > 4 {
 			return fmt.Errorf("flowmap config: pins[%d].tier %d out of range 1..4", i, p.Tier)
 		}

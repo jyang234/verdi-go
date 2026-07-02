@@ -106,6 +106,21 @@ func TestLoadRejectsBadTier(t *testing.T) {
 
 // A ratified seam (§8) must carry both a site to blind and a reason (the
 // impeachment witness). Either missing is undisclosed drift, refused at load.
+// TestLoadRejectsSilentlyDisabledConfig pins the fail-closed guards for two
+// silently-inert config shapes: a pin with no identity glob (matches nothing) and a
+// negative schema version.
+func TestLoadRejectsSilentlyDisabledConfig(t *testing.T) {
+	if _, err := Load([]byte("pins:\n  - identity: \"\"\n    tier: 1\n")); err == nil {
+		t.Error("expected error on a pin with an empty identity")
+	}
+	if _, err := Load([]byte("version: -1\n")); err == nil {
+		t.Error("expected error on a negative version")
+	}
+	if _, err := Load([]byte("pins:\n  - identity: \"pkg.Sym\"\n    tier: 1\n")); err != nil {
+		t.Errorf("a pin with a real identity must load: %v", err)
+	}
+}
+
 // TestLoadRejectsEmptyBoundaryPrefix pins the parallel non-empty guard on both
 // external-boundary prefix lists: an empty prefix matches no package (a dead entry),
 // so it is a silent typo that must fail closed at load, not read as configured.

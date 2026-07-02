@@ -430,7 +430,12 @@ func (a *App) collect() []capture.Span {
 
 func (a *App) newRunID() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	// A zero run id from a silent rand failure would cross-contaminate scoping (every
+	// span filtered by test.run.id would collide), so fail loud rather than mint a
+	// degenerate id. crypto/rand.Read never partially fills — an error means no bytes.
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("harness: crypto/rand failed generating a run id: " + err.Error())
+	}
 	const hex = "0123456789abcdef"
 	var sb [16]byte
 	for i, x := range b {
@@ -445,8 +450,15 @@ func (a *App) newRunID() string {
 func (a *App) injectedContext(runID string) context.Context {
 	var tid oteltrace.TraceID
 	var sid oteltrace.SpanID
-	_, _ = rand.Read(tid[:])
-	_, _ = rand.Read(sid[:])
+	// A zero trace/span id would make the injected span context invalid (dropped by
+	// the SDK) and break correlation, so fail loud on a rand failure rather than
+	// inject a degenerate context.
+	if _, err := rand.Read(tid[:]); err != nil {
+		panic("harness: crypto/rand failed generating a trace id: " + err.Error())
+	}
+	if _, err := rand.Read(sid[:]); err != nil {
+		panic("harness: crypto/rand failed generating a span id: " + err.Error())
+	}
 	sc := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
 		TraceID:    tid,
 		SpanID:     sid,

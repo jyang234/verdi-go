@@ -249,9 +249,12 @@ type BusEffect struct {
 }
 
 // BusEffects decodes the graph's bus boundary surface: every statically-named
-// publish/consume effect, plus the count of dynamically-named bus effects —
-// the events this surface cannot name, which any consumer must disclose
-// rather than ignore. Unrecognized label shapes are skipped, not guessed.
+// publish/consume effect, plus the count of bus effects this surface cannot name —
+// the events any consumer must disclose rather than ignore. That count includes
+// both dynamically-named effects (IsDynamic) and malformed labels (an op with no
+// event, e.g. "boundary:bus PUBLISH"): the latter are TALLIED, not silently
+// dropped, matching DBEffects' unreadable count (a dropped malformed label reads as
+// "no unnamed bus effects here", a false completeness claim). Never guessed.
 func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
 	prefix := boundaryPrefix + "bus "
 	for _, e := range ix.g.Edges {
@@ -264,6 +267,9 @@ func (ix *Index) BusEffects() (effects []BusEffect, dynamic int) {
 		}
 		fields := strings.Fields(strings.TrimPrefix(e.To, prefix))
 		if len(fields) < 2 {
+			// "<op>" alone — a bus effect whose event the labeler could not name.
+			// Count it (disclose), never fabricate an event.
+			dynamic++
 			continue
 		}
 		effects = append(effects, BusEffect{Op: fields[0], Event: fields[1], From: e.From, Label: e.To})
