@@ -492,6 +492,22 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController — and the
+// std-lib paths behind it — can reach the underlying http.Flusher / http.Hijacker /
+// io.ReaderFrom that this shallow wrapper would otherwise mask (M-32). Without it a
+// streaming/SSE or hijacking handler silently takes a different code path under the
+// harness than in production, so the harness would not exercise the real behavior.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// Flush forwards to the underlying writer when it is an http.Flusher, so a handler
+// that flushes mid-response (SSE, chunked streaming) is not silently buffered by the
+// wrapper — a direct passthrough for the common case, complementing Unwrap.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // fromOTel maps one finished OTel span into the internal model.
 func fromOTel(s sdktrace.ReadOnlySpan) capture.Span {
 	attrs := map[string]string{}
@@ -504,6 +520,7 @@ func fromOTel(s sdktrace.ReadOnlySpan) capture.Span {
 		attrs[string(kv.Key)] = kv.Value.Emit()
 	}
 	cs := capture.Span{
+		TraceID:   s.SpanContext().TraceID().String(),
 		ID:        s.SpanContext().SpanID().String(),
 		ParentID:  s.Parent().SpanID().String(),
 		Name:      s.Name(),
@@ -512,6 +529,7 @@ func fromOTel(s sdktrace.ReadOnlySpan) capture.Span {
 		Start:     s.StartTime(),
 		End:       s.EndTime(),
 		Goroutine: goroutine,
+		Links:     linksOf(s.Links()),
 	}
 	switch s.Status().Code {
 	case codes.Ok:
@@ -527,6 +545,28 @@ func fromOTel(s sdktrace.ReadOnlySpan) capture.Span {
 		cs.Status = capture.StatusUnset
 	}
 	return cs
+}
+
+// linksOf maps a span's OTel links (references to causally-related spans, possibly
+// in other traces) into the internal model. A cross-trace FOLLOWS_FROM link is the
+// broker-handoff continuation signal ingest.stitch recovers post-hoc; without it an
+// in-process SUT emulating a broker (new root + link) would silently lose the
+// continuation and contradict the Span.Links doc claim (M-31). Only the link's
+// (TraceID, SpanID) identity is carried — the async-membership signal — not its
+// attributes.
+func linksOf(links []sdktrace.Link) []capture.SpanLink {
+	if len(links) == 0 {
+		return nil
+	}
+	out := make([]capture.SpanLink, 0, len(links))
+	for _, l := range links {
+		sc := l.SpanContext
+		out = append(out, capture.SpanLink{
+			TraceID: sc.TraceID().String(),
+			SpanID:  sc.SpanID().String(),
+		})
+	}
+	return out
 }
 
 func kindOf(k oteltrace.SpanKind) ir.Kind {

@@ -262,6 +262,30 @@ func TestMCPTranscriptLog(t *testing.T) {
 	}
 }
 
+// TestMaxLoggedSessionContinuesAcrossRestart pins M-34: a server restart appending
+// to an existing transcript must NOT reissue session ids the prior run used, or two
+// runs' sessions merge in the E4 evidence. maxLoggedSession reads the prior high
+// water mark; newSession continues past it.
+func TestMaxLoggedSessionContinuesAcrossRestart(t *testing.T) {
+	// A fresh/empty log starts numbering at 1 (unchanged behavior).
+	if got := maxLoggedSession(nil); got != 0 {
+		t.Fatalf("maxLoggedSession(empty) = %d, want 0", got)
+	}
+	prior := []byte(`{"init":true,"session":"1"}` + "\n" +
+		`{"call":{"name":"ground","arguments":{}},"service":"oblig","session":"2"}` + "\n" +
+		`{"init":true,"session":"3"}` + "\n")
+	if got := maxLoggedSession(prior); got != 3 {
+		t.Fatalf("maxLoggedSession(prior) = %d, want 3", got)
+	}
+
+	// A restarted fleet seeded with that high-water mark issues 4, not a colliding 1.
+	fleet := newMCPFleet(map[string]*mcpServer{})
+	fleet.sessionN = maxLoggedSession(prior)
+	if sid := fleet.newSession(); sid != "4" {
+		t.Errorf("first session after restart = %q, want \"4\" (no collision with prior run)", sid)
+	}
+}
+
 // Service names label transcript lines, listings, and error texts, so the
 // charset is tight: the transcript's sentinels ("*") and list separators
 // must be unreachable by configuration.
