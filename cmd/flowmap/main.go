@@ -1361,8 +1361,6 @@ func parsePermuted(fs *flag.FlagSet, args []string) (string, error) {
 	}
 }
 
-// dirArg returns the first positional argument, defaulting to the current
-// directory.
 // dirArg returns the positional directory argument (defaulting to "."). It errors
 // if a flag was placed AFTER the directory: Go's flag package stops parsing at the
 // first non-flag token, so `flowmap <cmd> <dir> --x` would otherwise silently drop

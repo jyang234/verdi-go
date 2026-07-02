@@ -676,12 +676,12 @@ func (c *canonicalizer) discards() ir.DiscardManifest {
 	}
 }
 
-// signature renders a span subtree to its canonical bytes for equality testing
-// (loop detection). It excludes nothing volatile because the tree is already
-// normalized at this point.
-// signature is the canonical subtree key used to order same-op concurrent and
-// unordered siblings run-independently (bySig) and to fold identical adjacent
-// groups into loops. canonjson.Marshal is deterministic and only fails on a value
+// signature renders a span subtree to its canonical bytes: the subtree key used to
+// order same-op concurrent and unordered siblings run-independently (bySig) and to
+// fold identical adjacent groups into loops. It excludes nothing volatile because
+// the tree is already normalized at this point.
+//
+// canonjson.Marshal is deterministic and only fails on a value
 // it cannot represent (a channel/func/complex field); a CanonicalSpan never
 // carries one, so a failure here means the IR is corrupt. Fail closed by panicking
 // rather than returning "": a swallowed error would collapse EVERY signature to the

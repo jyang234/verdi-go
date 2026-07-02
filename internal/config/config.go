@@ -597,12 +597,20 @@ func (c *Config) validate() error {
 			return fmt.Errorf("flowmap config: static.declaredBlindSpots[%d] (%s): reason is required (the impeachment witness)", i, b.Site)
 		}
 	}
-	// An empty exempt prefix would match every package — silently suppressing the
-	// whole ExternalBoundaryCall disclosure. Fail closed at load rather than blind
-	// the surface by typo.
+	// An empty exempt/trivial prefix is a dead entry: prefixExempt requires a
+	// segment-boundary match, so "" matches NO package (it never equals a non-empty
+	// path, has no trailing slash, and no path starts with "/"). An author who wrote
+	// one meant to exempt/tag SOMETHING, so it is a silent typo that quietly does
+	// nothing — fail closed at load rather than let it read as configured. Both
+	// prefix lists share prefixExempt, so both get the same guard.
 	for i, p := range c.Static.ExternalBoundaryExempt {
 		if strings.TrimSpace(p) == "" {
-			return fmt.Errorf("flowmap config: static.externalBoundaryExempt[%d] is empty; an empty prefix would suppress every external boundary", i)
+			return fmt.Errorf("flowmap config: static.externalBoundaryExempt[%d] is empty; an empty prefix matches nothing (a dead entry — likely a typo)", i)
+		}
+	}
+	for i, p := range c.Static.ExternalBoundaryTrivial {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("flowmap config: static.externalBoundaryTrivial[%d] is empty; an empty prefix matches nothing (a dead entry — likely a typo)", i)
 		}
 	}
 	// An annotation must name the site it decorates and carry a note (the context).

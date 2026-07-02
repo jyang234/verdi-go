@@ -479,8 +479,10 @@ func (g *Graph) SQLFoldCaveat() string {
 // out — the field footgun where a vta-proposed policy swept with the rta default
 // produced spurious must_not_reach violations. Naming the mismatch lets a reader
 // treat such a finding as an analyzer artifact rather than a regression. Shared by
-// fitness (as a Caution) and the review gate (as a substrate caveat) so the two
-// surfaces word it identically — the Algo/Caveats provenance discipline (R3).
+// fitness (as a substrate-line caveat via cmdFitness — NOT a Check Finding, which
+// would leak into review's base-vs-branch diff; see TestCheckEmitsNoSubstrateFinding)
+// and the review gate (as a substrate caveat) so the two surfaces word it
+// identically — the Algo/Caveats provenance discipline (R3).
 func SubstrateMismatchCaveat(policyAlgo, graphAlgo string) string {
 	if policyAlgo == "" || graphAlgo == "" || policyAlgo == graphAlgo {
 		return ""
