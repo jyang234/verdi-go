@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/sqlverb"
@@ -553,7 +554,10 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 
 	scope := firstPartyScope(res)
 	if entry != "" {
-		root := rootByName(res, entry)
+		root, err := resolveEntryRoot(res, entry)
+		if err != nil {
+			return nil, err
+		}
 		if root == nil {
 			return nil, &EntryNotFoundError{Entry: entry}
 		}
@@ -1093,6 +1097,20 @@ type EntryNotFoundError struct{ Entry string }
 
 func (e *EntryNotFoundError) Error() string { return "no entry point named " + e.Entry }
 
+// EntryAmbiguousError reports that a --entry name matched more than one DISTINCT
+// root handler. The build refuses rather than root the scope at whichever was
+// registered first: a wrong-but-plausible scope is exactly the silent-wrong
+// outcome the toolchain must not produce (CLAUDE.md: fail closed). Fns are the
+// distinct matching handler FQNs, sorted.
+type EntryAmbiguousError struct {
+	Entry string
+	Fns   []string
+}
+
+func (e *EntryAmbiguousError) Error() string {
+	return fmt.Sprintf("entry %q is ambiguous: it names %d distinct handlers (%s); disambiguate with an exact function FQN", e.Entry, len(e.Fns), strings.Join(e.Fns, ", "))
+}
+
 // spliceDepthCap bounds edgeOf's recursion through chained $bound/$thunk wrappers.
 // Real wrapper chains are at most ~2 deep; the cap only exists so a pathological
 // cycle fails closed (drops the edge) instead of recurring forever.
@@ -1147,9 +1165,9 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		}
 		return nil
 	case hints.IsPublish(callee):
-		return busEdges(from, "boundary:bus PUBLISH ", e.Site, foldBus, tier, string(f.Boundary), concurrent)
+		return busEdges(from, busPublishPrefix, e.Site, foldBus, tier, string(f.Boundary), concurrent)
 	case hints.IsConsume(callee):
-		return busEdges(from, "boundary:bus CONSUME ", e.Site, foldBus, tier, string(f.Boundary), concurrent)
+		return busEdges(from, busConsumePrefix, e.Site, foldBus, tier, string(f.Boundary), concurrent)
 	case hints.IsHTTP(callee):
 		return []Edge{{From: from, To: "boundary:" + httpLabel(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
 	case hints.IsDB(callee):
@@ -1166,7 +1184,7 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		labels, via := dbLabel(e.Site, foldSQL)
 		edges := make([]Edge, 0, len(labels))
 		for _, label := range labels {
-			edges = append(edges, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent, Via: via})
+			edges = append(edges, Edge{From: from, To: boundarylabel.DBPrefix + label, Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent, Via: via})
 		}
 		return edges
 	case methodNamedOutboundKind(hints, callee) != "":
@@ -1286,7 +1304,7 @@ func passthroughReattribute(ext *features.Extractor, e *cg.Edge, tier int, bound
 			return
 		}
 		seen[key] = len(out)
-		out = append(out, Edge{From: from, To: "boundary:db " + label, Tier: tier, Boundary: boundary, Concurrent: conc, Via: viaPassthrough})
+		out = append(out, Edge{From: from, To: boundarylabel.DBPrefix + label, Tier: tier, Boundary: boundary, Concurrent: conc, Via: viaPassthrough})
 	}
 	keepHelper := false
 	for _, site := range sites {
@@ -1336,15 +1354,15 @@ func passthroughReattribute(ext *features.Extractor, e *cg.Edge, tier int, bound
 // effect for partial-effect purposes: a bus publish or a DB mutation. Reads
 // and outbound queries are not "committed" — re-running them is safe.
 func committedEffect(label string) bool {
-	if event, ok := strings.CutPrefix(label, "boundary:bus PUBLISH "); ok {
+	if event, ok := strings.CutPrefix(label, busPublishPrefix); ok {
 		// A dynamic (non-constant) event name is NOT a concretely-named committed
 		// effect — symmetric to the unreadable-SQL DB op below, it is disclosed
 		// via the dynamic/blind-spot channel rather than asserted as a definite
 		// publish of a known event.
 		return event != dynamicLabel
 	}
-	if strings.HasPrefix(label, "boundary:db ") {
-		op := strings.Fields(strings.TrimPrefix(label, "boundary:db "))
+	if strings.HasPrefix(label, boundarylabel.DBPrefix) {
+		op := strings.Fields(strings.TrimPrefix(label, boundarylabel.DBPrefix))
 		return len(op) > 0 && mutatingSQLOp(op[0])
 	}
 	return false
