@@ -5,6 +5,13 @@
 # `lint` warns loudly when the locally-installed version drifts from this pin.
 GOLANGCI_LINT_VERSION ?= v2.5.0
 
+# The fixture modules (loansvc, impeachsvc) are separate go modules gated by
+# `make fixture`; their trees are excluded from the repo-root gofmt gate so each
+# fixture has ONE owner. Defined once here and referenced only by `fmt-check`
+# (which `verify` now calls instead of re-inlining the check) so the predicate
+# cannot drift into two copies — CLAUDE.md one-source-of-truth (R-6).
+GOFMT_EXCLUDE = ^testdata/fixtures/(loansvc|impeachsvc)/
+
 build:
 	go build ./...
 
@@ -24,7 +31,7 @@ fmt:
 # a formatting slip fails locally instead of costing a CI round-trip. `make verify`
 # runs the same check, but only after build+vet+lint+test; this is the quick one.
 fmt-check:
-	@out=$$(gofmt -l . | grep -v '^testdata/fixtures/loansvc/' || true); \
+	@out=$$(gofmt -l . | grep -vE '$(GOFMT_EXCLUDE)' || true); \
 	if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 	@echo "gofmt OK"
 
@@ -44,10 +51,10 @@ fixture:
 	cd testdata/fixtures/loansvc && go build ./... && go test -race ./...
 	cd testdata/fixtures/impeachsvc && go build ./... && go test -race ./...
 
-# verify is the per-phase gate: it must stay green at the end of every phase.
-verify: build vet lint test fixture
-	@out=$$(gofmt -l . | grep -v '^testdata/fixtures/loansvc/' || true); \
-	if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+# verify is the per-phase gate: it must stay green at the end of every phase. It
+# reuses the fmt-check target (rather than re-inlining the gofmt gate) so the
+# exclusion predicate has exactly one home (R-6).
+verify: build vet lint test fixture fmt-check
 	@echo "verify OK"
 
 tidy:

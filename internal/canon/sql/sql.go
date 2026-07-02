@@ -63,14 +63,24 @@ func tokenize(raw string) []string {
 				i++
 			}
 		case c == '/' && i+1 < n && raw[i+1] == '*':
-			// Block comment (/* … */): drop to the closing delimiter, or to input
-			// end if unterminated (conservative — an unterminated comment eats the
-			// rest, never leaks it). Same rationale as the line comment (M-24).
+			// Block comment (/* … */): PostgreSQL NESTS block comments, so track the
+			// nesting depth and drop to the matching close (or to input end if
+			// unterminated — conservative, an unterminated comment eats the rest,
+			// never leaks it). A depth-blind scan would stop at the FIRST */ and spill
+			// the outer comment's tail (`/* a /* b */ secret */` → `secret …`) into the
+			// canonical statement — the exact disclosure channel M-24 closes.
 			i += 2
-			for i < n {
-				if raw[i] == '*' && i+1 < n && raw[i+1] == '/' {
+			depth := 1
+			for i < n && depth > 0 {
+				if raw[i] == '/' && i+1 < n && raw[i+1] == '*' {
+					depth++
 					i += 2
-					break
+					continue
+				}
+				if raw[i] == '*' && i+1 < n && raw[i+1] == '/' {
+					depth--
+					i += 2
+					continue
 				}
 				i++
 			}
@@ -122,23 +132,30 @@ func tokenize(raw string) []string {
 				ident.WriteByte(raw[i])
 				i++
 			}
-			toks = append(toks, strings.ToLower(ident.String()))
+			toks = append(toks, emitIdent(ident.String()))
 		case c == '$':
 			// PostgreSQL dollar-quoted string literal ($tag$ … $tag$): consume the
 			// whole body so NO byte inside it survives into the canonical statement,
 			// the same redaction promise this file makes for '-literals (H-1). A bare
 			// $N bind placeholder ($1) is NOT a dollar quote and falls through to the
-			// placeholder run below. (schemadrift.stripSQL strips the same construct;
-			// keep the two in step.)
-			if d := dollarQuoteDelim(raw, i); d > 0 {
-				delim := raw[i : i+d]
-				if k := strings.Index(raw[i+d:], delim); k >= 0 {
-					i += d + k + d // consume body AND the closing delimiter
-				} else {
-					i = n // unterminated body: consume the rest, never leak it
+			// placeholder run below. A '$' that CONTINUES an identifier (previous byte
+			// is an identifier byte — PostgreSQL allows '$' inside identifiers, e.g.
+			// a$b$c) is likewise not an opener: treating it as one reads a legal
+			// identifier's tail as a dollar body and swallows following clauses (Table
+			// drifts to ""), so only attempt the scan at a token boundary. This guard is
+			// the parity partner of schemadrift.stripSQL's isIdentByte(s[i-1]) check;
+			// the two must stay in step.
+			if i == 0 || !isIdentByte(raw[i-1]) {
+				if d := dollarQuoteDelim(raw, i); d > 0 {
+					delim := raw[i : i+d]
+					if k := strings.Index(raw[i+d:], delim); k >= 0 {
+						i += d + k + d // consume body AND the closing delimiter
+					} else {
+						i = n // unterminated body: consume the rest, never leak it
+					}
+					toks = append(toks, "?")
+					continue
 				}
-				toks = append(toks, "?")
-				continue
 			}
 			// Driver placeholder ($1): consume the run.
 			i++
@@ -298,4 +315,58 @@ func dollarQuoteDelim(raw string, i int) int {
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 func isIdent(c byte) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// isIdentByte reports whether c can appear *inside* an identifier. Unlike isIdent
+// it also admits digits and '$' (PostgreSQL allows '$' inside identifiers, never
+// as the first character), so a '$' following one of these is an identifier
+// continuation, not a dollar-quote opener. Kept byte-for-byte in step with
+// schemadrift.isIdentByte (the dollar-quote token-boundary guard on both sides).
+func isIdentByte(c byte) bool {
+	return c == '$' || isIdent(c) || isDigit(c)
+}
+
+// emitIdent turns an unwrapped quoted-identifier's bytes into a token that
+// re-normalizes to ITSELF — the fixed-point property FuzzNormalizeIdempotent
+// enforces and the canonical key depends on. When the lower-cased bytes form a
+// plain identifier that is not a keyword, we emit them bare so a quoted name keys
+// identically to the same name written unquoted (M-24/M-25). Otherwise a bare
+// emit would re-tokenize DIFFERENTLY on the next pass — digits-leading bytes
+// become a number "?", an embedded ' opens a literal, an embedded -- or /* opens
+// a comment that eats the tail, a keyword-spelled name re-upper-cases — which
+// both breaks idempotence AND re-opens the M-24 leak class (the quoted body
+// spills out reinterpreted). Re-quoting (doubling any embedded quote) always
+// round-trips: the second pass unwraps it right back to these same bytes.
+func emitIdent(raw string) string {
+	low := strings.ToLower(raw)
+	if isBareIdent(low) {
+		return low
+	}
+	var b strings.Builder
+	b.Grow(len(low) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(low); i++ {
+		if low[i] == '"' {
+			b.WriteByte('"') // double an embedded quote so the re-quoted form re-parses
+		}
+		b.WriteByte(low[i])
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// isBareIdent reports whether s (already lower-cased) can be emitted as an
+// unquoted identifier token that re-tokenizes to the identical single token: it
+// must be non-empty, start with an identifier byte (not a digit), contain only
+// identifier/digit bytes, and not be a keyword (which would re-upper-case).
+func isBareIdent(s string) bool {
+	if s == "" || !isIdent(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if !isIdent(s[i]) && !isDigit(s[i]) {
+			return false
+		}
+	}
+	return !keywords[s]
 }

@@ -215,6 +215,57 @@ func TestNormalizeStripsDollarQuotedLiteral(t *testing.T) {
 	}
 }
 
+// TestNormalizeQuotedIdentifierIdempotent pins R-2: an unwrapped quoted
+// identifier whose bytes are not a plain non-keyword identifier must NOT be
+// emitted bare (it would re-tokenize differently on a second pass and could spill
+// its bytes back out as a literal/comment). Re-quoting makes the canonical form a
+// fixed point of its own normalizer.
+func TestNormalizeQuotedIdentifierIdempotent(t *testing.T) {
+	cases := []string{
+		`SELECT "0000000000000000" FROM t`, // digit-only ident: bare emit would become "?"
+		`SELECT * FROM "from"`,             // keyword-spelled ident: bare emit re-upper-cases
+		`SELECT "a'b" FROM t`,              // embedded ' would open a literal on re-parse
+		`SELECT "a--b" FROM t`,             // embedded -- would open a comment on re-parse
+		`SELECT "a/*b" FROM t`,             // embedded /* would open a block comment
+		"SELECT `back``tick` FROM t",       // embedded (doubled) delimiter
+	}
+	for _, raw := range cases {
+		once := Normalize(raw).Statement
+		twice := Normalize(once).Statement
+		if once != twice {
+			t.Errorf("Normalize(%q) not idempotent:\n once: %q\n twice: %q", raw, once, twice)
+		}
+	}
+}
+
+// TestNormalizeNestedBlockComment pins R-2: PostgreSQL nests /* */, so a
+// depth-blind scan would stop at the first */ and spill the outer comment's tail
+// (which may carry volatile/PII payloads) into the canonical statement.
+func TestNormalizeNestedBlockComment(t *testing.T) {
+	got := Normalize("SELECT 1 /* outer /* inner */ secret-payload-99 */ , 2 FROM t").Statement
+	const want = "SELECT ? , ? FROM t"
+	if got != want {
+		t.Errorf("nested block comment mishandled: got %q, want %q", got, want)
+	}
+	if strings.Contains(strings.ToLower(got), "secret") || strings.Contains(got, "payload") {
+		t.Errorf("nested-comment body leaked into canonical statement: %q", got)
+	}
+}
+
+// TestNormalizeDollarInIdentifier pins R-2: a '$' that continues an identifier
+// (prev byte is an identifier byte) is not a dollar-quote opener; the guard
+// parallels schemadrift.stripSQL's isIdentByte(s[i-1]). Without it, "a$b$c"
+// reads "$b$" as a dollar quote and swallows the FROM clause, dropping the table.
+func TestNormalizeDollarInIdentifier(t *testing.T) {
+	n := Normalize("SELECT a$b$c FROM t")
+	if n.Table != "t" {
+		t.Errorf("'$'-in-identifier swallowed the FROM clause: Table = %q, want %q", n.Table, "t")
+	}
+	if once, twice := n.Statement, Normalize(n.Statement).Statement; once != twice {
+		t.Errorf("'$'-in-identifier not idempotent: once %q, twice %q", once, twice)
+	}
+}
+
 func TestNormalizeDeterministic(t *testing.T) {
 	// Whitespace and placeholder-style variations of the same logical statement
 	// converge.
