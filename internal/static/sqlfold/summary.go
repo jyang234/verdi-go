@@ -79,6 +79,18 @@ func writerTemplate(fn *ssa.Function) ([]tfrag, bool) {
 			}
 			callee := call.Common().StaticCallee()
 			if callee == nil || !isStringsBuilderMethod(callee) {
+				// Not a modeled strings.Builder write. If the receiver — or a pointer
+				// into it, e.g. &w.sb — flows into this call, the callee may append to
+				// the buffer where the template cannot see it: fmt.Fprintf(&w.sb, "%s",
+				// userInput), a helper w.writeCol(...), or a dynamic dispatch on the
+				// receiver. Such a hole under a "complete constant SELECT" claim is a
+				// false READ that smuggles a runtime-spliced statement past read-
+				// classification — the exact case the package doc says must be
+				// prevented — so fail closed (H-11). A value load of a receiver field
+				// (strconv.Itoa(len(w.args))) cannot mutate the builder and is fine.
+				if callMayMutateReceiver(call, ssa.Value(recv)) {
+					return nil, false
+				}
 				continue
 			}
 			name := callee.Name()
@@ -115,6 +127,62 @@ func writerTemplate(fn *ssa.Function) ([]tfrag, bool) {
 		return nil, false
 	}
 	return tmpl, true
+}
+
+// callMayMutateReceiver reports whether the receiver — or a pointer derived from
+// it — is handed to call, so the (non-modeled) callee could append to the
+// builder invisibly. An interface-dispatched method ON the receiver counts (its
+// dynamic body is unseen). Among positional args only a POINTER rooting back to
+// the receiver counts: a callee can write through a pointer (&w.sb, or w itself)
+// but not through a loaded field value (len(w.args), w.n). This is the H-11
+// fail-closed guard: any un-modeled path to the buffer is a template hole, and a
+// hole under a completeness claim is a false read.
+func callMayMutateReceiver(call *ssa.Call, recv ssa.Value) bool {
+	cc := call.Common()
+	// touches reports whether v is a pointer rooting back to the receiver. It
+	// strips interface-boxing and conversions first: fmt.Fprintf(&w.sb, …) boxes
+	// &w.sb into an io.Writer (a MakeInterface), so the raw arg is an interface
+	// value whose root is not the receiver — the address of the buffer is one
+	// unwrap in. Only a pointer counts: a callee mutates the builder through a
+	// pointer (&w.sb, or w itself), never through a loaded field value.
+	touches := func(v ssa.Value) bool {
+		v = stripConversions(v)
+		if rootOf(v) != recv {
+			return false
+		}
+		_, isPtr := v.Type().Underlying().(*types.Pointer)
+		return isPtr
+	}
+	if cc.IsInvoke() && touches(cc.Value) {
+		return true
+	}
+	for _, a := range cc.Args {
+		if touches(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripConversions unwraps the identity-value wrappers SSA inserts around an
+// argument — interface boxing and type/interface conversions — back to the
+// underlying value, so a receiver pointer handed to a call is recognized through
+// the io.Writer box (MakeInterface) that fmt.Fprintf and friends require.
+func stripConversions(v ssa.Value) ssa.Value {
+	for {
+		switch x := v.(type) {
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		default:
+			return v
+		}
+	}
 }
 
 // classifyAppend maps a value appended via WriteString/Write to a template

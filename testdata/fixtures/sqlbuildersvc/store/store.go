@@ -18,6 +18,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -42,6 +43,18 @@ func (w *sqlWriter) Arg(v any) *sqlWriter {
 }
 
 func (w *sqlWriter) Build() (string, []any) { return w.sb.String(), w.args }
+
+// WriteFmt mixes a visible strings.Builder write with an INVISIBLE splice:
+// fmt.Fprintf appends a runtime value straight into the buffer via the io.Writer
+// interface, an append the template scanner does not model (H-11). A method with
+// a hole like this must make the fold FAIL CLOSED — reading the statement as
+// wholly constant would smuggle the runtime value (potentially "; DELETE …")
+// past read-classification, the exact case the package exists to prevent.
+func (w *sqlWriter) WriteFmt(format string, v any) *sqlWriter {
+	w.sb.WriteString(" ")
+	fmt.Fprintf(&w.sb, format, v)
+	return w
+}
 
 // messageColumns is a const column-list, so "SELECT " + messageColumns + " FROM
 // …" const-folds to a single string at the call site (§18): the fold reads the
@@ -120,6 +133,19 @@ func (s *Store) UpdatePartial(ctx context.Context, id, name, email string) error
 func (s *Store) ReadDynamicFilter(ctx context.Context, col, val string) error {
 	w := newSQLWriter()
 	w.Write("SELECT id FROM messages WHERE ").Write(col).Write(" = ").Arg(val)
+	query, args := w.Build()
+	_, err := s.db.QueryContext(ctx, query, args...)
+	return err
+}
+
+// SelectViaFmtSplice builds a SELECT whose tail is spliced in through WriteFmt
+// (fmt.Fprintf directly into the builder). The verb is a constant SELECT, but the
+// statement is NOT wholly constant — the splice is invisible to the accumulator
+// template — so the fold must ABSTAIN from a read classification rather than mint
+// a false constant SELECT (H-11).
+func (s *Store) SelectViaFmtSplice(ctx context.Context, filter string) error {
+	w := newSQLWriter()
+	w.Write("SELECT id FROM messages WHERE ").WriteFmt("%s", filter)
 	query, args := w.Build()
 	_, err := s.db.QueryContext(ctx, query, args...)
 	return err
