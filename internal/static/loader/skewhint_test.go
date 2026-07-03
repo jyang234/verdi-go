@@ -18,12 +18,25 @@ func TestToolchainSkewHint(t *testing.T) {
 		msgs    []string
 		want    bool // expect a non-empty hint
 		require []string
+		forbid  []string
 	}{
 		{
 			name:    "full message with both versions",
 			msgs:    []string{"pkg/x: pkg requires newer Go version go1.26 (application built with go1.25)"},
 			want:    true,
 			require: []string{"go1.26", "go1.25", "GOTOOLCHAIN=go1.26.0", "rebuild"},
+		},
+		{
+			// Different deps declare different `go` directives; the hint must recommend a
+			// toolchain that satisfies the HIGHEST, even when a lower one sorts first.
+			name: "reports the highest required version across packages",
+			msgs: []string{
+				"a/x: package requires newer Go version go1.24 (application built with go1.23)",
+				"z/y: package requires newer Go version go1.26 (application built with go1.23)",
+			},
+			want:    true,
+			require: []string{"requires go1.26", "GOTOOLCHAIN=go1.26.0", "go1.23"},
+			forbid:  []string{"GOTOOLCHAIN=go1.24"},
 		},
 		{
 			name:    "patch-qualified required version is not re-suffixed",
@@ -52,6 +65,11 @@ func TestToolchainSkewHint(t *testing.T) {
 			for _, want := range tc.require {
 				if !strings.Contains(got, want) {
 					t.Errorf("hint missing %q:\n%s", want, got)
+				}
+			}
+			for _, no := range tc.forbid {
+				if strings.Contains(got, no) {
+					t.Errorf("hint unexpectedly contains %q:\n%s", no, got)
 				}
 			}
 		})

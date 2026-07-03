@@ -12,6 +12,7 @@ package callgraph
 // node, not fail the deterministic-order guard.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -100,36 +101,60 @@ func TestDuplicateBoundWrappersDoNotPanic(t *testing.T) {
 
 	g := fromX(x, AlgoRTA, nil) // must not panic
 
+	var merged *Node
 	var count int
 	for _, n := range g.Nodes {
 		if n.FQN == fqn {
 			count++
+			merged = n
 		}
 	}
 	if count != 1 {
 		t.Fatalf("bound wrapper %q rendered as %d nodes, want exactly 1 (interchangeable wrappers must merge)", fqn, count)
 	}
+	// The merged node must be exactly the proven-uncached receiver-less forwarder class
+	// (bound/thunk) — the only class mergeKey may collapse (see mergeKey's soundness
+	// argument). A wrapper WITH a receiver would be a cached, non-duplicating kind.
+	if merged.Func.Signature.Recv() != nil {
+		t.Errorf("merged node %q has a receiver; only receiver-less bound/thunk forwarders may merge", fqn)
+	}
+	if merged.Func.Synthetic == "" {
+		t.Errorf("merged node %q is not synthetic; mergeKey must only collapse synthetic wrappers", fqn)
+	}
 }
 
 // TestDuplicateBoundWrappersDeterministic pins that the merged graph is
 // byte-identical across repeated builds of the same program — the property the
-// finalize guard exists to protect, now upheld by merging rather than panicking.
+// finalize guard exists to protect, now upheld by merging rather than panicking. It
+// serializes NODES *and* EDGES (each node's outgoing caller→callee FQNs with the
+// call-site position): the merged wrapper's edges are contributed by every use-site
+// copy in map-iteration order, so a build-to-build difference here would catch any
+// nondeterminism the merge leaks into the edge set, not just node order.
 func TestDuplicateBoundWrappersDeterministic(t *testing.T) {
-	var first string
-	for i := 0; i < 5; i++ {
-		g := fromX(buildBoundGraph(t, dupBoundSrc), AlgoRTA, nil)
+	serialize := func(g *Graph) string {
 		var b strings.Builder
+		b.WriteString("# nodes\n")
 		for _, n := range g.Nodes {
 			b.WriteString(n.FQN)
 			b.WriteByte('\n')
 		}
-		got := b.String()
+		b.WriteString("# edges\n")
+		for _, n := range g.Nodes {
+			for _, e := range n.Out {
+				fmt.Fprintf(&b, "%s -> %s @%d\n", e.Caller.FQN, e.Callee.FQN, sitePos(e.Site))
+			}
+		}
+		return b.String()
+	}
+	var first string
+	for i := 0; i < 8; i++ {
+		got := serialize(fromX(buildBoundGraph(t, dupBoundSrc), AlgoRTA, nil))
 		if i == 0 {
 			first = got
 			continue
 		}
 		if got != first {
-			t.Fatalf("node order varied across builds:\n--- first ---\n%s\n--- build %d ---\n%s", first, i, got)
+			t.Fatalf("graph varied across builds:\n--- first ---\n%s\n--- build %d ---\n%s", first, i, got)
 		}
 	}
 }

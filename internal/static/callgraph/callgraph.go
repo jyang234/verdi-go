@@ -63,9 +63,9 @@ type Graph struct {
 	Caveats []string
 	Nodes   []*Node // sorted by FQN
 	byFunc  map[*ssa.Function]*Node
-	// wrapperReps canonicalizes the interchangeable synthetic wrappers go/ssa mints
-	// per use-site (see mergeKey); transient, populated only during construction.
-	wrapperReps map[wrapperKey]*ssa.Function
+	// wrapperNodes collapses the interchangeable synthetic wrappers go/ssa mints per
+	// use-site to one node (see mergeKey); transient, populated only during construction.
+	wrapperNodes map[wrapperKey]*Node
 }
 
 // Build constructs the call graph for prog rooted at rs per opt. When RTA is
@@ -121,10 +121,10 @@ func reachableSet(x *xcg.Graph) map[*ssa.Function]bool {
 // synthetic root node (nil function) while keeping every real reachable function.
 func fromX(x *xcg.Graph, algo Algo, caveats []string) *Graph {
 	g := &Graph{
-		Algo:        algo,
-		Caveats:     caveats,
-		byFunc:      make(map[*ssa.Function]*Node),
-		wrapperReps: make(map[wrapperKey]*ssa.Function),
+		Algo:         algo,
+		Caveats:      caveats,
+		byFunc:       make(map[*ssa.Function]*Node),
+		wrapperNodes: make(map[wrapperKey]*Node),
 	}
 
 	for fn := range x.Nodes {
@@ -171,69 +171,79 @@ func fromX(x *xcg.Graph, algo Algo, caveats []string) *Graph {
 	return g
 }
 
-// node returns the graph node for fn, creating it on first use. fn is first mapped
-// to its canonical representative (see mergeKey): the interchangeable synthetic
-// wrappers go/ssa mints per use-site collapse to a single node, so every raw
-// *ssa.Function that shares a canonical identity resolves to the same node (and is
-// recorded in byFunc so a later lookup by that raw function still finds it).
+// node returns the graph node for fn, creating it on first use. A mergeable synthetic
+// wrapper (see mergeKey) shares ONE node with every other use-site copy of the same
+// wrapper: the first copy creates the node, later copies alias to it. Every raw
+// *ssa.Function that reaches here is recorded in byFunc, so a later g.Node(fn) lookup
+// by any copy still resolves to the shared node.
 func (g *Graph) node(fn *ssa.Function) *Node {
 	if n, ok := g.byFunc[fn]; ok {
 		return n
 	}
-	if rep := g.canonical(fn); rep != fn {
-		n := g.node(rep)
-		g.byFunc[fn] = n
+	if key, ok := mergeKey(fn); ok {
+		if n, ok := g.wrapperNodes[key]; ok {
+			g.byFunc[fn] = n // alias this copy to the already-built merged node
+			return n
+		}
+		n := g.newNode(fn)
+		g.wrapperNodes[key] = n
 		return n
 	}
+	return g.newNode(fn)
+}
+
+// newNode builds and registers a fresh node for fn. The merge class of a wrapper is
+// byte-identical (same wrapped Object, RelString, and body), so which copy iteration
+// happens to reach here first — and thus becomes the node's Func — does not change the
+// node's FQN or its edges: map-iteration order over x.Nodes does not leak into output.
+func (g *Graph) newNode(fn *ssa.Function) *Node {
 	n := &Node{FQN: fn.RelString(nil), Func: fn}
 	g.byFunc[fn] = n
 	g.Nodes = append(g.Nodes, n)
 	return n
 }
 
-// canonical returns the representative *ssa.Function for fn: fn itself for anything
-// with a unique identity, or the first-seen function of fn's merge class for an
-// interchangeable synthetic wrapper (see mergeKey). Because a merge class is
-// byte-identical (same wrapped Object, RelString, and body), the emitted node's FQN
-// and edges are invariant regardless of which member iteration happens to reach here
-// first, so map-iteration order over x.Nodes does not leak into the output.
-func (g *Graph) canonical(fn *ssa.Function) *ssa.Function {
-	key, mergeable := mergeKey(fn)
-	if !mergeable {
-		return fn
-	}
-	if rep, ok := g.wrapperReps[key]; ok {
-		return rep
-	}
-	g.wrapperReps[key] = fn
-	return fn
-}
-
-// wrapperKey is the canonical identity of a mergeable synthetic wrapper: the display
-// FQN (which carries the wrapper KIND — $bound vs $thunk — and receiver) plus the
-// exact wrapped method object.
+// wrapperKey is the identity of a mergeable synthetic wrapper: its display FQN (which
+// carries the wrapper KIND — $bound vs $thunk — and the full receiver display,
+// including a generic receiver's type arguments) plus the wrapped method object. Two
+// wrappers with an equal key are byte-identical, so they share one node.
 type wrapperKey struct {
 	fqn string
 	obj types.Object
 }
 
-// mergeKey returns fn's canonical wrapper identity and true when fn is a synthetic
-// method-value / method-expression / promotion wrapper that go/ssa duplicates.
-// createBound/createThunk (x/tools go/ssa) mint a FRESH $bound/$thunk wrapper at
-// every use-site and never cache them, so K uses of one method M yield K distinct
-// *ssa.Function that are byte-identical — same wrapped Object, same Synthetic kind,
-// same RelString, same pos (obj.Pos()) — differing only in pointer identity. Those
-// share BOTH the display FQN and the InstanceDiscriminator, the exact tie finalize()
-// cannot order, and pos is identical too so no positional tie-break could separate
-// them: the sound resolution is to MERGE, not to fabricate an order between identical
-// things. Keying on (RelString, Object) is why the merge cannot collapse two
-// behaviorally distinct functions — Object pins the exact wrapped method (a generic
-// method is instantiated BEFORE its wrapper is built, so distinct instantiations
-// carry distinct Objects) and RelString pins the wrapper kind and receiver display.
-// A generic INSTANCE (TypeArgs != 0) has a real per-instantiation body and is
-// EXCLUDED: it is rendered, not spliced, and its discriminator already orders it.
+// mergeKey returns fn's wrapper identity and true when fn is one of the receiver-less
+// method-value / method-expression forwarders go/ssa mints fresh per use-site.
+// createBound (MethodVal, "$bound") and createThunk (MethodExpr, "$thunk") in x/tools
+// go/ssa build a NEW wrapper at every occurrence and never cache it, so K uses of one
+// method M yield K distinct *ssa.Function that are byte-identical — same wrapped
+// Object, same Synthetic kind, same RelString, same pos (obj.Pos()) — differing only
+// in pointer identity. They collide on BOTH the display FQN and the
+// InstanceDiscriminator, the exact tie finalize() cannot order, and pos is identical
+// too, so no tie-break could separate them: the sound resolution is to MERGE the
+// interchangeable copies, not to fabricate an order between identical things.
+//
+// The class is deliberately restricted to receiver-less forwarders
+// (Signature.Recv() == nil) — exactly bound+thunk, the two UNCACHED kinds. Everything
+// else is excluded ON PURPOSE so an unproven collision fails LOUD at finalize() rather
+// than being silently merged (CLAUDE.md: fail closed; soundness is asymmetric): a
+// promotion/interface wrapper carries a receiver and is cached by go/ssa (it never
+// duplicates), and a generic INSTANCE (TypeArgs != 0) has a real per-instantiation
+// body. This is the intentionally NARROWER dedup subset of graphio.isSplicedWrapper's
+// spliced-wrapper set (which keys on Pkg == nil for the different splice-vs-render
+// question); the two are NOT folded into one predicate because they answer different
+// questions.
+//
+// Merge safety rests on the KEY, not on Object being unique: two wrappers merge only
+// when they share RelString(nil) AND the wrapped Object. RelString carries the full
+// receiver display, so wrappers over different instantiations of one generic method —
+// (*Store[int]).Get$bound vs (*Store[string]).Get$bound, whose Object() is the SHARED
+// origin generic (taint.go:75, features.EffectivePkgPath) — get DIFFERENT keys and do
+// not merge. A receiver-less forwarder with equal RelString and equal Object is
+// byte-identical, so the merge cannot collapse two behaviorally distinct functions.
 func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
-	if fn == nil || fn.Synthetic == "" || fn.Object() == nil || len(fn.TypeArgs()) != 0 {
+	if fn == nil || fn.Synthetic == "" || fn.Object() == nil ||
+		len(fn.TypeArgs()) != 0 || fn.Signature == nil || fn.Signature.Recv() != nil {
 		return wrapperKey{}, false
 	}
 	return wrapperKey{fqn: fn.RelString(nil), obj: fn.Object()}, true
@@ -245,9 +255,11 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // map-iteration-ordered node set is nondeterministic on such a tie (M-20). The one
 // FQN+discriminator collision go/ssa is known to produce — interchangeable synthetic
 // $bound/$thunk wrappers minted per use-site — is merged upstream in node() (see
-// mergeKey), so two distinct functions surviving to here share BOTH keys yet are NOT
-// interchangeable: a genuine ambiguity the sort cannot resolve. Fail loudly rather
-// than emit a run-varying order (determinism before convenience).
+// mergeKey). A collision surviving to here is therefore either genuinely un-orderable
+// or an unrecognized synthetic class outside that proven-identical merge set; either
+// way, fail loudly rather than emit a run-varying order (determinism before
+// convenience), so an unproven duplicate trips this guard instead of being silently
+// merged.
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
