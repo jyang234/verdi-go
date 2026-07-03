@@ -13,6 +13,7 @@ package callgraph
 
 import (
 	"fmt"
+	"go/types"
 	"sort"
 
 	xcg "golang.org/x/tools/go/callgraph"
@@ -62,6 +63,9 @@ type Graph struct {
 	Caveats []string
 	Nodes   []*Node // sorted by FQN
 	byFunc  map[*ssa.Function]*Node
+	// wrapperReps canonicalizes the interchangeable synthetic wrappers go/ssa mints
+	// per use-site (see mergeKey); transient, populated only during construction.
+	wrapperReps map[wrapperKey]*ssa.Function
 }
 
 // Build constructs the call graph for prog rooted at rs per opt. When RTA is
@@ -116,7 +120,12 @@ func reachableSet(x *xcg.Graph) map[*ssa.Function]bool {
 // fromX converts an x/tools call graph into the deterministic Graph, dropping the
 // synthetic root node (nil function) while keeping every real reachable function.
 func fromX(x *xcg.Graph, algo Algo, caveats []string) *Graph {
-	g := &Graph{Algo: algo, Caveats: caveats, byFunc: make(map[*ssa.Function]*Node)}
+	g := &Graph{
+		Algo:        algo,
+		Caveats:     caveats,
+		byFunc:      make(map[*ssa.Function]*Node),
+		wrapperReps: make(map[wrapperKey]*ssa.Function),
+	}
 
 	for fn := range x.Nodes {
 		if fn != nil {
@@ -125,30 +134,34 @@ func fromX(x *xcg.Graph, algo Algo, caveats []string) *Graph {
 	}
 	// One edge per call site is preserved — a function calling the same callee
 	// both normally and under `go` is two semantically distinct edges, and feature
-	// extraction reads each site's concurrency context. Edges are keyed by (callee,
-	// source position): two instructions can share a position (a generic body
-	// duplicated across instantiations), and collapsing those keeps position a
-	// total tiebreaker for ordering, so the edge list is fully deterministic.
+	// extraction reads each site's concurrency context. Edges are keyed by (caller
+	// node, callee node, source position): two instructions can share a position (a
+	// generic body duplicated across instantiations, or the tail call inside two
+	// merged wrappers), and collapsing those keeps position a total tiebreaker for
+	// ordering, so the edge list is fully deterministic. Both endpoints are keyed by
+	// NODE, not raw *ssa.Function, so edges from/into merged wrapper nodes (see
+	// mergeKey) de-duplicate across the SSA functions that collapsed into one node.
 	type edgeKey struct {
-		callee *ssa.Function
+		caller *Node
+		callee *Node
 		pos    int
 	}
+	seen := make(map[edgeKey]bool)
 	for _, xn := range x.Nodes {
 		if xn.Func == nil {
 			continue
 		}
-		caller := g.byFunc[xn.Func]
-		seen := make(map[edgeKey]bool)
+		caller := g.node(xn.Func)
 		for _, e := range xn.Out {
 			if e.Callee == nil || e.Callee.Func == nil {
 				continue
 			}
-			k := edgeKey{e.Callee.Func, sitePos(e.Site)}
+			callee := g.node(e.Callee.Func)
+			k := edgeKey{caller, callee, sitePos(e.Site)}
 			if seen[k] {
 				continue
 			}
 			seen[k] = true
-			callee := g.node(e.Callee.Func)
 			edge := &Edge{Caller: caller, Callee: callee, Site: e.Site}
 			caller.Out = append(caller.Out, edge)
 			callee.In = append(callee.In, edge)
@@ -158,8 +171,18 @@ func fromX(x *xcg.Graph, algo Algo, caveats []string) *Graph {
 	return g
 }
 
+// node returns the graph node for fn, creating it on first use. fn is first mapped
+// to its canonical representative (see mergeKey): the interchangeable synthetic
+// wrappers go/ssa mints per use-site collapse to a single node, so every raw
+// *ssa.Function that shares a canonical identity resolves to the same node (and is
+// recorded in byFunc so a later lookup by that raw function still finds it).
 func (g *Graph) node(fn *ssa.Function) *Node {
 	if n, ok := g.byFunc[fn]; ok {
+		return n
+	}
+	if rep := g.canonical(fn); rep != fn {
+		n := g.node(rep)
+		g.byFunc[fn] = n
 		return n
 	}
 	n := &Node{FQN: fn.RelString(nil), Func: fn}
@@ -168,13 +191,63 @@ func (g *Graph) node(fn *ssa.Function) *Node {
 	return n
 }
 
+// canonical returns the representative *ssa.Function for fn: fn itself for anything
+// with a unique identity, or the first-seen function of fn's merge class for an
+// interchangeable synthetic wrapper (see mergeKey). Because a merge class is
+// byte-identical (same wrapped Object, RelString, and body), the emitted node's FQN
+// and edges are invariant regardless of which member iteration happens to reach here
+// first, so map-iteration order over x.Nodes does not leak into the output.
+func (g *Graph) canonical(fn *ssa.Function) *ssa.Function {
+	key, mergeable := mergeKey(fn)
+	if !mergeable {
+		return fn
+	}
+	if rep, ok := g.wrapperReps[key]; ok {
+		return rep
+	}
+	g.wrapperReps[key] = fn
+	return fn
+}
+
+// wrapperKey is the canonical identity of a mergeable synthetic wrapper: the display
+// FQN (which carries the wrapper KIND — $bound vs $thunk — and receiver) plus the
+// exact wrapped method object.
+type wrapperKey struct {
+	fqn string
+	obj types.Object
+}
+
+// mergeKey returns fn's canonical wrapper identity and true when fn is a synthetic
+// method-value / method-expression / promotion wrapper that go/ssa duplicates.
+// createBound/createThunk (x/tools go/ssa) mint a FRESH $bound/$thunk wrapper at
+// every use-site and never cache them, so K uses of one method M yield K distinct
+// *ssa.Function that are byte-identical — same wrapped Object, same Synthetic kind,
+// same RelString, same pos (obj.Pos()) — differing only in pointer identity. Those
+// share BOTH the display FQN and the InstanceDiscriminator, the exact tie finalize()
+// cannot order, and pos is identical too so no positional tie-break could separate
+// them: the sound resolution is to MERGE, not to fabricate an order between identical
+// things. Keying on (RelString, Object) is why the merge cannot collapse two
+// behaviorally distinct functions — Object pins the exact wrapped method (a generic
+// method is instantiated BEFORE its wrapper is built, so distinct instantiations
+// carry distinct Objects) and RelString pins the wrapper kind and receiver display.
+// A generic INSTANCE (TypeArgs != 0) has a real per-instantiation body and is
+// EXCLUDED: it is rendered, not spliced, and its discriminator already orders it.
+func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
+	if fn == nil || fn.Synthetic == "" || fn.Object() == nil || len(fn.TypeArgs()) != 0 {
+		return wrapperKey{}, false
+	}
+	return wrapperKey{fqn: fn.RelString(nil), obj: fn.Object()}, true
+}
+
 // finalize sorts nodes and each node's edges into canonical order. The node sort
 // tie-breaks on features.InstanceDiscriminator because a generic instance's FQN
 // (fn.RelString) is documented non-unique: an FQN-only comparator over the
-// map-iteration-ordered node set is nondeterministic on such a tie (M-20). Two
-// distinct functions that share BOTH the FQN and the discriminator are a genuine
-// ambiguity the sort cannot resolve — fail loudly rather than emit a run-varying
-// order (determinism before convenience).
+// map-iteration-ordered node set is nondeterministic on such a tie (M-20). The one
+// FQN+discriminator collision go/ssa is known to produce — interchangeable synthetic
+// $bound/$thunk wrappers minted per use-site — is merged upstream in node() (see
+// mergeKey), so two distinct functions surviving to here share BOTH keys yet are NOT
+// interchangeable: a genuine ambiguity the sort cannot resolve. Fail loudly rather
+// than emit a run-varying order (determinism before convenience).
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
