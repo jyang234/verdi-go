@@ -667,7 +667,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
 		for _, e := range n.Out {
-			edges := edgeOf(ext, hints, e, scope, o.foldSQL, o.foldBus, callers, 0)
+			edges := edgeOf(ext, hints, e, scope, o.foldSQL, o.foldBus, callers, 0, nil)
 			nodeEdges = append(nodeEdges, edges...)
 			// Record a committed effect only when the site yields exactly ONE — the
 			// unambiguous case. A fold-resolved finite-table write fans the site out
@@ -1111,21 +1111,27 @@ func (e *EntryAmbiguousError) Error() string {
 	return fmt.Sprintf("entry %q is ambiguous: it names %d distinct handlers (%s); disambiguate with an exact function FQN", e.Entry, len(e.Fns), strings.Join(e.Fns, ", "))
 }
 
-// spliceDepthCap bounds edgeOf's recursion through chained $bound/$thunk wrappers.
-// Real wrapper chains are at most ~2 deep (go/ssa wrapper chains do not cycle), so
-// exceeding this cap means a broken invariant, not a legal-but-deep chain. It must
-// fail LOUD (panic), NOT drop the edge: a dropped boundary edge is the fail-OPEN
-// direction for an absence proof — a missing edge reads as "no path" (a false PASS
-// / false NEVER), the worst outcome. A panic on the genuinely-unreachable cycle is
-// the fail-closed choice (CLAUDE.md: the worst outcome is a confidently-wrong silent
-// result, never a crash — so a loud crash is preferable to a silent wrong edge drop).
+// spliceDepthCap bounds edgeOf's recursion through chained synthetic wrappers.
+// Cycles among wrappers are handled by the `spliced` visited set (a CHA promotion
+// wrapper legitimately self-loops — see the splice case), so a chain that reaches
+// this depth WITHOUT revisiting is a broken invariant, not a legal-but-deep chain:
+// real acyclic wrapper chains are at most ~2 deep. It must fail LOUD (panic), NOT
+// drop the edge: a dropped boundary edge is the fail-OPEN direction for an absence
+// proof — a missing edge reads as "no path" (a false PASS / false NEVER), the worst
+// outcome. A panic on the genuinely-broken chain is the fail-closed choice
+// (CLAUDE.md: the worst outcome is a confidently-wrong silent result, never a
+// crash — so a loud crash is preferable to a silent wrong edge drop).
 const spliceDepthCap = 16
 
 // edgeOf renders graph edges for an SSA call edge: a typed boundary edge for
 // publish/HTTP/DB calls, an internal edge for first-party→first-party calls, the
-// spliced edges of a $bound/$thunk wrapper's target, and nothing for calls into
-// unhinted stdlib/third-party code.
-func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL, foldBus bool, callers map[*ssa.Function][]ssa.CallInstruction, depth int) []Edge {
+// spliced edges of a synthetic wrapper's target, and nothing for calls into
+// unhinted stdlib/third-party code. spliced is the set of wrapper functions already
+// expanded on this top-level edge's splice chain (nil until the first splice); it
+// both cuts CHA wrapper cycles and bounds diamond re-expansion — every level
+// re-attributes to the same originating caller, so one expansion per wrapper per
+// top-level edge emits the complete edge set.
+func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL, foldBus bool, callers map[*ssa.Function][]ssa.CallInstruction, depth int, spliced map[*ssa.Function]bool) []Edge {
 	from := e.Caller.Func.RelString(nil)
 	callee := e.Callee.Func
 	f := ext.Edge(e.Caller.Func, callee, e.Site)
@@ -1134,22 +1140,39 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 
 	switch {
 	case isSplicedWrapper(callee):
-		// Splice a thin $bound/$thunk wrapper: the caller reaches whatever the wrapper
-		// forwards to, so re-attribute the wrapper's out-edges to `from` and classify
-		// caller→wrappee normally. This keeps the real method (and any boundary effect
-		// inside or below it) connected WITHOUT rendering a synthetic "$bound" node
-		// (C-1). The original call's concurrency is carried onto the spliced edges: a
+		// Splice a thin synthetic wrapper ($bound, $thunk, or an embedded-interface
+		// promotion wrapper): the caller reaches whatever the wrapper forwards to, so
+		// re-attribute the wrapper's out-edges to `from` and classify caller→wrappee
+		// normally. This keeps the real method (and any boundary effect inside or
+		// below it) connected WITHOUT rendering a synthetic wrapper node (C-1). The
+		// original call's concurrency is carried onto the spliced edges: a
 		// `go methodValue()` reaches the wrappee concurrently even though the wrapper's
-		// own body calls it directly. depth bounds the (in practice ≤2) wrapper chain;
-		// exceeding the cap is an impossible cycle in valid go/ssa, so fail LOUD rather
-		// than drop the edge (dropping is fail-OPEN — a missing edge fakes "no path").
-		if depth > spliceDepthCap {
-			panic(fmt.Sprintf("graphio: $bound/$thunk wrapper splice exceeded depth cap %d at %s — cyclic wrapper chain (impossible in valid go/ssa); refusing to drop the edge (fail-open)", spliceDepthCap, from))
+		// own body calls it directly.
+		//
+		// Wrapper chains CAN cycle here: real execution never loops through a wrapper,
+		// but under CHA a promotion wrapper's invoke of its embedded interface method
+		// resolves to every implementer — including the embedding type itself, whose
+		// method IS that same wrapper (`type W struct{ Iface }` gives the call graph a
+		// (*W).M → (*W).M self-edge; oapi-codegen's ClientWithResponses is the common
+		// case). A revisited wrapper is skipped, NOT dropped: every splice level
+		// re-attributes to the same `from`, so the first visit already emitted the
+		// exact edges a revisit would produce — cutting the back-edge loses no target
+		// and stays fail-closed. The depth cap remains as the backstop for a chain
+		// that is deep without revisiting (a genuinely broken invariant).
+		if spliced[callee] {
+			return nil
 		}
+		if depth > spliceDepthCap {
+			panic(fmt.Sprintf("graphio: wrapper splice exceeded depth cap %d at %s without revisiting a wrapper — broken wrapper chain; refusing to drop the edge (fail-open)", spliceDepthCap, from))
+		}
+		if spliced == nil {
+			spliced = make(map[*ssa.Function]bool)
+		}
+		spliced[callee] = true
 		var out []Edge
 		for _, oe := range e.Callee.Out {
-			spliced := &cg.Edge{Caller: e.Caller, Callee: oe.Callee, Site: oe.Site}
-			out = append(out, edgeOf(ext, hints, spliced, scope, foldSQL, foldBus, callers, depth+1)...)
+			se := &cg.Edge{Caller: e.Caller, Callee: oe.Callee, Site: oe.Site}
+			out = append(out, edgeOf(ext, hints, se, scope, foldSQL, foldBus, callers, depth+1, spliced)...)
 		}
 		if concurrent {
 			for i := range out {
