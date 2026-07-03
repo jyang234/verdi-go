@@ -10,7 +10,10 @@
 package loader
 
 import (
+	"errors"
 	"fmt"
+	"go/version"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -109,8 +112,76 @@ func collectErrors(roots []*packages.Package) error {
 		shown = shown[:max]
 		suffix = fmt.Sprintf("\n\t(+%d more)", len(msgs)-max)
 	}
-	return fmt.Errorf("loader: %d type-check/load error(s):\n\t%s%s",
+	summary := fmt.Sprintf("loader: %d type-check/load error(s):\n\t%s%s",
 		len(msgs), strings.Join(shown, "\n\t"), suffix)
+	// A toolchain-skew load failure is repeated once per importing package and reads
+	// like a defect in the analyzed code, when the fix is to rebuild the analyzer.
+	// Lead with one actionable remediation line so the wall of identical errors below
+	// it is context, not the whole message. Scanned over the FULL msgs (before the
+	// display cap) so the class is still recognized when its errors sort past max.
+	if hint := toolchainSkewHint(msgs); hint != "" {
+		return fmt.Errorf("%s\n%s", hint, summary)
+	}
+	return errors.New(summary)
+}
+
+// skewRE matches the go/packages loader's toolchain-skew error, e.g.
+// "package requires newer Go version go1.26 (application built with go1.25)". The
+// built-with clause is optional: older/newer x/tools phrasings may omit it, so the
+// second group is best-effort and the hint degrades gracefully when it is absent.
+var skewRE = regexp.MustCompile(`requires newer Go version (go[0-9]+(?:\.[0-9]+)+)(?: \(application built with (go[0-9]+(?:\.[0-9]+)+)\))?`)
+
+// toolchainSkewHint returns a single actionable remediation line when any collected
+// loader message is the toolchain-skew class (the target's dependencies declare a
+// higher `go` directive than the Go version this analyzer binary was built with), or
+// "" otherwise. The failure is inherent to the x/tools type-checker — types must be
+// checked at the binary's own language version — so the ONLY remedy is rebuilding the
+// analyzer with a matching toolchain, which is what the line tells the operator to do
+// (the confusing per-package wall of errors otherwise names no fix).
+//
+// It reports the HIGHEST required version across all skewed packages, not the first
+// one encountered: different dependencies can declare different `go` directives, and a
+// GOTOOLCHAIN that satisfies only the lowest of them would still fail to load the rest,
+// so recommending anything below the maximum sends the operator to rebuild with a
+// toolchain that does not resolve the failure. The built-with version is the analyzer
+// binary's own and is identical in every message, so first-seen suffices for it.
+func toolchainSkewHint(msgs []string) string {
+	var required, built string
+	for _, m := range msgs {
+		sub := skewRE.FindStringSubmatch(m)
+		if sub == nil {
+			continue
+		}
+		if required == "" || version.Compare(sub[1], required) > 0 {
+			required = sub[1]
+		}
+		if built == "" && sub[2] != "" {
+			built = sub[2]
+		}
+	}
+	if required == "" {
+		return ""
+	}
+	builtClause := "an older Go"
+	if built != "" {
+		builtClause = built
+	}
+	return fmt.Sprintf(
+		"loader: analyzer/target Go toolchain skew — this binary was built with %s but the target requires %s; "+
+			"types are checked at the binary's own Go version, so rebuild the analyzer with a matching toolchain "+
+			"(e.g. GOTOOLCHAIN=%s go install <analyzer-cmd>@<version>) and re-run",
+		builtClause, required, suggestToolchain(required))
+}
+
+// suggestToolchain renders v as a GOTOOLCHAIN name: a bare major.minor (go1.26, which
+// skewRE has already validated as a go-prefixed dotted version) is patch-qualified to
+// go1.26.0 (the concrete toolchain GOTOOLCHAIN resolves), while a version that already
+// carries a patch is used as-is. "No patch component" is exactly "one dot".
+func suggestToolchain(v string) string {
+	if strings.Count(v, ".") == 1 {
+		return v + ".0"
+	}
+	return v
 }
 
 // moduleOf returns the unit's own module: the main module if the toolchain marked

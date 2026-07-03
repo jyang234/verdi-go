@@ -58,6 +58,23 @@ reviewer sees where the analysis stops. Scope it to one handler with
 instead — `--root` is the reviewable unit. Like the JSON graph, the flowchart is
 a view, never a gate.
 
+**`func()`-typed dynamic calls fan out under `rta` — prefer `--algo vta` for
+closure-dense services.** A call through a bare `func()` value resolves under the
+default `rta` to *every* address-taken `func()` in the program — a sound
+over-approximation, but a coarse one. The common source is
+`ctx, cancel := context.WithTimeout(...); defer cancel()`: `cancel` is a
+`context.CancelFunc` (a `func()`), so `rta` draws an edge from the calling function
+into every deferred-cleanup closure and other niladic callback in the program (the
+same shape appears for `sync.Once` funcs and `time.AfterFunc` callbacks). Because
+context-first I/O code calls `context.WithTimeout` almost everywhere, these spurious
+edges inflate reach sets and `groundwork reach` blast-radius answers. `--algo vta` is
+flow-aware and prunes them while staying sound — on one measured service it cut a
+shared cancel site from 24 callees to 3 on a 215-edge graph. If your service is
+interface- or closure-dense, pin `--algo vta` everywhere (build and annotation
+authoring alike; see the algorithm-dependent-annotation note below). These edges are
+*imprecise, not wrong* — nothing that should be reachable is dropped — so no gate is
+unsound under `rta`; the cost is noise, and `vta` is the lever.
+
 **Mermaid compatibility.** The flowchart uses a deliberately conservative Mermaid
 dialect — `flowchart`, `subgraph`, `classDef` + `:::` class assignment, the
 `[(…)]` / `{{…}}` / `([…])` node shapes, `==>` / `-.->` edges, and `<br/>` in
