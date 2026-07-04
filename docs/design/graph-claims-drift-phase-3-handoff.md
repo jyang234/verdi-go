@@ -1,6 +1,11 @@
 # Phase 3 (FR-4) handoff — `flowmap graph --mermaid --focus <fqn,…>`
 
-> **`READY TO IMPLEMENT`** · authored 2026-07-04 for a fresh session · Phases 0–2 landed.
+> **`SUPERSEDED`** · authored 2026-07-04 for a fresh session · Phases 0–2 landed.
+> Superseded by `graph-claims-phase-3-spec.md`, which adds a Phases 0–2
+> conformance audit (finding an FR-1 claims-schema interop gap, now workstream
+> 3a) and resolves this brief's open edges (comma-in-regex splitting, boundary
+> focus names with no induced edge, the shared disclosure-filter refactor). The
+> "Gotchas learned in Phases 1–2" section below remains binding.
 
 This is a self-contained brief for implementing **Phase 3** of
 `docs/design/graph-claims-drift-plan.md` (read that plan's §"Phase 3 (FR-4)" and
