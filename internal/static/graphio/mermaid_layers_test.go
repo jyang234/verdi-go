@@ -83,25 +83,42 @@ func atoiSafe(s string) (int, bool) {
 	return n, true
 }
 
-// --- Layer 2b: diff attribute-change visibility (characterization) ---
+// --- Layer 2b: diff attribute-change visibility (third `changed` class) ---
 
 func TestLayerDiffAttributeChange(t *testing.T) {
-	// Same (from,to) edge, but plain in base and CONCURRENT in branch.
-	base := &Graph{Algo: "rta", Nodes: []Node{{FQN: "a.A", Tier: 1}, {FQN: "a.B", Tier: 1}}, Edges: []Edge{{From: "a.A", To: "a.B"}}}
-	branch := &Graph{Algo: "rta", Nodes: []Node{{FQN: "a.A", Tier: 1}, {FQN: "a.B", Tier: 1}}, Edges: []Edge{{From: "a.A", To: "a.B", Concurrent: true}}}
+	// A surviving NODE whose tier drifts AND a surviving (from,to) EDGE that gains a
+	// concurrent record — the two attribute-only drifts a presence-keyed diff used to miss.
+	base := &Graph{Algo: "rta",
+		Nodes: []Node{{FQN: "a.A", Tier: 1}, {FQN: "a.B", Tier: 2}},
+		Edges: []Edge{{From: "a.A", To: "a.B"}},
+	}
+	branch := &Graph{Algo: "rta",
+		Nodes: []Node{{FQN: "a.A", Tier: 1}, {FQN: "a.B", Tier: 1}}, // B: tier 2→1
+		Edges: []Edge{{From: "a.A", To: "a.B", Concurrent: true}},   // A→B became concurrent
+	}
 	out := MermaidDiff(base, branch, MermaidOptions{MaxTier: 2})
 	assertValidMermaid(t, out)
-	// KNOWN LIMITATION (pinned here so a future change is noticed): the diff keys edges
-	// on (from, to), so an attribute-only change — a call that became concurrent, or
-	// gained/lost a `via` — renders as a KEPT (grey) edge showing the BRANCH decoration,
-	// NOT as a flagged change. The branch decoration IS visible (the edge shows "go"), so
-	// nothing is hidden; it is just not colored as a delta. This mirrors the deliberate
-	// rename=remove+add choice: the diff discloses STRUCTURE, and the JSON diff /
-	// groundwork review is the authority on attribute-level change. (The diff conveys
-	// concurrency via the `go` LABEL, not a dashed arrow — arrow shape is reserved for
-	// the diff-state channel, so a kept concurrent edge is `-->|go|`, solid.)
-	if !strings.Contains(out, "a_A -->|go| a_B") {
-		t.Errorf("the branch's concurrency decoration must at least be visible on the kept edge:\n%s", out)
+
+	// BEHAVIOR PIN (was a KNOWN LIMITATION until Phase 2): an attribute-only change on a
+	// SURVIVING element now renders as the third `changed` class instead of a silent grey
+	// kept edge — the node recolors and names its tier drift, the edge keeps its (solid)
+	// diff-state shape but carries a Δ label naming the changed attribute. The diff is now
+	// the authority on attribute change, in lockstep with the JSON delta it derives from
+	// (parity-guarded by TestDiffMermaidJSONParity).
+	mustContain := []string{
+		`a_B["Δ a.B tier 2→1"]:::changed`,     // node tier drift: recolored + named
+		`a_A -->|Δ concurrent ∅→go| a_B`,      // edge attr drift: kept-shape arrow + Δ label
+		"stroke:#d98e00",                      // the changed linkStyle color
+		`lg_changed["Δ changed (tier/attr)"]`, // the fourth legend entry
+	}
+	for _, w := range mustContain {
+		if !strings.Contains(out, w) {
+			t.Errorf("diff must flag the attribute change as `changed`, missing %q:\n%s", w, out)
+		}
+	}
+	// It must NOT fall back to the old silent kept edge (the limitation this phase closed).
+	if strings.Contains(out, "a_A -->|go| a_B") {
+		t.Errorf("an attribute change must no longer render as a plain kept edge:\n%s", out)
 	}
 }
 

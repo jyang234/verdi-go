@@ -1381,6 +1381,72 @@ The rollup is a **whole-service** view: `--rollup` is mutually exclusive with
 components and disclosed effects). Like `--mermaid` it carries no `--stamp`/tool
 provenance — it is a view, never a gate.
 
+### Attribute-aware diff — `flowmap graph --diff BASE`
+
+`--diff BASE` compares a committed base `graph.json` to the freshly-analyzed
+branch and reports **what changed** — in three renderings of the one comparison
+(`internal/static/graphio.Delta`, so they cannot disagree on what changed):
+
+- `--diff BASE` alone → the **JSON `GraphDelta`** (below), the machine-consumable
+  artifact you would otherwise hand-build with `jq`.
+- `--diff BASE --mermaid` → the colored flowchart, the change painted in.
+- `--diff BASE --rollup package` → the component (C3) delta (above).
+
+It is a **view, never a gate**: the verdict stays with `groundwork review`; the
+delta only makes the change legible and mechanically checkable.
+
+**The third class — `changed`.** A presence-only diff (added/removed sets) is
+blind to a change that *keeps* an element but alters its attributes — exactly the
+fail-open a consumer hit (a `tier` that moved between pins while set-based
+validation reported "additive only"). The delta closes it with a third class:
+
+- a **node** that survives but whose `tier` drifted → `nodes_changed`, and
+- a surviving **`(from, to)` pair** whose attribute records changed →
+  `edges_changed`: a call that became `concurrent`, gained/lost a `via`, moved
+  `tier`, or changed `boundary`.
+
+Edges are compared over **unique `(from, to)` pairs** (the counting basis defined
+under [`edges[]`](#consuming-graphjson-directly)), and a pair's attribute state is
+the **set of its distinct records**. Comparing the whole set — not one
+representative record — is what lets a *multiplicity* change register: a pair that
+carried both a plain and a `go`-launched record and now carries only the plain one
+has lost its concurrent mode, reported `concurrent: true → null`. The mermaid view
+draws a `changed` edge as a solid (kept-shape) arrow with a `Δ` label; only
+added/removed edges change arrow *shape*, so a `changed` edge never reads as an add
+or a remove.
+
+The `GraphDelta` shape:
+
+```json
+{
+  "base":   {"tool": "...", "algo": "rta"},
+  "branch": {"tool": "...", "algo": "rta"},
+  "nodes_added": ["..."], "nodes_removed": ["..."],
+  "nodes_changed": [{"fqn": "...", "field": "tier", "old": 2, "new": 1}],
+  "edges_added":   [{"from": "...", "to": "..."}],
+  "edges_removed": [{"from": "...", "to": "..."}],
+  "edges_changed": [{"from": "...", "to": "...", "field": "concurrent", "old": true, "new": null}],
+  "caveats": ["algo differs (base rta vs branch vta): ..."]
+}
+```
+
+Every list is present (never null) and sorted on intrinsic keys (`fqn`;
+`from, to, field`), so the artifact is byte-identical across runs. An unset
+attribute (`concurrent: false`, empty `boundary`/`via`) is JSON `null` — the `∅`
+the mermaid `Δ` label shows; one record is emitted per changed field, so a pair
+with two changed attributes yields two records. `base`/`branch` echo each side's
+substrate identity, and `caveats[]` reuses the call-graph diff's substrate-skew
+disclosure (empty base, `--algo`/tool/reclaimer mismatch) verbatim — a precision
+or tool-version difference is never silently painted as a code change.
+
+**Attribute drift is a function-grain concept.** `tier` and `concurrent` do not
+exist at package (C3) altitude, so `--rollup --diff` has **no `changed` class** by
+design — the component delta stays the code-vs-disclosure split above; attribute
+drift surfaces only in the function-grain `--diff` (the JSON delta and
+`--mermaid`). This delta is also distinct from `groundwork review`'s internal
+set-based graph delta, which feeds the review verdict's shape/touch labels rather
+than this consumer-facing attribute report; the two are kept separate on purpose.
+
 ---
 
 ## Glossary

@@ -137,7 +137,9 @@ func cmdBoundary(args []string) error {
 
 // cmdGraph prints the non-gated call-graph view, optionally scoped to one entry
 // point with --entry. Default output is canonical JSON; --mermaid renders the same
-// graph as a human-readable flowchart (a view, never gated) for review.
+// graph as a human-readable flowchart (a view, never gated) for review; --diff BASE
+// (alone) emits the attribute-aware JSON GraphDelta from BASE to this branch, and
+// --rollup rolls the graph up to the component (C3) altitude. All views, never gates.
 func cmdGraph(args []string) error {
 	fs := flag.NewFlagSet("graph", flag.ContinueOnError)
 	entry := fs.String("entry", "", `scope to the subgraph reachable from this entry point (e.g. "POST /loan-application")`)
@@ -151,7 +153,7 @@ func cmdGraph(args []string) error {
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
 	allBlindSpots := fs.Bool("all-blind-spots", false, "with --mermaid, draw every blind-spot/frontier disclosure node (trivial boundaries and those orphaned onto collapsed plumbing) instead of rolling the plumbing-tier ones into a counted header note; restores the full honesty channel without un-collapsing plumbing nodes")
-	diffBase := fs.String("diff", "", "with --mermaid or --rollup, render the delta from this BASE graph JSON to the analyzed branch (added/removed elements; --rollup splits code vs disclosure); a view, never a gate")
+	diffBase := fs.String("diff", "", "render the delta from this BASE graph JSON to the analyzed branch: ALONE, the attribute-aware JSON GraphDelta (added/removed/changed nodes & edges); with --mermaid the colored flowchart; with --rollup the component delta. A view, never a gate")
 	rootAt := fs.String("root", "", `with --mermaid, scope to one entry point at RENDER time (e.g. "POST /loan-application") — unlike --entry this keeps the frontier markers in the per-handler view`)
 	maxNodes := fs.Int("max-nodes", 300, "with --mermaid, cap how many nodes a diagram draws; above the cap it renders an index of entry points to --root at instead of an illegible hairball (0 = uncapped)")
 	rollup := fs.String("rollup", "", `emit a component-level (C3) rollup grouping nodes by package: "package". Default output is the rollup JSON; with --mermaid it renders the component flowchart, with --diff BASE the component delta (code-vs-disclosure split)`)
@@ -162,6 +164,16 @@ func cmdGraph(args []string) error {
 	dir, err := dirArg(fs)
 	if err != nil {
 		return err
+	}
+
+	// A --diff needs comparable base/branch SCOPES. --entry scopes the BRANCH build to one
+	// entry cone, so diffing that against a whole-graph base would paint every out-of-cone
+	// function as removed — a silent, confidently-wrong delta (empirically: a 40-node graph
+	// diffed against its 20-node entry-scoped build reports 20 phantom removed nodes). Fail
+	// closed here, before the build, covering all three --diff consumptions (JSON, --mermaid,
+	// --rollup) — the same whole-service reason --rollup already refuses --entry below.
+	if *diffBase != "" && *entry != "" {
+		return fmt.Errorf("graph --diff and --entry are mutually exclusive: --entry scopes the branch to one entry cone, so a diff against a whole-graph base would report every out-of-cone function as removed (a false delta)")
 	}
 
 	opt, err := algoOption(*algo)
@@ -229,6 +241,20 @@ func cmdGraph(args []string) error {
 		}
 		_, err = os.Stdout.WriteString(render.Fence(g.Mermaid(opts)))
 		return err
+	}
+	// Bare --diff (no --mermaid, no --rollup): emit the attribute-aware JSON GraphDelta —
+	// the artifact the consumer currently hand-builds with jq. It rides the same canonical
+	// JSON encoding as the graph itself, and reads the branch's provenance (tool/algo, set
+	// just below) so the delta self-certifies which substrates it compared. --rollup already
+	// returned at the top and --mermaid consumed --diff above, so reaching here with --diff
+	// set means the plain JSON delta was asked for.
+	if *diffBase != "" {
+		base, err := loadGraphJSON(*diffBase)
+		if err != nil {
+			return fmt.Errorf("--diff base graph: %w", err)
+		}
+		g.Tool = buildinfo.Version(version)
+		return emitCanonJSON(graphio.Delta(base, g))
 	}
 	// The stamp is caller-supplied, never derived: deriving it (from git HEAD,
 	// a timestamp) would make the graph a function of more than the code and

@@ -1466,33 +1466,42 @@ func sortGraph(g *Graph) {
 		}
 		return a.Line < b.Line
 	})
-	// Total order over every Edge field: a comparator that ignored Boundary and
-	// Concurrent left equal-keyed edges in build order — deterministic only as
+	// Total order over every Edge field (edgeLess): a comparator that ignored Boundary
+	// and Concurrent left equal-keyed edges in build order — deterministic only as
 	// long as the pre-sort slice happened to be, a latent output-stability trap.
 	// Via is included for the same reason (dedupEdges compares full struct equality,
 	// so a comparator that omitted Via could order two Via-differing edges by build
 	// order while dedup kept both — a stability gap if a future reclaimer emits a
 	// Via edge parallel to a base From/To).
-	sort.Slice(g.Edges, func(i, j int) bool {
-		a, b := g.Edges[i], g.Edges[j]
-		if a.From != b.From {
-			return a.From < b.From
-		}
-		if a.To != b.To {
-			return a.To < b.To
-		}
-		if a.Tier != b.Tier {
-			return a.Tier < b.Tier
-		}
-		if a.Boundary != b.Boundary {
-			return a.Boundary < b.Boundary
-		}
-		if a.Concurrent != b.Concurrent {
-			return !a.Concurrent && b.Concurrent
-		}
-		return a.Via < b.Via
-	})
+	sort.Slice(g.Edges, func(i, j int) bool { return edgeLess(g.Edges[i], g.Edges[j]) })
 	g.Edges = dedupEdges(g.Edges)
+}
+
+// edgeLess is the ONE canonical total order over Edge — every field, so two records
+// that share a (From,To) pair are still strictly ordered on their attributes, never
+// left in build (arrival) order. sortGraph orders the emitted slice by it, AND the diff
+// renderer's edgeIndex picks a pair's representative record by it, so the diff's per-pair
+// decoration is a deterministic function of the record SET rather than the arrival-order
+// last writer (CLAUDE.md: determinism + one source of truth). Distinct records for a pair
+// differ in at least one attribute (dedupEdges collapses full-struct duplicates), so this
+// is a strict total order over them and the per-pair maximum is unique.
+func edgeLess(a, b Edge) bool {
+	if a.From != b.From {
+		return a.From < b.From
+	}
+	if a.To != b.To {
+		return a.To < b.To
+	}
+	if a.Tier != b.Tier {
+		return a.Tier < b.Tier
+	}
+	if a.Boundary != b.Boundary {
+		return a.Boundary < b.Boundary
+	}
+	if a.Concurrent != b.Concurrent {
+		return !a.Concurrent && b.Concurrent
+	}
+	return a.Via < b.Via
 }
 
 func dedupEdges(in []Edge) []Edge {

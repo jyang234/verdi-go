@@ -7,6 +7,7 @@ flowchart LR
         lg_kept["unchanged"]:::kept
         lg_added["＋ added"]:::added
         lg_removed["− removed"]:::removed
+        lg_changed["Δ changed (tier/attr)"]:::changed
     end
     app_Service_GetProfile["app.Service.GetProfile ⚠"]:::kept
     app_Service_UpdateProfile["app.Service.UpdateProfile ⚠"]:::kept
@@ -36,4 +37,5 @@ flowchart LR
     classDef kept fill:#f6f6f6,stroke:#aaaaaa,color:#444444
     classDef added fill:#e7f9e7,stroke:#1a9d1a,stroke-width:2px,color:#0a5d0a
     classDef removed fill:#fbeaea,stroke:#cc3333,stroke-width:2px,stroke-dasharray:5 3,color:#7d0a0a
+    classDef changed fill:#fff6e5,stroke:#d98e00,stroke-width:2px,color:#7a4d00
 ```

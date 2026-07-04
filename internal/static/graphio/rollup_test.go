@@ -233,6 +233,22 @@ func TestRollupCompositionRootMermaidValid(t *testing.T) {
 	}
 }
 
+// TestRollupDiffLegendHasNoChangedClass pins that the shared writeLegend does NOT advertise
+// the `changed` (tier/attr) swatch in the component (C3) rollup diff: tier/concurrent do not
+// exist at package grain, so a "Δ changed" legend entry would advertise a state the rollup
+// can never draw — a blind spot laundered into a covered-looking-but-empty channel (tenet 3).
+// The call-graph diff, which owns that third class, must still carry the entry (the parity).
+func TestRollupDiffLegendHasNoChangedClass(t *testing.T) {
+	base, branch := rollupSampleGraph(), rollupSampleGraph()
+	rollupDiff := RollupMermaidDiff(base, branch, RollupMermaidOptions{})
+	if strings.Contains(rollupDiff, "lg_changed") || strings.Contains(rollupDiff, "Δ changed") {
+		t.Errorf("component rollup diff must NOT advertise a `changed` class it cannot produce:\n%s", rollupDiff)
+	}
+	if cg := MermaidDiff(base, branch, MermaidOptions{MaxTier: 2}); !strings.Contains(cg, "lg_changed") {
+		t.Errorf("call-graph diff legend must still carry the `changed` entry (it owns that class):\n%s", cg)
+	}
+}
+
 // TestRollupExcludesTrivialEBC pins that a trivial (plumbing-tier) ExternalBoundaryCall
 // is NOT a disclosed component edge — the component view's signal depends on the same
 // Severity split the func()-seam tiering uses.

@@ -324,7 +324,7 @@ func rollupMermaidDiff(base, branch *PackageRollup, caveats []string, opts Rollu
 		b.WriteString("    %% omitted (imported, no functions) Δ: " + comment(strings.Join(parts, ", ")) +
 			" — types/consts-only internal package(s) added/removed from the rollup\n")
 	}
-	writeLegend(&b)
+	writeLegend(&b, false) // the C3 rollup delta has no `changed` class (no tier/concurrent at package grain)
 
 	// The composition-root packages (Role marker), for labeling the root box. A diff
 	// node already carries one delta-state class (added/removed/kept), so it cannot
