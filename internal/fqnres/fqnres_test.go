@@ -129,3 +129,29 @@ func TestNotRegexEdgeForms(t *testing.T) {
 		t.Errorf("Resolve(//) matched the entire universe (%d) — empty regex leaked", len(got.Matches))
 	}
 }
+
+// TestReportHelpers pins the shared resolution-report formatters (QuoteSingle, CapList,
+// UnresolvedDetail, AmbiguousDetail) — the byte-exact templates `groundwork assert` and
+// `flowmap graph --focus` both render through, so a drift here would desync the two
+// features' report shape (and TestAssertSpecAcceptance's byte-pinned output).
+func TestReportHelpers(t *testing.T) {
+	if got := QuoteSingle("x"); got != "'x'" {
+		t.Errorf("QuoteSingle = %q, want 'x'", got)
+	}
+	// Under the cap: plain "; " join, no truncation marker.
+	if got := CapList([]string{"a", "b", "c"}, 4); got != "a; b; c" {
+		t.Errorf("CapList under cap = %q", got)
+	}
+	// Over the cap: first n joined, then a disclosed " (+N more)".
+	if got := CapList([]string{"a", "b", "c", "d", "e"}, 3); got != "a; b; c (+2 more)" {
+		t.Errorf("CapList over cap = %q, want a; b; c (+2 more)", got)
+	}
+	if got := UnresolvedDetail("handler.App).Delete", "node/endpoint"); got != "UNRESOLVED: 'handler.App).Delete' matches no node/endpoint" {
+		t.Errorf("UnresolvedDetail = %q", got)
+	}
+	// AmbiguousDetail owns the candidate cap (4): a 5th candidate is truncated with "(+1 more)".
+	got := AmbiguousDetail("Score", []string{"a", "b", "c", "d", "e"})
+	if want := "AMBIGUOUS: 'Score' matches 5: a; b; c; d (+1 more)"; got != want {
+		t.Errorf("AmbiguousDetail = %q, want %q", got, want)
+	}
+}

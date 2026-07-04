@@ -19,15 +19,22 @@ package graphio
 // honesty channel survives the cap.
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
+	"github.com/jyang234/golang-code-graph/internal/fqnres"
 	"github.com/jyang234/golang-code-graph/internal/render"
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 )
+
+// maxPinnedList caps the FQN list the pinned-plumbing rescue note prints, disclosing
+// truncation with " (+N more)" (via fqnres.CapList) so a capped list never reads as the
+// whole rescued set (tenet 3).
+const maxPinnedList = 8
 
 // MermaidOptions tunes the flowchart render.
 type MermaidOptions struct {
@@ -69,6 +76,13 @@ type MermaidOptions struct {
 	// its isolation IS the finding. Set in-package only; not a CLI knob (you cannot pin
 	// a node without a --root/--focus scope). nil pins nothing (the whole-graph default).
 	pinNodes map[string]bool
+
+	// focusScoped marks a render invoked through MermaidFocus, so the over-cap index
+	// steers to "narrow the --focus set" rather than "scope with --root" — under --focus
+	// the CLI REJECTS --root, so the default --root advice is a dead end. Set in-package
+	// by MermaidFocus (never sniffed from the Entrypoint string, which is human prose);
+	// the zero value is the whole-graph/--root advice. Presentation only.
+	focusScoped bool
 
 	// pinRoot names the single --root node for the rescue-DISCLOSURE note only (below):
 	// when the pin rescued a plumbing-tier root from collapse, that is disclosed with
@@ -301,16 +315,15 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// of its own), so a rooted node's subtree never renders parentless (collapsing it drops
 	// its outgoing edges and orphans the branches it dispatches to) and an isolated focus
 	// node still renders as a lone box. Same mechanism mermaid_diff uses to force-keep the
-	// nodes it is diffing (the force arg keepNode already takes). pinRoot is folded in too
-	// so it is force-kept even when a caller sets it without pinNodes.
+	// nodes it is diffing (the force arg keepNode already takes). pinNodes is the ONE
+	// force-keep mechanism — MermaidRootedAt puts its root in pinNodes AND pinRoot, so the
+	// root is force-kept HERE via pinNodes; pinRoot is note-wording-only (below), never a
+	// second force-keep path that could drift from this one.
 	var force map[string]bool
-	if len(opts.pinNodes) > 0 || opts.pinRoot != "" {
-		force = make(map[string]bool, len(opts.pinNodes)+1)
+	if len(opts.pinNodes) > 0 {
+		force = make(map[string]bool, len(opts.pinNodes))
 		for fqn := range opts.pinNodes {
 			force[fqn] = true
-		}
-		if opts.pinRoot != "" {
-			force[opts.pinRoot] = true
 		}
 	}
 
@@ -341,6 +354,33 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 				}
 				break
 			}
+		}
+	}
+
+	// A --focus set pins its members too (opts.pinNodes). A pinned node that tier-collapse
+	// would have HIDDEN — plumbing-tier and no effect of its own, i.e. shown ONLY because of
+	// the pin — is otherwise rescued SILENTLY: the reviewer sees a tier-3 node in the diagram
+	// with no hint it is normally collapsed as plumbing. Disclose it, same keepNode(..., nil)
+	// "would this be kept anyway" test the root note uses (one source of truth). pinRoot is
+	// EXCLUDED — it keeps the root wording above. Sorted by FQN and capped (determinism).
+	if len(opts.pinNodes) > 0 {
+		var rescued []string
+		for _, n := range g.Nodes {
+			if n.FQN == opts.pinRoot {
+				continue
+			}
+			if opts.pinNodes[n.FQN] && !keepNode(n, opts.MaxTier, emitsEffect, nil) {
+				rescued = append(rescued, n.FQN)
+			}
+		}
+		if len(rescued) > 0 {
+			sort.Strings(rescued)
+			short := make([]string, len(rescued))
+			for i, fqn := range rescued {
+				short[i] = frontier.ShortName(fqn)
+			}
+			notes = append(notes, fmt.Sprintf("%d pinned node(s) are plumbing-tier (tier 3); pinned into view: %s",
+				len(rescued), fqnres.CapList(short, maxPinnedList)))
 		}
 	}
 
@@ -473,8 +513,15 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 func (g *Graph) overview(opts MermaidOptions, ids *idAlloc, drawn int, discs []disc, notes []string) string {
 	var b strings.Builder
 	writeFlowchartHeader(&b, g.Entrypoint, g.Algo)
+	// Under --focus the CLI refuses --root, so "scope with --root" is a dead end there —
+	// steer to narrowing the focus set instead. Keyed on the structural focusScoped flag,
+	// never sniffed from the Entrypoint prose.
+	advice := "scope with --root or raise --max-nodes"
+	if opts.focusScoped {
+		advice = "narrow the --focus set or raise --max-nodes"
+	}
 	b.WriteString("    %% " + strconv.Itoa(drawn) + " nodes exceed the render cap (" +
-		strconv.Itoa(opts.MaxNodes) + "); rendering an index instead — scope with --root or raise --max-nodes\n")
+		strconv.Itoa(opts.MaxNodes) + "); rendering an index instead — " + advice + "\n")
 	for _, n := range notes {
 		b.WriteString("    %% " + comment(n) + "\n")
 	}

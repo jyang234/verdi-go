@@ -465,21 +465,32 @@ func TestRunGraphFocus(t *testing.T) {
 		t.Errorf("focus scope label must echo the raw names in input order; got:\n%s", firstLines(out, 4))
 	}
 
-	// A single whole-value /regex/ containing a comma is ONE name (not split): it resolves
-	// as a regex rather than tripping the split-damage guard.
+	// A single whole-value /regex/ containing a comma is ONE name (not split) WHEN the
+	// comma sits inside a construct that leaves a damaged half-regex on split ('/a{1' +
+	// '2}/'): it resolves as one regex rather than tripping the ambiguity or split guard.
 	if err := run([]string{"graph", "--mermaid", "--focus", "/a{1,2}/", fixtureDir()}); err != nil {
 		t.Errorf("a whole-value /regex/ (even with a comma) must resolve as one name, got: %v", err)
 	}
 
 	silenceStdout(t)
+	// Alternation merge: a value that reads BOTH as one regex AND as a coherent comma list
+	// of regexes ('/a|b/,/c/') is AMBIGUOUS — refused, never silently merged into one wrong
+	// regex. (Each fragment is itself a well-formed /re/, so the list reading is coherent.)
+	if err := run([]string{"graph", "--mermaid", "--focus", "/a|b/,/c/", fixtureDir()}); err == nil {
+		t.Error("a value that reads as both one regex and a comma-list of regexes must be refused (ambiguous)")
+	}
 	// Split damage: a comma INSIDE a bare (non-whole-value) regex splits it into an
 	// unbalanced fragment — refused loudly, never silently two wrong plain names.
 	if err := run([]string{"graph", "--mermaid", "--focus", "x,/a{1,2}/", fixtureDir()}); err == nil {
 		t.Error("a comma-split regex fragment must be refused (split damage)")
 	}
-	// Empty focus list after splitting is a usage error.
+	// Empty value is a per-occurrence usage error — both alone and beside a good flag, so
+	// one empty flag cannot vanish silently next to a resolving one.
 	if err := run([]string{"graph", "--mermaid", "--focus", "", fixtureDir()}); err == nil {
-		t.Error(`--focus "" (empty list) must be refused`)
+		t.Error(`--focus "" (empty value) must be refused`)
+	}
+	if err := run([]string{"graph", "--mermaid", "--focus", "handler.App).Status", "--focus", "", fixtureDir()}); err == nil {
+		t.Error(`--focus "" beside a resolving flag must still be refused (per-occurrence)`)
 	}
 	// Fail-closed resolution: ambiguous and unresolved names each error with no output.
 	if err := run([]string{"graph", "--mermaid", "--focus", "Score", fixtureDir()}); err == nil {

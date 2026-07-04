@@ -1540,10 +1540,14 @@ flowmap graph --mermaid \
 - **Repeatable flag; a whole-value `/regex/` is one name.** `--focus` accumulates
   across occurrences. Within one occurrence the value is comma-split, **except** a
   single well-formed `/regex/` (leading + trailing `/`) is taken as **one** name even
-  if it contains commas — the escape hatch for a comma-bearing regex (`/a{1,2}/`,
-  FQN-list alternations) is to pass it as its own `--focus` flag. A fragment that
-  looks like half of a comma-split regex (a stray leading/trailing `/`) is **refused
-  loudly** rather than silently taken as two wrong plain names.
+  if it contains commas — *provided* the comma leaves a damaged half-regex on split
+  (`/a{1,2}/` → `/a{1` + `2}/`, so the single-regex reading is the only coherent one).
+  A value that reads coherently **both** as one regex **and** as a comma-separated list
+  of regexes (`/a|b/,/c/` — each fragment is itself a well-formed `/re/`) is **ambiguous
+  and refused**: pass each regex as its own `--focus` flag. A fragment that looks like
+  half of a comma-split regex (a stray leading/trailing `/`) is **refused loudly** rather
+  than silently taken as two wrong plain names. An **empty value** (`--focus ""`) is a
+  per-occurrence usage error, so one empty flag cannot vanish silently beside a good one.
 - **Fail-closed.** Any name that does not resolve aborts the **whole** render with no
   output — an `UNRESOLVED` (zero matches), an `AMBIGUOUS` (plain name → ≥2, with the
   sorted candidate list), a **zero-match regex** (a focus name that selects nothing is

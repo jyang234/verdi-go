@@ -81,8 +81,11 @@ func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
 // --root, the focus set for --focus — and context is the human phrase naming that
 // scope in the notes ("this handler's reach" / "the focus set"). Extracted from
 // rootedSubgraph so MermaidFocus reuses the SAME prune-and-disclose logic rather than
-// mirroring it; the untouched --root goldens pin that this refactor is byte-preserving
-// (CLAUDE.md: one source of truth). A pruned disclosure is DISCLOSED (a counted note),
+// mirroring it (CLAUDE.md: one source of truth). The loansvc --root goldens have every
+// disclosure IN reach, so they exercise only the keep path (droppedBlind/droppedFrontier
+// == 0); the DROP path (a disclosure outside the root's reach) is pinned by
+// TestFilterDisclosuresDropsOutOfReach, not by any golden. A pruned disclosure is
+// DISCLOSED (a counted note),
 // never silently dropped, so a render-time-scoped view is never less honest than the
 // whole-graph view about where the analysis goes dark.
 func (g *Graph) filterDisclosures(sub *Graph, keep map[string]bool, context string) []string {

@@ -189,6 +189,29 @@ func TestUnexpectedFieldRejected(t *testing.T) {
 	}
 }
 
+// TestAnchorErrorLabelNamesBothFields pins FIX 6: a claim with BOTH the canonical anchor
+// and its `fn` alias ERRORs (the anchor is empty), and the report LABEL falls back to
+// naming both fields ("<canonical>/<fn>") so the id-less error line still identifies the
+// claim instead of rendering with a blank label.
+func TestAnchorErrorLabelNamesBothFields(t *testing.T) {
+	// node/no_node: fqn + fn both set.
+	r := evalOne(t, Claim{Kind: "node", FQN: "handler.App).Create", Fn: "handler.App).Status"})
+	if r.Outcome != Errored {
+		t.Fatalf("node with fqn+fn = %+v, want Errored", r)
+	}
+	if want := "handler.App).Create/handler.App).Status"; r.Label != want {
+		t.Errorf("node anchor-error label = %q, want %q", r.Label, want)
+	}
+	// in_degree/out_degree: of + fn both set.
+	r = evalOne(t, Claim{Kind: "in_degree", Of: "repo.Store).Save", Fn: "repo.Store).Load", Eq: intp(0)})
+	if r.Outcome != Errored {
+		t.Fatalf("in_degree with of+fn = %+v, want Errored", r)
+	}
+	if want := "repo.Store).Save/repo.Store).Load"; r.Label != want {
+		t.Errorf("degree anchor-error label = %q, want %q", r.Label, want)
+	}
+}
+
 // TestCounterpartFilterFailsClosed pins that a counterpart filter matching
 // NOTHING anywhere in the graph is an ERROR (a typo/rename), not a vacuous pass
 // on an eq:0 claim.
@@ -196,6 +219,11 @@ func TestCounterpartFilterFailsClosed(t *testing.T) {
 	r := evalOne(t, Claim{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(0), CounterpartMatching: "/nonexistent-pkg/"})
 	if r.Outcome != Errored {
 		t.Errorf("typo'd counterpart filter with eq:0 = %+v, want Errored (not a vacuous pass)", r)
+	}
+	// The detail reads in the shared UNRESOLVED convention (FIX 7), not the old bespoke
+	// "unresolved counterpart filter \"…\"" wording.
+	if want := "UNRESOLVED: '/nonexistent-pkg/' matches no node/endpoint (counterpart filter)"; r.Detail != want {
+		t.Errorf("counterpart-miss detail = %q, want %q", r.Detail, want)
 	}
 	// A filter that resolves in the graph (matches a real package) but none of
 	// App.Create's callees are in it is a LEGITIMATE zero — it passes eq:0.

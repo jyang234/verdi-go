@@ -168,6 +168,79 @@ func TestMermaidFocusDeterministic(t *testing.T) {
 	}
 }
 
+// TestMermaidFocusDisclosesPinnedPlumbing pins that a CONNECTED tier-3 focus node —
+// shown only because the focus pin rescued it from tier-collapse — is DISCLOSED, not
+// hidden as silent plumbing. Determinism guard included (a new note ordering path).
+func TestMermaidFocusDisclosesPinnedPlumbing(t *testing.T) {
+	g := &Graph{
+		Algo: "rta",
+		Nodes: []Node{
+			{FQN: "example.com/svc/pkg.Handler", Tier: 1},
+			{FQN: "example.com/svc/pkg.plumbing", Tier: 3}, // plumbing, no effect of its own
+		},
+		Edges: []Edge{{From: "example.com/svc/pkg.Handler", To: "example.com/svc/pkg.plumbing", Tier: 3}},
+	}
+	names := []string{"pkg.Handler", "pkg.plumbing"}
+	out, err := g.MermaidFocus(names, MermaidOptions{MaxTier: 2})
+	if err != nil {
+		t.Fatalf("MermaidFocus: %v", err)
+	}
+	if !strings.Contains(out, "pinned into view:") || !strings.Contains(out, "plumbing-tier (tier 3)") {
+		t.Errorf("focus render must disclose the pin-rescued tier-3 node, not hide it:\n%s", out)
+	}
+	again, _ := g.MermaidFocus(names, MermaidOptions{MaxTier: 2})
+	if out != again {
+		t.Error("pinned-plumbing disclosure note not deterministic across repeats")
+	}
+}
+
+// TestFocusOverCapAdvice pins that the over-cap index advice is PATH-AWARE: the whole-graph
+// render steers to --root, but a --focus render steers to narrowing the --focus set (the CLI
+// refuses --root under --focus, so "scope with --root" would be a dead end there — FIX 10).
+func TestFocusOverCapAdvice(t *testing.T) {
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: "a.A", Tier: 1}, {FQN: "a.B", Tier: 1}},
+		Edges: []Edge{{From: "a.A", To: "a.B", Tier: 1}},
+	}
+	whole := g.Mermaid(MermaidOptions{MaxTier: 2, MaxNodes: 1})
+	if !strings.Contains(whole, "scope with --root or raise --max-nodes") {
+		t.Errorf("whole-graph over-cap advice must name --root:\n%s", whole)
+	}
+	focus, err := g.MermaidFocus([]string{"a.A", "a.B"}, MermaidOptions{MaxTier: 2, MaxNodes: 1})
+	if err != nil {
+		t.Fatalf("MermaidFocus: %v", err)
+	}
+	if !strings.Contains(focus, "narrow the --focus set or raise --max-nodes") {
+		t.Errorf("focus over-cap advice must steer to --focus:\n%s", focus)
+	}
+	if strings.Contains(focus, "scope with --root") {
+		t.Errorf("focus over-cap advice must NOT steer to --root (refused under --focus):\n%s", focus)
+	}
+}
+
+// TestFocusFailsClosedOnDanglingEndpoint pins FIX 2: a focus name that resolves (via the
+// endpoint universe) to an edge endpoint with NO node record has no node id, so its induced
+// edges would vanish silently. That is refused with a dangling disclosure, never a partial
+// render.
+func TestFocusFailsClosedOnDanglingEndpoint(t *testing.T) {
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: "a.A", Tier: 1}},
+		Edges: []Edge{{From: "a.A", To: "a.GHOST", Tier: 1}}, // a.GHOST is an endpoint with no Node
+	}
+	out, err := g.MermaidFocus([]string{"a.A", "a.GHOST"}, MermaidOptions{MaxTier: 2})
+	if err == nil {
+		t.Fatalf("expected a dangling-endpoint error, got render:\n%s", out)
+	}
+	if out != "" {
+		t.Errorf("a dangling focus endpoint must render NOTHING, got:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "dangling") || !strings.Contains(err.Error(), "a.GHOST") {
+		t.Errorf("error must name the dangling endpoint: %v", err)
+	}
+}
+
 // TestFocusResolverParityWithAssert pins Part 3 of the companion spec — "one resolver,
 // both features": `--focus` (graphio.endpointUniverse + fqnres) and `groundwork assert`
 // (claims.newModel's endpoint universe + fqnres) resolve a name to the SAME FQN set over
@@ -187,19 +260,24 @@ func TestFocusResolverParityWithAssert(t *testing.T) {
 		t.Fatalf("load groundwork graph: %v", err)
 	}
 
-	// The two endpoint universes must be byte-identical: same rule (sorted node FQNs ∪
-	// edge endpoints), same graph, so fqnres.Resolve answers every name identically.
+	// The two endpoint universes must be byte-identical: PRODUCTION vs PRODUCTION — graphio's
+	// endpointUniverse() against claims' exported EndpointUniverse constructor (the one
+	// newModel builds from), so a drift between the two features' universe rules surfaces
+	// here rather than hiding behind a test-local re-derivation (FIX 9).
 	focusUniverse := gg.endpointUniverse()
-	claimsUniverse := claimsStyleUniverse(cg)
+	claimsUniverse := claims.EndpointUniverse(cg)
 	if !reflect.DeepEqual(focusUniverse, claimsUniverse) {
 		t.Fatalf("focus and claims endpoint universes differ:\n focus:  %v\n claims: %v", focusUniverse, claimsUniverse)
 	}
 
-	// Tie the rebuilt universe to claims' ACTUAL resolution: an ambiguous "Score" run
-	// through claims.Evaluate lists exactly the candidates fqnres returns over the focus
-	// universe, so the parity is against real claims code, not just a re-derived rule.
+	// Tie the rebuilt universe to claims' ACTUAL resolution over the ENDPOINT universe: an
+	// EDGE claim whose 'from' is the ambiguous "Score" resolves the from-side against claims'
+	// endpoint universe (resolveMany) and ERRORs AMBIGUOUS, listing exactly the candidates
+	// fqnres returns over that universe. The 'to' is a boundary endpoint that lives ONLY in
+	// the endpoint universe — a node-universe claim would never touch this universe (the old
+	// probe's blind spot).
 	fr, _ := fqnres.Resolve("Score", focusUniverse)
-	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{{Kind: "node", FQN: "Score"}}})
+	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{{Kind: "edge", From: "Score", To: "boundary:db SELECT loans"}}})
 	var detail string
 	for _, r := range rep.Results {
 		if r.Outcome == claims.Errored {
@@ -207,7 +285,7 @@ func TestFocusResolverParityWithAssert(t *testing.T) {
 		}
 	}
 	if detail == "" {
-		t.Fatalf("expected claims to ERROR on ambiguous 'Score', got: %s", rep.String())
+		t.Fatalf("expected claims to ERROR on the ambiguous 'Score' edge from-side, got: %s", rep.String())
 	}
 	for _, cand := range fr.Matches {
 		if !strings.Contains(detail, cand) {
@@ -227,25 +305,4 @@ func TestFocusResolverParityWithAssert(t *testing.T) {
 	if fm := impact.ResolveFrame(ix, dotted); len(fm.Matches) != 0 {
 		t.Errorf("impact.ResolveFrame must NOT resolve the normalized label %q (deliberate non-unification), got %v", dotted, fm.Matches)
 	}
-}
-
-// claimsStyleUniverse rebuilds the endpoint universe by the rule claims.newModel uses
-// (sorted node FQNs ∪ every edge from/to string) from the groundwork graph — the parity
-// target for graphio.endpointUniverse. Kept in the test (not shared code) precisely so a
-// drift between the two production constructions surfaces here as a mismatch.
-func claimsStyleUniverse(g *gwgraph.Graph) []string {
-	set := map[string]bool{}
-	for _, n := range g.Nodes {
-		set[n.FQN] = true
-	}
-	for _, e := range g.Edges {
-		set[e.From] = true
-		set[e.To] = true
-	}
-	out := make([]string, 0, len(set))
-	for k := range set {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

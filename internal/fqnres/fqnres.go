@@ -117,3 +117,44 @@ func Resolve(query string, universe []string) (Result, error) {
 	sort.Strings(m)
 	return Result{Matches: m, Ambiguous: len(m) > 1}, nil
 }
+
+// maxCandidates caps the candidate list AmbiguousDetail prints — the ONE home of the
+// resolution-report candidate cap (CLAUDE.md: one source of truth). Both `groundwork
+// assert` and `flowmap graph --focus` report an ambiguous name through AmbiguousDetail,
+// so the cap lives here rather than in each caller where two copies could drift.
+const maxCandidates = 4
+
+// QuoteSingle wraps a query in single quotes for a resolution-report detail — the
+// report's ONE quoting convention (distinct from strconv.Quote's double quotes used
+// in schema-level messages). Shared by assert and --focus so the two features quote a
+// name identically (CLAUDE.md: one source of truth).
+func QuoteSingle(s string) string { return "'" + s + "'" }
+
+// CapList joins up to n items with "; " — the resolution report's ONE list separator —
+// disclosing any truncation with " (+N more)" so a capped list never reads as the whole
+// set (tenet 3). Items are expected pre-sorted (fqnres.Resolve returns sorted matches);
+// CapList does not reorder. Shared by assert's offender/candidate lists and --focus.
+func CapList(items []string, n int) string {
+	if len(items) <= n {
+		return strings.Join(items, "; ")
+	}
+	return strings.Join(items[:n], "; ") + fmt.Sprintf(" (+%d more)", len(items)-n)
+}
+
+// UnresolvedDetail formats the shared UNRESOLVED report line: `UNRESOLVED: '<query>'
+// matches no <noun>`, where noun names the universe the query was resolved against
+// ("node" for the node universe, "node/endpoint" for the endpoint universe). One
+// format for assert and --focus so a resolution failure reads identically in both.
+func UnresolvedDetail(query, noun string) string {
+	return fmt.Sprintf("UNRESOLVED: %s matches no %s", QuoteSingle(query), noun)
+}
+
+// AmbiguousDetail formats the shared AMBIGUOUS report line: `AMBIGUOUS: '<query>'
+// matches <N>: <c1>; <c2>; …` — the query single-quoted, the candidates "; "-joined,
+// sorted (Resolve returns them sorted), and capped at maxCandidates with " (+N more)".
+// The candidate cap is owned HERE so assert and --focus disclose an ambiguous name
+// identically (CLAUDE.md: one source of truth).
+func AmbiguousDetail(query string, candidates []string) string {
+	return fmt.Sprintf("AMBIGUOUS: %s matches %d: %s",
+		QuoteSingle(query), len(candidates), CapList(candidates, maxCandidates))
+}
