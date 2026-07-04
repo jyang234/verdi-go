@@ -1211,6 +1211,23 @@ it. Top-level sections:
 | `entrypoints[]` | `{kind: http\|consumer, name, fn}` — the route/topic → handler join | names are registration-site literals: match segment-wise, never exactly-or-nothing |
 | `stamp` | optional caller-supplied identity (the CI commit SHA) | verify with `triage`/`mcp` `--expect`; absent on local/golden builds by design |
 
+**Edge-record identity — `edges[]` can carry the same `(from, to)` more than
+once, on purpose.** A record's identity is its **full attribute tuple**
+`(from, to, tier, boundary, concurrent, via)`, not the `(from, to)` pair. The
+serializer sorts on all six fields and collapses only records that are equal in
+*every* field, because a plain reference and a `go`-launched call to the same
+callee are two distinct facts about the code, not a duplicate to be merged. So a
+single `(from, to)` pair legitimately appears twice — e.g. `App.process → repo.Save`
+emitted once as a synchronous call and once with `concurrent: true` for a
+`go repo.Save(...)` at another site — and both records survive. Consumers that
+count "edges" must therefore decide which basis they mean: **raw records** (every
+attribute-distinct fact, including the sync/concurrent split) or **unique
+`(from, to)` pairs** (structural connectivity, mode-blind). State the basis
+explicitly — the two differ exactly when a pair carries more than one mode, and a
+count that does not say which it used is ambiguous. Graph-derived point-in-time
+checks over this file should count **unique `(from, to)` pairs** unless they are
+specifically asserting a mode.
+
 Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
 have not been taught about should fail loudly, not drop fields silently.
 Producer and judge deploy in lockstep — that is a feature.
