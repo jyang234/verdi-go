@@ -24,6 +24,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/coverage"
 	"github.com/jyang234/golang-code-graph/internal/diff"
+	"github.com/jyang234/golang-code-graph/internal/fqnres"
 	"github.com/jyang234/golang-code-graph/internal/golden"
 	"github.com/jyang234/golang-code-graph/internal/ingest"
 	"github.com/jyang234/golang-code-graph/internal/otlpjson"
@@ -158,6 +159,32 @@ func cmdGraph(args []string) error {
 	maxNodes := fs.Int("max-nodes", 300, "with --mermaid, cap how many nodes a diagram draws; above the cap it renders an index of entry points to --root at instead of an illegible hairball (0 = uncapped)")
 	rollup := fs.String("rollup", "", `emit a component-level (C3) rollup grouping nodes by package: "package". Default output is the rollup JSON; with --mermaid it renders the component flowchart, with --diff BASE the component delta (code-vs-disclosure split)`)
 	rollupBands := fs.Bool("rollup-bands", false, "with --rollup --mermaid, group the component boxes into architectural BAND lanes (transport/application/provisioning/storage/infrastructure/tests, read from the package name) with the composition root drawn outside the lanes; a view grouping, never a gate (no-op without --mermaid)")
+	// --focus is REPEATABLE (flag.Func accumulates): each occurrence adds one or more
+	// focus names for the induced-subgraph render. Within one occurrence the value is
+	// comma-split, EXCEPT a single well-formed /regex/ (which may contain commas) is taken
+	// as ONE name — the escape hatch for a comma-bearing regex is to pass it as its own
+	// --focus flag. A fragment that looks like half of a comma-split regex fails closed.
+	var focusNames []string
+	focusSeen := false
+	fs.Func("focus", "with --mermaid, render the induced subgraph over these names — the named nodes and only the edges among them (a view, never a gate). Repeatable; comma-separated, or a single /regex/ (which may contain commas) per flag. Mutually exclusive with --root/--entry/--diff/--rollup", func(v string) error {
+		focusSeen = true
+		// Whole-value-regex exemption: parity with fqnres.IsRegex (leading+trailing '/',
+		// len ≥ 3) — the SAME rule Resolve uses, so a /regex/ is one name in both places.
+		if fqnres.IsRegex(v) {
+			focusNames = append(focusNames, v)
+			return nil
+		}
+		for _, frag := range splitList(v) {
+			// Fail closed on split damage: a fragment that starts with '/' XOR ends with '/'
+			// is a regex a comma split in half — never let a comma inside a regex silently
+			// become two wrong plain names (a confidently-wrong induced set).
+			if strings.HasPrefix(frag, "/") != strings.HasSuffix(frag, "/") {
+				return fmt.Errorf("--focus: %s looks like part of a regex split on ','; pass a comma-bearing regex as its own --focus flag", frag)
+			}
+			focusNames = append(focusNames, frag)
+		}
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -174,6 +201,33 @@ func cmdGraph(args []string) error {
 	// --rollup) — the same whole-service reason --rollup already refuses --entry below.
 	if *diffBase != "" && *entry != "" {
 		return fmt.Errorf("graph --diff and --entry are mutually exclusive: --entry scopes the branch to one entry cone, so a diff against a whole-graph base would report every out-of-cone function as removed (a false delta)")
+	}
+
+	// --focus exclusivity/requirements resolved BEFORE the build (like --diff+--entry
+	// above): --focus needs the UNSCOPED graph (it discloses pruned frontier markers, so
+	// an --entry-scoped build that drops the Frontier section would silently hide them —
+	// the same reason --root refuses --entry), so refuse the incompatible combinations
+	// before Analyze rather than build a graph the view cannot honestly use. An empty
+	// focus list (e.g. --focus "") is a usage error — an empty induced set draws nothing.
+	if focusSeen && len(focusNames) == 0 {
+		return fmt.Errorf("graph --focus: empty focus list (no names after splitting); pass at least one name or a /regex/")
+	}
+	if len(focusNames) > 0 {
+		if !*asMermaid {
+			return fmt.Errorf("graph --focus requires --mermaid: the focused subgraph is a Mermaid view (a view, never a gate)")
+		}
+		if *rootAt != "" {
+			return fmt.Errorf("graph --focus and --root are mutually exclusive: --root scopes to one handler's forward reach, --focus renders the induced subgraph over exactly the named nodes")
+		}
+		if *entry != "" {
+			return fmt.Errorf("graph --focus and --entry are mutually exclusive: --focus scopes at render time over the full graph (keeping frontier markers), --entry scopes the build (dropping them)")
+		}
+		if *diffBase != "" {
+			return fmt.Errorf("graph --focus and --diff are mutually exclusive: --focus renders one induced subgraph, --diff renders a base→branch delta")
+		}
+		if *rollup != "" {
+			return fmt.Errorf("graph --focus and --rollup are mutually exclusive: --rollup is the component (C3) view, --focus renders the induced call-graph subgraph")
+		}
 	}
 
 	opt, err := algoOption(*algo)
@@ -210,6 +264,17 @@ func cmdGraph(args []string) error {
 			maxTier = 0
 		}
 		opts := graphio.MermaidOptions{MaxTier: maxTier, MaxNodes: *maxNodes, ShowAllBlindSpots: *allBlindSpots}
+		if len(focusNames) > 0 {
+			// Exclusivity with --root/--entry/--diff/--rollup was refused before the build.
+			// MermaidFocus fails closed on any unresolved/ambiguous/zero-match name; its error
+			// carries the sorted candidate list, so surface it verbatim.
+			out, ferr := g.MermaidFocus(focusNames, opts)
+			if ferr != nil {
+				return ferr
+			}
+			_, err = os.Stdout.WriteString(render.Fence(out))
+			return err
+		}
 		if *rootAt != "" && *diffBase != "" {
 			return fmt.Errorf("graph --root and --diff are mutually exclusive: --root renders one handler's reach, --diff renders a base→branch delta; a rooted diff is not supported")
 		}

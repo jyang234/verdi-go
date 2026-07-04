@@ -62,10 +62,20 @@ type MermaidOptions struct {
 	// keeps the denoise-with-a-count default.
 	ShowAllBlindSpots bool
 
-	// pinRoot, when set, force-keeps that one FQN against tier-collapse — the explicit
-	// --root node, which may itself be a plumbing-tier dispatcher (a pure decode/dispatch
-	// shim with no effect of its own). Set in-package by MermaidRootedAt; not a CLI knob
-	// (you cannot pin a root without rooting).
+	// pinNodes force-keeps every FQN in the set against tier-collapse — the explicit
+	// user selection a render must not silently drop. MermaidRootedAt sets the single
+	// --root node; MermaidFocus sets the whole focus set, so an isolated focus node
+	// (no induced edge) still renders as a lone box rather than collapsing as plumbing —
+	// its isolation IS the finding. Set in-package only; not a CLI knob (you cannot pin
+	// a node without a --root/--focus scope). nil pins nothing (the whole-graph default).
+	pinNodes map[string]bool
+
+	// pinRoot names the single --root node for the rescue-DISCLOSURE note only (below):
+	// when the pin rescued a plumbing-tier root from collapse, that is disclosed with
+	// "root … pinned into view". It is force-kept via pinNodes like any pinned node; this
+	// field exists solely so the note can be worded for the root case and NOT misfire per
+	// focus node (an isolated focus node discloses itself as a lone box, needs no note).
+	// Set in-package by MermaidRootedAt; empty for the focus and whole-graph views.
 	pinRoot string
 }
 
@@ -286,14 +296,22 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 		emitsEffect[site] = true
 	}
 
-	// An explicit --root is a user selection: pin it into view even when it is
-	// plumbing-tier (a pure decode/dispatch shim with no effect of its own), so its
-	// subtree never renders parentless — collapsing the rooted node drops its outgoing
-	// edges and orphans the branches it dispatches to. Same mechanism mermaid_diff uses
-	// to force-keep the very nodes it is diffing (the force arg keepNode already takes).
+	// An explicit --root/--focus selection is a user request: pin every selected node
+	// into view even when it is plumbing-tier (a pure decode/dispatch shim with no effect
+	// of its own), so a rooted node's subtree never renders parentless (collapsing it drops
+	// its outgoing edges and orphans the branches it dispatches to) and an isolated focus
+	// node still renders as a lone box. Same mechanism mermaid_diff uses to force-keep the
+	// nodes it is diffing (the force arg keepNode already takes). pinRoot is folded in too
+	// so it is force-kept even when a caller sets it without pinNodes.
 	var force map[string]bool
-	if opts.pinRoot != "" {
-		force = map[string]bool{opts.pinRoot: true}
+	if len(opts.pinNodes) > 0 || opts.pinRoot != "" {
+		force = make(map[string]bool, len(opts.pinNodes)+1)
+		for fqn := range opts.pinNodes {
+			force[fqn] = true
+		}
+		if opts.pinRoot != "" {
+			force[opts.pinRoot] = true
+		}
 	}
 
 	// Pass A: assign ids to the first-party nodes we will show.

@@ -1512,6 +1512,65 @@ drift surfaces only in the function-grain `--diff` (the JSON delta and
 set-based graph delta, which feeds the review verdict's shape/touch labels rather
 than this consumer-facing attribute report; the two are kept separate on purpose.
 
+### Focused subgraph — `flowmap graph --mermaid --focus`
+
+`--focus <name[,name…]>` renders the **induced subgraph** over exactly the named
+functions: their nodes, and **only the edges whose _both_ endpoints are named**.
+Nothing reachable-but-unnamed is pulled in, and — the load-bearing part — the
+**absence of an edge in the render is a graph fact, not an omission**: if two named
+nodes have no arrow between them, the analysis records no call between them. It is a
+**view, never a gate**.
+
+```bash
+# The named nodes and only the edges among them.
+flowmap graph --mermaid \
+  --focus 'handler.App).Status,store.Loans).SelectLoan' \
+  --focus '/scoring\.(Remote|Stub)\).Score$/' ./svc
+```
+
+- **Same resolver as `assert`.** Each name resolves through the one shared resolver
+  (`internal/fqnres`), so a name means the same thing here and in a claims file: a
+  **plain** name is a receiver-punctuation-forgiving normalized-FQN suffix
+  (unique-or-die), a **`/regex/`** sees the raw FQN and may match many. The
+  suffix-vs-regex convention is documented once, under
+  [Claims files](#claims-files--groundwork-assert-graphjson-claimsjson). Boundary
+  pseudo-nodes (`boundary:db SELECT loans`) are focusable — they occur only as edge
+  endpoints, so a boundary edge draws only when **both** the caller and the boundary
+  are named.
+- **Repeatable flag; a whole-value `/regex/` is one name.** `--focus` accumulates
+  across occurrences. Within one occurrence the value is comma-split, **except** a
+  single well-formed `/regex/` (leading + trailing `/`) is taken as **one** name even
+  if it contains commas — the escape hatch for a comma-bearing regex (`/a{1,2}/`,
+  FQN-list alternations) is to pass it as its own `--focus` flag. A fragment that
+  looks like half of a comma-split regex (a stray leading/trailing `/`) is **refused
+  loudly** rather than silently taken as two wrong plain names.
+- **Fail-closed.** Any name that does not resolve aborts the **whole** render with no
+  output — an `UNRESOLVED` (zero matches), an `AMBIGUOUS` (plain name → ≥2, with the
+  sorted candidate list), a **zero-match regex** (a focus name that selects nothing is
+  a typo, not a legal empty set — unlike an `edge_count` claim's legal `0`), or a
+  regex compile error. A silently dropped focus node would be a lie about the induced
+  set, so it is never a partial render.
+- **Isolated nodes still render.** A focused node with no induced edge draws as a lone
+  box (it is force-kept against tier-collapse) — its isolation **is** the finding.
+- **Boundary names with no induced edge are disclosed, not dropped.** A boundary
+  endpoint that no focused caller reaches cannot draw (a boundary node exists only as
+  an edge target); rather than vanish, it is named in a header note
+  (`… boundary endpoints with no induced edge — not drawn: …`). Pruned blind-spot and
+  frontier markers are disclosed the same way `--root` discloses them.
+- **Exclusivity.** `--focus` **requires** `--mermaid` (it is a Mermaid view) and is
+  **mutually exclusive** with `--root`, `--entry`, `--diff`, and `--rollup` — each
+  refused with a reason. `--entry` is load-bearing: an entry-scoped build drops the
+  Frontier section, and the focus view discloses pruned frontier markers, so it must
+  run over the **unscoped** graph (the same reason `--root` refuses `--entry`). The
+  reclaimer flags (`--reclaim*`, `--rebind`) **compose** — they mutate the graph
+  before the view.
+
+The manifest / alias / judgment-overlay layer from the feature request stays
+**consumer-side**: `--focus` takes FQN-resolving names (plain suffix or `/regex/`) and
+nothing else. Because the render is a **byte-deterministic** function of the graph and
+the focus list, a consumer `--check`-style workflow (regenerate-and-diff the focused
+view in CI) is safe — the same input always produces the same bytes.
+
 ---
 
 ## Glossary

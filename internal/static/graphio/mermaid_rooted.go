@@ -27,6 +27,7 @@ func (g *Graph) MermaidRootedAt(root string, opts MermaidOptions) (string, bool)
 	if !ok {
 		return "", false
 	}
+	opts.pinNodes = map[string]bool{rootFn: true}
 	opts.pinRoot = rootFn
 	return sub.mermaid(opts, notes), true
 }
@@ -64,14 +65,34 @@ func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
 		}
 	}
 
+	// Filter the disclosure channels (blind spots / frontier markers / annotations) to
+	// this handler's reach and disclose what was pruned. Shared with MermaidFocus so the
+	// two render-time-scoped views cannot drift in their disclosure honesty (CLAUDE.md:
+	// one source of truth); the phrase names the scope in the dropped-count notes.
+	notes := g.filterDisclosures(sub, reach, "this handler's reach")
+	return sub, notes, rootFn, true
+}
+
+// filterDisclosures filters g's disclosure channels — BlindSpots (attributed to a
+// site FQN), Frontier markers (an owning function or site FQN), and Annotations (a
+// blind spot decorated by (Site, Kind)) — down to those whose attribution falls in
+// keep, writing the survivors onto sub, and returns the dropped-count disclosure
+// notes. keep is the render-time scope's node set — a handler's forward reach for
+// --root, the focus set for --focus — and context is the human phrase naming that
+// scope in the notes ("this handler's reach" / "the focus set"). Extracted from
+// rootedSubgraph so MermaidFocus reuses the SAME prune-and-disclose logic rather than
+// mirroring it; the untouched --root goldens pin that this refactor is byte-preserving
+// (CLAUDE.md: one source of truth). A pruned disclosure is DISCLOSED (a counted note),
+// never silently dropped, so a render-time-scoped view is never less honest than the
+// whole-graph view about where the analysis goes dark.
+func (g *Graph) filterDisclosures(sub *Graph, keep map[string]bool, context string) []string {
 	// Blind spots are attributed to a first-party site FQN; keep those whose site is
-	// in reach. One whose site is not reachable from this handler — a package-level
-	// site (reflect/unsafe, no owning function), or an FQN in another handler's
-	// subtree — is pruned here and DISCLOSED, so the per-handler view never silently
-	// omits a blind spot the whole-graph view shows.
+	// in the scope. One whose site is out of scope — a package-level site (reflect/
+	// unsafe, no owning function), or an FQN in another subtree — is pruned and DISCLOSED,
+	// so the scoped view never silently omits a blind spot the whole-graph view shows.
 	droppedBlind := 0
 	for _, b := range g.BlindSpots {
-		if reach[b.Site] {
+		if keep[b.Site] {
 			sub.BlindSpots = append(sub.BlindSpots, b)
 		} else {
 			droppedBlind++
@@ -79,15 +100,15 @@ func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
 	}
 
 	// Frontier markers are attributed to an owning function (Owner) or a site FQN.
-	// Keep a marker when either falls in reach; one with no reachable owner/site (a
-	// marker keyed on an effect label, or owned by a function outside this handler's
-	// reach) is pruned and DISCLOSED in parallel with the blind spots above, so the
-	// rooted view is symmetrically honest about both disclosure channels.
+	// Keep a marker when either falls in scope; one with no in-scope owner/site (a
+	// marker keyed on an effect label, or owned by a function outside the scope) is
+	// pruned and DISCLOSED in parallel with the blind spots above, so the scoped view
+	// is symmetrically honest about both disclosure channels.
 	droppedFrontier := 0
 	var markers []frontier.Marker
 	if g.Frontier != nil {
 		for _, m := range g.Frontier.Markers {
-			if reach[m.Owner] || reach[m.Site] {
+			if keep[m.Owner] || keep[m.Site] {
 				markers = append(markers, m)
 			} else {
 				droppedFrontier++
@@ -98,14 +119,11 @@ func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
 		}
 	}
 
-	// Annotations decorate a blind spot by (Site, Kind); the rooted view must carry
-	// those whose blind spot SURVIVED the prune above, or the per-handler diagram drops
-	// the 🗒 context the whole-graph view shows. It did: sub.Annotations was left nil, so
-	// rooted (--root) views rendered ZERO annotation notes and ZERO 🗒 markers even
-	// though the whole-graph render carried them — the most-read diagram was the one
-	// missing the boundary context (§21.B). Filter to the surviving (Site, Kind) set, in
-	// parallel with the blind-spot prune; an annotation whose spot was pruned rides that
-	// spot's "shown only in the whole-graph view" disclosure, so it is not lost silently.
+	// Annotations decorate a blind spot by (Site, Kind); the scoped view must carry
+	// those whose blind spot SURVIVED the prune above, or the scoped diagram drops the
+	// 🗒 context the whole-graph view shows (§21.B). Filter to the surviving (Site, Kind)
+	// set, in parallel with the blind-spot prune; an annotation whose spot was pruned
+	// rides that spot's "shown only in the whole-graph view" disclosure, not lost silently.
 	keptSpot := make(map[[2]string]bool, len(sub.BlindSpots))
 	for _, b := range sub.BlindSpots {
 		keptSpot[[2]string{b.Site, string(b.Kind)}] = true
@@ -119,13 +137,13 @@ func (g *Graph) rootedSubgraph(root string) (*Graph, []string, string, bool) {
 	var notes []string
 	if droppedBlind > 0 {
 		notes = append(notes, plural(droppedBlind, "blind spot")+
-			" outside this handler's reach shown only in the whole-graph view")
+			" outside "+context+" shown only in the whole-graph view")
 	}
 	if droppedFrontier > 0 {
 		notes = append(notes, plural(droppedFrontier, "frontier marker")+
-			" outside this handler's reach shown only in the whole-graph view")
+			" outside "+context+" shown only in the whole-graph view")
 	}
-	return sub, notes, rootFn, true
+	return notes
 }
 
 // resolveRoot maps a user-supplied root to a handler FQN. It tries, in order: an

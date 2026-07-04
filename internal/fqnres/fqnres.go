@@ -78,6 +78,13 @@ func isRegex(query string) bool {
 	return len(query) >= 3 && query[0] == '/' && query[len(query)-1] == '/'
 }
 
+// IsRegex reports whether query is the explicit /regex/ form (the exported view of
+// isRegex). cmd/flowmap's --focus splitter uses it to apply the SAME whole-value-regex
+// exemption Resolve does — a single well-formed /regex/ is ONE focus name even when it
+// contains commas — without a drifting copy of the 3-byte rule (CLAUDE.md: one source
+// of truth). Kept a thin wrapper so the rule has exactly one definition.
+func IsRegex(query string) bool { return isRegex(query) }
+
 // Resolve matches query against universe (a slice the caller builds once;
 // Resolve sorts its own output, so an unsorted universe is fine). Plain
 // queries use normalized-suffix matching with unique-or-die semantics surfaced
