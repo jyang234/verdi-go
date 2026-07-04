@@ -217,7 +217,10 @@ func TestMermaidRootedNonPlumbingRootByteIdentical(t *testing.T) {
 		t.Fatal("expected POST /create to resolve")
 	}
 
-	pinned := MermaidOptions{MaxTier: 2, pinRoot: rootFn}
+	// pinNodes is the ONE force-keep mechanism (pinRoot is note-wording-only), so the pin
+	// must be set the way MermaidRootedAt sets it — root in BOTH pinNodes and pinRoot — for
+	// this to test an ACTIVE pin's inertness rather than a no-op with force nil.
+	pinned := MermaidOptions{MaxTier: 2, pinNodes: map[string]bool{rootFn: true}, pinRoot: rootFn}
 	unpinned := MermaidOptions{MaxTier: 2}
 	// Independent note copies so an append into a shared backing array cannot make the
 	// two renders differ for a reason other than the pin (the property under test).
@@ -229,6 +232,68 @@ func TestMermaidRootedNonPlumbingRootByteIdentical(t *testing.T) {
 	}
 	if strings.Contains(withPin, "pinned into view") {
 		t.Errorf("a non-plumbing root must not emit the pin note:\n%s", withPin)
+	}
+}
+
+// TestMermaidPinRootWithoutPinNodesDoesNotForceKeep pins the invariant that force-keep
+// flows ONLY through pinNodes: a plumbing-tier root named by pinRoot but ABSENT from
+// pinNodes is NOT force-kept — it collapses like any plumbing node, and no "pinned into
+// view" note fires (a note about a node the render dropped would be a lie). MermaidRootedAt
+// always sets both, so this guards a pinRoot-only caller. Mutation guard: re-adding a
+// second force-keep path (force[opts.pinRoot]=true in mermaid.go) keeps the root and fails
+// the absence assertion — the gap that let every suite pass with the fold-in re-added.
+func TestMermaidPinRootWithoutPinNodesDoesNotForceKeep(t *testing.T) {
+	const publish = "(example.com/svc/internal/outbox.Publisher).Publish"
+	g := dispatcherSampleGraph()
+	// pinRoot set for note-wording, but pinNodes EMPTY — the root is not in the force-keep
+	// set, so a plumbing-tier root must collapse.
+	out := g.mermaid(MermaidOptions{MaxTier: 2, pinRoot: publish}, nil)
+	if strings.Contains(out, "outbox.Publisher.Publish") {
+		t.Errorf("pinRoot without pinNodes must NOT force-keep the plumbing-tier root:\n%s", out)
+	}
+	if strings.Contains(out, "pinned into view") {
+		t.Errorf("no rescue note may fire when the root was not actually force-kept:\n%s", out)
+	}
+}
+
+// TestFilterDisclosuresDropsOutOfReach exercises the DROP path of filterDisclosures — a
+// blind spot and a frontier marker attributed OUTSIDE the root's forward reach — that no
+// --root golden covers (the loansvc golden has every disclosure in reach). Both must be
+// pruned from the scoped view AND disclosed as "… outside this handler's reach shown only
+// in the whole-graph view", so a per-handler diagram is never less honest than the whole.
+func TestFilterDisclosuresDropsOutOfReach(t *testing.T) {
+	const (
+		aRoot = "example.com/svc/a.Handler"
+		aLeaf = "example.com/svc/a.Leaf"
+		bRoot = "example.com/svc/b.Handler"
+		bLeaf = "example.com/svc/b.Leaf"
+	)
+	g := &Graph{
+		Algo: "rta",
+		Nodes: []Node{
+			{FQN: aRoot, Tier: 1}, {FQN: aLeaf, Tier: 1},
+			{FQN: bRoot, Tier: 1}, {FQN: bLeaf, Tier: 1},
+		},
+		Edges: []Edge{
+			{From: aRoot, To: aLeaf, Tier: 1},
+			{From: bRoot, To: bLeaf, Tier: 1}, // disjoint subtree B, unreachable from A
+		},
+		Entrypoints: []Entrypoint{{Kind: "http", Name: "GET /a", Fn: aRoot}},
+		// Both disclosures live in subtree B — out of A's reach.
+		BlindSpots: []blindspots.BlindSpot{{Kind: blindspots.Reflect, Site: bLeaf}},
+		Frontier:   &FrontierSection{Markers: []frontier.Marker{{Kind: "dynamic-dispatch", Bin: frontier.BinA, Owner: bRoot}}},
+	}
+	out, ok := g.MermaidRootedAt("GET /a", MermaidOptions{MaxTier: 2})
+	if !ok {
+		t.Fatal("GET /a should resolve")
+	}
+	for _, want := range []string{
+		"blind spot outside this handler's reach shown only in the whole-graph view",
+		"frontier marker outside this handler's reach shown only in the whole-graph view",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rooted render missing dropped-disclosure note %q:\n%s", want, out)
+		}
 	}
 }
 

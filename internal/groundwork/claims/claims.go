@@ -50,6 +50,22 @@
 // `to_matching` is accepted as a documented alias (the field-validated
 // prototype's name, which lies — it filters the FROM side on in_degree). Both
 // present is an ERROR.
+//
+// # Claim metadata and the `fn` alias
+//
+// A claim may carry a free-form `id`, echoed as the report-line label when
+// present (else the endpoint-derived label is used). `fn` is a documented
+// alias for the anchor field — `fqn` on node/no_node, `of` on the degree kinds
+// — accepted for companion-spec conformance; the alias and its canonical
+// spelling both present on one claim is an ERROR, same as the counterpart
+// alias. `fn` on an edge kind is a wrong-kind ERROR.
+//
+// # Report shape
+//
+// Each non-passing claim renders one line — `FAIL  <label> [<kind>] <detail>`
+// or `ERROR <label> [<kind>] <detail>` (FAIL is padded to column-align with
+// ERROR). FAIL lines precede ERROR lines, claims-file order within each, then
+// the summary. Passing claims are silent.
 package claims
 
 import (
@@ -66,13 +82,13 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
-// Caps on the offender/candidate lists a report line prints. Truncation is
-// disclosed ("(+N more)"), never silent — a capped list must not read as the
-// whole set (tenet 3).
+// Caps on the offender/match lists a report line prints. Truncation is disclosed
+// ("(+N more)"), never silent — a capped list must not read as the whole set (tenet
+// 3). The ambiguous-CANDIDATE cap lives in fqnres (AmbiguousDetail owns it), shared
+// with `flowmap graph --focus`; these two are claims-local list caps.
 const (
-	maxCandidates = 4 // ambiguous-resolution candidates
-	maxOffenders  = 3 // no_edge present-pair offenders
-	maxMatches    = 4 // no_node / node offending matches
+	maxOffenders = 3 // no_edge present-pair offenders
+	maxMatches   = 4 // no_node / node offending matches
 )
 
 // Claim is one asserted fact. It is a union over every kind's fields; strict
@@ -82,7 +98,12 @@ const (
 // than aborting the file. Eq/Tier are pointers so an omitted count is
 // distinguishable from an explicit zero.
 type Claim struct {
-	Kind                string `json:"kind"`
+	Kind string `json:"kind"`
+	// ID is free-form claim metadata, echoed as the report-line label when
+	// present (uniqueness is recommended in docs, not enforced). It is claim
+	// metadata, not a kind field, so it is allowed on EVERY kind and is excluded
+	// from the wrong-kind field check entirely.
+	ID                  string `json:"id,omitempty"`
 	From                string `json:"from,omitempty"`
 	To                  string `json:"to,omitempty"`
 	FQN                 string `json:"fqn,omitempty"`
@@ -91,6 +112,13 @@ type Claim struct {
 	Eq                  *int   `json:"eq,omitempty"`
 	CounterpartMatching string `json:"counterpart_matching,omitempty"`
 	ToMatching          string `json:"to_matching,omitempty"`
+	// Fn is a documented alias: for node/no_node it aliases `fqn`; for
+	// in_degree/out_degree it aliases `of`. Both alias and canonical present on
+	// one claim → that claim ERRORs (same treatment as counterpart_matching/
+	// to_matching). Accepted on those four kinds only (`fn` on an edge claim is a
+	// wrong-kind ERROR). Precedence routes through nodeAnchor/degreeAnchor so the
+	// evaluator and label() cannot drift.
+	Fn string `json:"fn,omitempty"`
 }
 
 // File is a decoded claims file: a single "claims" array.
@@ -172,19 +200,22 @@ func (r Report) count(o Outcome) int {
 }
 
 // String renders the report deterministically: FAIL lines first (claims-file
-// order), then ERROR lines (claims-file order), then the summary. Passing
-// claims are silent — represented only in the summary count — so the output is
-// the actionable set. A fully-passing run prints just the summary line.
+// order), then ERROR lines (claims-file order), then the summary. Each line is
+// "FAIL  <label> [<kind>] <detail>" / "ERROR <label> [<kind>] <detail>" — FAIL
+// carries two trailing spaces so it column-aligns with "ERROR ". The label is
+// the claim's id when present, else the endpoint-derived label. Passing claims
+// are silent — represented only in the summary count — so the output is the
+// actionable set. A fully-passing run prints just the summary line.
 func (r Report) String() string {
 	var b strings.Builder
 	for _, res := range r.Results {
 		if res.Outcome == Fail {
-			fmt.Fprintf(&b, "FAIL %s %s: %s\n", res.Kind, res.Label, res.Detail)
+			fmt.Fprintf(&b, "FAIL  %s [%s] %s\n", res.Label, res.Kind, res.Detail)
 		}
 	}
 	for _, res := range r.Results {
 		if res.Outcome == Errored {
-			fmt.Fprintf(&b, "ERROR %s %s: %s\n", res.Kind, res.Label, res.Detail)
+			fmt.Fprintf(&b, "ERROR %s [%s] %s\n", res.Label, res.Kind, res.Detail)
 		}
 	}
 	fmt.Fprintf(&b, "assert: %d passed, %d failed, %d errored (graph: %d nodes, %d unique edges)\n",
@@ -232,23 +263,17 @@ func newModel(g *graph.Graph) *model {
 		}
 		tierSet[n.FQN][n.Tier] = true
 	}
-	endpointSet := make(map[string]bool, len(nodeSet))
-	for k := range nodeSet {
-		endpointSet[k] = true
-	}
 	pairs := make(map[[2]string]bool, len(g.Edges))
 	callersSet := map[string]map[string]bool{}
 	calleesSet := map[string]map[string]bool{}
 	for _, e := range g.Edges {
-		endpointSet[e.From] = true
-		endpointSet[e.To] = true
 		pairs[[2]string{e.From, e.To}] = true
 		addSet(callersSet, e.To, e.From)
 		addSet(calleesSet, e.From, e.To)
 	}
 	return &model{
 		nodeUniverse:     setutil.SortedKeys(nodeSet),
-		endpointUniverse: setutil.SortedKeys(endpointSet),
+		endpointUniverse: EndpointUniverse(g),
 		pairs:            pairs,
 		callers:          sortedSets(callersSet),
 		callees:          sortedSets(calleesSet),
@@ -258,19 +283,44 @@ func newModel(g *graph.Graph) *model {
 	}
 }
 
+// EndpointUniverse returns the sorted, deduped resolvable-name universe for a graph:
+// node FQNs ∪ every edge from/to string, so a boundary pseudo-node ("boundary:db
+// SELECT loans") — which appears only as an edge endpoint — is resolvable. It is the
+// PRODUCTION constructor `newModel` builds the endpoint universe from, exported so
+// `flowmap graph --focus` (graphio.endpointUniverse) can be pinned against the SAME
+// rule by the resolver-parity test — production vs production, not against a test-local
+// re-derivation that could silently drift (CLAUDE.md: one source of truth). Routes
+// through setutil.SortedKeys, the codebase's single ordering primitive.
+func EndpointUniverse(g *graph.Graph) []string {
+	set := make(map[string]bool, len(g.Nodes)+2*len(g.Edges))
+	for _, n := range g.Nodes {
+		set[n.FQN] = true
+	}
+	for _, e := range g.Edges {
+		set[e.From] = true
+		set[e.To] = true
+	}
+	return setutil.SortedKeys(set)
+}
+
 // allowedFields lists the fields each kind reads. Strict JSON decoding rejects
 // UNKNOWN field names (a typo'd `form:`), but a KNOWN field on the wrong kind
 // (e.g. `eq` on an `edge`, where the author meant `edge_count` — an ABSENCE
 // assertion) decodes cleanly and would otherwise be silently ignored, inverting
 // the verdict. Rejecting a field the kind does not read closes that (tenet 2).
+//
+// `id` is claim metadata (allowed on every kind), so it is never listed here
+// and unexpectedField skips it. `fn` is the documented anchor alias — accepted
+// on the four kinds that have an anchor field (node/no_node → `fqn`,
+// in_degree/out_degree → `of`) and a wrong-kind ERROR on the edge kinds.
 var allowedFields = map[string][]string{
 	"edge":       {"from", "to"},
 	"no_edge":    {"from", "to"},
 	"edge_count": {"from", "to", "eq"},
-	"node":       {"fqn", "tier"},
-	"no_node":    {"fqn"},
-	"in_degree":  {"of", "eq", "counterpart_matching", "to_matching"},
-	"out_degree": {"of", "eq", "counterpart_matching", "to_matching"},
+	"node":       {"fqn", "tier", "fn"},
+	"no_node":    {"fqn", "fn"},
+	"in_degree":  {"of", "eq", "counterpart_matching", "to_matching", "fn"},
+	"out_degree": {"of", "eq", "counterpart_matching", "to_matching", "fn"},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -303,7 +353,9 @@ func (m *model) eval(c Claim) Result {
 
 // unexpectedField returns the json name of the first populated field the kind
 // does not read, or "" when every populated field is allowed. The field order
-// is fixed so the message is deterministic.
+// is fixed so the message is deterministic. `id` is intentionally absent from
+// the checked set — it is claim metadata allowed on every kind, never a
+// wrong-kind field.
 func unexpectedField(c Claim, allowed []string) string {
 	ok := make(map[string]bool, len(allowed))
 	for _, a := range allowed {
@@ -321,6 +373,7 @@ func unexpectedField(c Claim, allowed []string) string {
 		{"eq", c.Eq != nil},
 		{"counterpart_matching", c.CounterpartMatching != ""},
 		{"to_matching", c.ToMatching != ""},
+		{"fn", c.Fn != ""},
 	} {
 		if f.present && !ok[f.name] {
 			return f.name
@@ -361,7 +414,7 @@ func (m *model) evalEdge(c Claim) Result {
 	if m.anyPair(froms, tos) {
 		return pass(c)
 	}
-	return fail(c, "no edge between the resolved endpoints")
+	return fail(c, "0 edge(s)")
 }
 
 func (m *model) evalNoEdge(c Claim) Result {
@@ -373,7 +426,7 @@ func (m *model) evalNoEdge(c Claim) Result {
 	if len(present) == 0 {
 		return pass(c)
 	}
-	return fail(c, fmt.Sprintf("%d edge(s) present: %s", len(present), capList(present, maxOffenders)))
+	return fail(c, fmt.Sprintf("%d edge(s) present: %s", len(present), fqnres.CapList(present, maxOffenders)))
 }
 
 func (m *model) evalEdgeCount(c Claim) Result {
@@ -392,10 +445,14 @@ func (m *model) evalEdgeCount(c Claim) Result {
 }
 
 func (m *model) evalNode(c Claim) Result {
-	if c.FQN == "" {
+	q, adet := nodeAnchor(c)
+	if adet != "" {
+		return errored(c, adet)
+	}
+	if q == "" {
 		return errored(c, "node requires 'fqn'")
 	}
-	matches, det := m.resolve(c.FQN, m.nodeUniverse)
+	matches, det := m.resolve(q, m.nodeUniverse, "node")
 	if det != "" {
 		return errored(c, det)
 	}
@@ -414,26 +471,30 @@ func (m *model) evalNode(c Claim) Result {
 			}
 		}
 		if len(bad) > 0 {
-			return fail(c, fmt.Sprintf("want tier %d; %s", *c.Tier, capList(bad, maxMatches)))
+			return fail(c, fmt.Sprintf("want tier %d; %s", *c.Tier, fqnres.CapList(bad, maxMatches)))
 		}
 	}
 	return pass(c)
 }
 
 func (m *model) evalNoNode(c Claim) Result {
-	if c.FQN == "" {
+	q, adet := nodeAnchor(c)
+	if adet != "" {
+		return errored(c, adet)
+	}
+	if q == "" {
 		return errored(c, "no_node requires 'fqn'")
 	}
 	// no_node NEVER errors on a resolution OUTCOME: zero matches is the pass,
 	// ≥1 is the fail. A malformed regex is still a claim-authoring ERROR.
-	res, err := fqnres.Resolve(c.FQN, m.nodeUniverse)
+	res, err := fqnres.Resolve(q, m.nodeUniverse)
 	if err != nil {
 		return errored(c, err.Error())
 	}
 	if len(res.Matches) == 0 {
 		return pass(c)
 	}
-	return fail(c, fmt.Sprintf("%d matching node(s): %s", len(res.Matches), capList(res.Matches, maxMatches)))
+	return fail(c, fmt.Sprintf("%d matching node(s): %s", len(res.Matches), fqnres.CapList(res.Matches, maxMatches)))
 }
 
 func (m *model) evalDegree(c Claim, in bool) Result {
@@ -441,7 +502,11 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 	if in {
 		kind = "in_degree"
 	}
-	if c.Of == "" {
+	anchor, adet := degreeAnchor(c)
+	if adet != "" {
+		return errored(c, adet)
+	}
+	if anchor == "" {
 		return errored(c, kind+" requires 'of'")
 	}
 	if c.Eq == nil {
@@ -451,7 +516,7 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 		return errored(c, "counterpart_matching and to_matching are mutually exclusive")
 	}
 	cp := counterpartQuery(c)
-	of, det := m.resolveOne(c.Of, m.endpointUniverse)
+	of, det := m.resolveOne(anchor, m.endpointUniverse, "node/endpoint")
 	if det != "" {
 		return errored(c, det)
 	}
@@ -476,7 +541,10 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 			return errored(c, err.Error())
 		}
 		if len(filter.Matches) == 0 {
-			return errored(c, "unresolved counterpart filter "+strconv.Quote(cp))
+			// Same UNRESOLVED shape every other resolution failure uses (fqnres.
+			// UnresolvedDetail), so a counterpart-filter miss reads like any other
+			// unresolved name; the noun names what it failed to match.
+			return errored(c, fqnres.UnresolvedDetail(cp, "node/endpoint (counterpart filter)"))
 		}
 		allowed := setutil.StringSet(filter.Matches)
 		n = 0
@@ -503,37 +571,64 @@ func counterpartQuery(c Claim) string {
 	return c.ToMatching
 }
 
+// anchor resolves an aliased anchor field to its effective value: the canonical
+// spelling preferred, the `fn` alias accepted, BOTH present an ERROR (detail
+// non-empty, query "") — no silent precedence, mirroring the counterpart alias.
+// canonicalName names the canonical field in that error ("fqn" / "of"). It is the
+// ONE alias-precedence rule for both the node anchor (fqn/fn) and the degree anchor
+// (of/fn), so the evaluator and label() cannot drift (CLAUDE.md: one source of truth).
+func anchor(canonical, alias, canonicalName string) (query, detail string) {
+	if canonical != "" && alias != "" {
+		return "", canonicalName + " and fn are mutually exclusive"
+	}
+	if canonical != "" {
+		return canonical, ""
+	}
+	return alias, ""
+}
+
+// nodeAnchor returns the effective node FQN for a node/no_node claim: canonical
+// `fqn` preferred, `fn` accepted as the documented alias (both present → ERROR).
+func nodeAnchor(c Claim) (query, detail string) { return anchor(c.FQN, c.Fn, "fqn") }
+
+// degreeAnchor returns the effective anchor for an in_degree/out_degree claim:
+// canonical `of` preferred, `fn` accepted as the documented alias (both present → ERROR).
+func degreeAnchor(c Claim) (query, detail string) { return anchor(c.Of, c.Fn, "of") }
+
 // resolveMany resolves an edge endpoint: a plain form must be unique (0 →
 // unresolved, ≥2 → ambiguous, both ERROR), a regex may match many (≥1). It
 // returns the matches, or an ERROR detail string (matches nil).
 func (m *model) resolveMany(query string) (matches []string, detail string) {
-	return m.resolve(query, m.endpointUniverse)
+	return m.resolve(query, m.endpointUniverse, "node/endpoint")
 }
 
-// resolve applies the shared endpoint rule over an arbitrary universe.
-func (m *model) resolve(query string, universe []string) (matches []string, detail string) {
+// resolve applies the shared endpoint rule over an arbitrary universe. noun
+// names the universe in an UNRESOLVED detail ("node/endpoint" for the endpoint
+// universe, "node" for the node universe) so the message matches the universe
+// the claim was resolved against.
+func (m *model) resolve(query string, universe []string, noun string) (matches []string, detail string) {
 	res, err := fqnres.Resolve(query, universe)
 	if err != nil {
 		return nil, err.Error()
 	}
 	if len(res.Matches) == 0 {
-		return nil, "unresolved " + strconv.Quote(query)
+		return nil, fqnres.UnresolvedDetail(query, noun)
 	}
 	if !res.IsRegex && res.Ambiguous {
-		return nil, ambiguousDetail(query, res.Matches)
+		return nil, fqnres.AmbiguousDetail(query, res.Matches)
 	}
 	return res.Matches, ""
 }
 
 // resolveOne resolves to EXACTLY one endpoint (the anchor of a degree claim):
 // a regex that matches more than one is ambiguous here, an ERROR.
-func (m *model) resolveOne(query string, universe []string) (fqn string, detail string) {
-	matches, det := m.resolve(query, universe)
+func (m *model) resolveOne(query string, universe []string, noun string) (fqn string, detail string) {
+	matches, det := m.resolve(query, universe, noun)
 	if det != "" {
 		return "", det
 	}
 	if len(matches) > 1 {
-		return "", ambiguousDetail(query, matches)
+		return "", fqnres.AmbiguousDetail(query, matches)
 	}
 	return matches[0], ""
 }
@@ -579,33 +674,39 @@ func (m *model) countPresentPairs(froms, tos []string) int {
 	return n
 }
 
-func ambiguousDetail(query string, candidates []string) string {
-	return fmt.Sprintf("ambiguous %s (%d candidates): %s",
-		strconv.Quote(query), len(candidates), capList(candidates, maxCandidates))
-}
-
-// capList joins up to n sorted items with ", ", disclosing any truncation so a
-// capped list never reads as the whole set.
-func capList(items []string, n int) string {
-	if len(items) <= n {
-		return strings.Join(items, ", ")
-	}
-	return strings.Join(items[:n], ", ") + fmt.Sprintf(" (+%d more)", len(items)-n)
-}
-
+// label is the report-line label for a claim: the free-form `id` when present
+// (a suite identifies its claims by id), else an endpoint-derived label. The
+// derived label reads the anchor through nodeAnchor/degreeAnchor so an `fn`
+// alias is reflected exactly as the evaluator saw it.
 func label(c Claim) string {
+	if c.ID != "" {
+		return c.ID
+	}
 	switch c.Kind {
 	case "edge", "no_edge", "edge_count":
 		return c.From + " -> " + c.To
 	case "node", "no_node":
-		return c.FQN
-	case "in_degree", "out_degree":
-		if cp := counterpartQuery(c); cp != "" {
-			return c.Of + " (counterpart " + cp + ")"
+		q, det := nodeAnchor(c)
+		if det != "" {
+			// fqn AND fn both set: the anchor is an ERROR, so nodeAnchor returns an
+			// EMPTY query — but the line still needs a label naming WHICH claim erred,
+			// or the ERROR renders with a blank label. Name both fields deterministically.
+			return c.FQN + "/" + c.Fn
 		}
-		return c.Of
+		return q
+	case "in_degree", "out_degree":
+		q, det := degreeAnchor(c)
+		if det != "" {
+			// of AND fn both set: same empty-anchor hazard as the node case — a blank
+			// label (or a bare " (counterpart …)") would not identify the claim.
+			return c.Of + "/" + c.Fn
+		}
+		if cp := counterpartQuery(c); cp != "" {
+			return q + " (counterpart " + cp + ")"
+		}
+		return q
 	default:
-		return strings.TrimSpace(c.From + c.To + c.FQN + c.Of)
+		return strings.TrimSpace(c.From + c.To + c.FQN + c.Of + c.Fn)
 	}
 }
 

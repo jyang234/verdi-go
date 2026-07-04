@@ -444,6 +444,78 @@ func TestRunGraphDiffJSON(t *testing.T) {
 	}
 }
 
+// TestRunGraphFocus exercises the `--focus` CLI surface end-to-end: a successful
+// induced render, the repeatable-flag / whole-value-regex split rules, the fail-closed
+// split-damage and empty-list errors, the requires-mermaid rule, and the exclusivity
+// with --root/--entry/--diff/--rollup. The render's own correctness is golden-pinned in
+// graphio; here we pin the flag plumbing.
+func TestRunGraphFocus(t *testing.T) {
+	// A successful induced render: two focused nodes with an edge between them draw that
+	// edge; the scope label echoes the raw names.
+	out := captureStdout(t, func() {
+		if err := run([]string{"graph", "--mermaid",
+			"--focus", "handler.App).Status", "--focus", "store.Loans).SelectLoan", fixtureDir()}); err != nil {
+			t.Fatalf("graph --mermaid --focus: %v", err)
+		}
+	})
+	if !strings.Contains(out, "flowchart LR") || !strings.Contains(out, "handler_App_Status --> store_Loans_SelectLoan") {
+		t.Errorf("focus render must draw the induced edge; got:\n%s", firstLines(out, 12))
+	}
+	if !strings.Contains(out, "scope: focus: handler.App).Status, store.Loans).SelectLoan") {
+		t.Errorf("focus scope label must echo the raw names in input order; got:\n%s", firstLines(out, 4))
+	}
+
+	// A single whole-value /regex/ containing a comma is ONE name (not split) WHEN the
+	// comma sits inside a construct that leaves a damaged half-regex on split ('/a{1' +
+	// '2}/'): it resolves as one regex rather than tripping the ambiguity or split guard.
+	if err := run([]string{"graph", "--mermaid", "--focus", "/a{1,2}/", fixtureDir()}); err != nil {
+		t.Errorf("a whole-value /regex/ (even with a comma) must resolve as one name, got: %v", err)
+	}
+
+	silenceStdout(t)
+	// Alternation merge: a value that reads BOTH as one regex AND as a coherent comma list
+	// of regexes ('/a|b/,/c/') is AMBIGUOUS — refused, never silently merged into one wrong
+	// regex. (Each fragment is itself a well-formed /re/, so the list reading is coherent.)
+	if err := run([]string{"graph", "--mermaid", "--focus", "/a|b/,/c/", fixtureDir()}); err == nil {
+		t.Error("a value that reads as both one regex and a comma-list of regexes must be refused (ambiguous)")
+	}
+	// Split damage: a comma INSIDE a bare (non-whole-value) regex splits it into an
+	// unbalanced fragment — refused loudly, never silently two wrong plain names.
+	if err := run([]string{"graph", "--mermaid", "--focus", "x,/a{1,2}/", fixtureDir()}); err == nil {
+		t.Error("a comma-split regex fragment must be refused (split damage)")
+	}
+	// Empty value is a per-occurrence usage error — both alone and beside a good flag, so
+	// one empty flag cannot vanish silently next to a resolving one.
+	if err := run([]string{"graph", "--mermaid", "--focus", "", fixtureDir()}); err == nil {
+		t.Error(`--focus "" (empty value) must be refused`)
+	}
+	if err := run([]string{"graph", "--mermaid", "--focus", "handler.App).Status", "--focus", "", fixtureDir()}); err == nil {
+		t.Error(`--focus "" beside a resolving flag must still be refused (per-occurrence)`)
+	}
+	// Fail-closed resolution: ambiguous and unresolved names each error with no output.
+	if err := run([]string{"graph", "--mermaid", "--focus", "Score", fixtureDir()}); err == nil {
+		t.Error("an ambiguous --focus name (Score → 3 candidates) must be refused")
+	}
+	if err := run([]string{"graph", "--mermaid", "--focus", "handler.App).Delete", fixtureDir()}); err == nil {
+		t.Error("an unresolved --focus name must be refused")
+	}
+
+	// --focus requires --mermaid, and is mutually exclusive with each scoping/comparison flag.
+	if err := run([]string{"graph", "--focus", "handler.App).Status", fixtureDir()}); err == nil {
+		t.Error("--focus without --mermaid must be refused (never silently ignored)")
+	}
+	for _, combo := range [][]string{
+		{"graph", "--mermaid", "--focus", "handler.App).Status", "--root", "POST /loan-application", fixtureDir()},
+		{"graph", "--mermaid", "--focus", "handler.App).Status", "--entry", "POST /loan-application", fixtureDir()},
+		{"graph", "--mermaid", "--focus", "handler.App).Status", "--diff", "nonexistent-base.json", fixtureDir()},
+		{"graph", "--mermaid", "--focus", "handler.App).Status", "--rollup", "package", fixtureDir()},
+	} {
+		if err := run(combo); err == nil {
+			t.Errorf("--focus must be mutually exclusive with %v", combo[4])
+		}
+	}
+}
+
 // TestRunGraphAlgo: --algo selects the call-graph algorithm. rta/vta/cha all
 // build; an unknown value is rejected before any analysis runs.
 func TestRunGraphAlgo(t *testing.T) {

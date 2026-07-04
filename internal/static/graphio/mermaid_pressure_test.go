@@ -67,6 +67,21 @@ func TestPressureRenderers(t *testing.T) {
 					check("rooted", out, mustRoot(g, g.Nodes[0].FQN))
 				}
 			}
+			// Focus on EVERY endpoint (nodes ∪ edge endpoints): MermaidFocus must never
+			// panic and must return either an error (fail closed — dangling endpoints,
+			// unresolvable names) or valid, deterministic Mermaid. The endpoint universe is
+			// exactly the resolvable set, so each name resolves to itself (a pathological FQN
+			// resolves via the raw universe entry) without tripping ambiguity on this graph.
+			eps := g.endpointUniverse()
+			if len(eps) > 0 {
+				out, err := g.MermaidFocus(eps, MermaidOptions{MaxTier: 2})
+				if err == nil {
+					again, _ := g.MermaidFocus(eps, MermaidOptions{MaxTier: 2})
+					check("focus", out, again)
+				} else if out != "" {
+					t.Errorf("[focus] error path must render NOTHING, got:\n%s", out)
+				}
+			}
 		})
 	}
 }

@@ -1254,6 +1254,21 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 | `in_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callers (optionally filtered) equals `eq` |
 | `out_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callees (optionally filtered) equals `eq` |
 
+**Claim metadata — `id`.** Any claim may carry a free-form `"id"`, echoed as the
+report-line label so a run's output points back at the exact claim (a suite
+identifies its claims by id). It is allowed on **every** kind — it is metadata,
+not a kind field — and never trips the wrong-kind field check. Uniqueness per
+file is *recommended* but not enforced. A claim with no `id` falls back to an
+endpoint-derived label.
+
+**The `fn` alias.** `fn` is a documented alias for a claim's anchor field: on
+`node`/`no_node` it aliases `fqn`; on `in_degree`/`out_degree` it aliases `of`.
+Canonical (`fqn`/`of`) is preferred; `fn` is accepted for companion-spec
+conformance. Supplying **both** the alias and its canonical spelling on one claim
+ERRORs (no silent precedence — same rule as `counterpart_matching`/`to_matching`).
+`fn` on an `edge`/`no_edge`/`edge_count` claim — kinds that have no anchor field
+— is a **wrong-kind** ERROR.
+
 **Resolving a name — suffix vs. regex.** A plain string is a **normalized-FQN
 suffix**: receiver punctuation (`(`, `)`, `*`) is stripped from both the claim
 and each candidate before matching, so `handler.App).Create` and
@@ -1293,18 +1308,68 @@ counted counterparts (a plain suffix or a `/regex/`); `to_matching` is accepted
 as a deprecated alias, and supplying both ERRORs.
 
 **Output and exit codes.** The report prints, in claims-file order, the FAIL
-lines then the ERROR lines, then a summary
-(`assert: N passed, N failed, N errored (graph: N nodes, N unique edges)`);
-passing claims are silent. Exit codes ride groundwork's existing split: **≥1
-FAIL exits 1** (a computed verdict failed — takes precedence over errors),
-**zero FAILs but ≥1 errored claim exits 2** (a claim's gate could not run), and
-all-pass exits 0.
+lines then the ERROR lines, then a summary; passing claims are silent. Each
+non-passing claim renders one line:
+
+```
+FAIL  <label> [<kind>] <detail>
+ERROR <label> [<kind>] <detail>
+assert: N passed, N failed, N errored (graph: N nodes, N unique edges)
+```
+
+`<label>` is the claim's `id` when present, else the endpoint-derived label;
+`FAIL` carries two trailing spaces so it column-aligns with `ERROR `. A
+resolution failure reads `UNRESOLVED: '<query>' matches no node/endpoint` (or
+`matches no node` for a node-universe claim) or
+`AMBIGUOUS: '<query>' matches <N>: <c1>; <c2>; …` — the query single-quoted, the
+candidates semicolon-separated, sorted, and capped at four with ` (+N more)`.
+For example, running the seven-claim spec-acceptance fixture against the loansvc
+golden:
+
+```
+FAIL  L5-deliberate-fail [edge] 0 edge(s)
+ERROR L6-ambiguous-name [node] AMBIGUOUS: 'Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+ERROR L7-unresolved-name [edge] UNRESOLVED: 'handler.App).Delete' matches no node/endpoint
+assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
+```
+
+Exit codes ride groundwork's existing split: **≥1 FAIL exits 1** (a computed
+verdict failed — takes precedence over errors), **zero FAILs but ≥1 errored
+claim exits 2** (a claim's gate could not run), and all-pass exits 0. The output
+is deterministic (a pure function of graph + claims), so a `--check`-style CI
+comparison against a committed expected report is byte-stable.
 
 Claims files outlive the pins they were written against by design. `assert`
 loads the graph through the same strict decoder as every other groundwork
 command, so a claims file run against a graph from a *newer* flowmap (one that
 added a field) fails the decode — correct (fail closed on schema skew), and a
 signal to rebuild the graph, not a reason to loosen the reader.
+
+**Deviations from the validated prototype.** `assert`'s semantics match the
+field-validated prototype the schema was drawn from, with five intentional
+tightenings beyond it — each **fail-closed**, converting a would-be vacuous pass
+into an ERROR, and none able to flip a FAIL into a PASS. If a claim from a
+prototype-era suite newly ERRORs, it is one of these — and the ERROR is
+surfacing a latent vacuous pass the prototype was hiding, not a regression:
+
+1. **A counterpart filter that matches nothing anywhere** in the endpoint
+   universe ERRORs — a typo'd/renamed filter no longer passes an `eq: 0` degree
+   claim vacuously (the prototype silently counted zero).
+2. **A degree anchor (`of`) must resolve to exactly one endpoint**, even as a
+   `/regex/` — an ambiguous anchor ERRORs rather than grading against one of
+   several.
+3. **A known field on the wrong kind ERRORs** (`eq` on an `edge`, where the
+   author meant `edge_count` — an absence assertion — would otherwise be
+   silently ignored, inverting the verdict).
+4. **An empty `//` is not a regex** — an empty pattern would match every
+   candidate and resolve an endpoint to the whole universe — so it falls through
+   to a plain suffix match (fail closed).
+5. **A `tier` claim over an FQN the graph carries at more than one tier**
+   abstains (ERROR) rather than grading against an arbitrary record.
+
+Separately, per-side plain/regex enforcement is adopted from the spec's own
+"quirk to tighten" note: a `/regex/` on one endpoint of an edge claim does not
+relax the unique-or-die rule the *other* side's plain form implies.
 
 ### Component (C3) rollup — `flowmap graph --rollup package`
 
@@ -1446,6 +1511,79 @@ drift surfaces only in the function-grain `--diff` (the JSON delta and
 `--mermaid`). This delta is also distinct from `groundwork review`'s internal
 set-based graph delta, which feeds the review verdict's shape/touch labels rather
 than this consumer-facing attribute report; the two are kept separate on purpose.
+
+### Focused subgraph — `flowmap graph --mermaid --focus`
+
+`--focus <name[,name…]>` renders the **induced subgraph** over exactly the named
+functions: their nodes, and **only the edges whose _both_ endpoints are named**.
+Nothing reachable-but-unnamed is pulled in, and — the load-bearing part — the
+**absence of an edge in the render is a graph fact, not an omission**: if two named
+nodes have no arrow between them, the analysis records no call between them. It is a
+**view, never a gate**.
+
+```bash
+# The named nodes and only the edges among them.
+flowmap graph --mermaid \
+  --focus 'handler.App).Status,store.Loans).SelectLoan' \
+  --focus '/scoring\.(Remote|Stub)\).Score$/' ./svc
+```
+
+- **Same resolver as `assert`.** Each name resolves through the one shared resolver
+  (`internal/fqnres`), so a name means the same thing here and in a claims file: a
+  **plain** name is a receiver-punctuation-forgiving normalized-FQN suffix
+  (unique-or-die), a **`/regex/`** sees the raw FQN and may match many. The
+  suffix-vs-regex convention is documented once, under
+  [Claims files](#claims-files--groundwork-assert-graphjson-claimsjson). Boundary
+  pseudo-nodes (`boundary:db SELECT loans`) are focusable — they occur only as edge
+  endpoints, so a boundary edge draws only when **both** the caller and the boundary
+  are named.
+- **Repeatable flag; a whole-value `/regex/` is one name.** `--focus` accumulates
+  across occurrences. The one query-list grammar lives in `internal/fqnres`
+  (`SplitQueries`, beside the resolver's query forms). Within one occurrence the value is
+  comma-split, **except** a single well-formed `/regex/` (leading + trailing `/`) is taken
+  as **one** name even if it contains commas — *provided* the comma leaves a damaged
+  half-regex on split (`/a{1,2}/` → `/a{1` + `2}/`, so the single-regex reading is the only
+  coherent one). A value that reads coherently **both** as one regex **and** as a
+  comma-separated list (`/a|b/,/c/`, or a mix of plain fragments and regexes each of which
+  is itself undamaged) is **ambiguous and refused**: pass each item as its own `--focus`
+  flag, or spell a literal comma inside a single regex as the RE2 class `[,]` (e.g.
+  `/x[,]y/`, whose split leaves damaged halves so it stays one regex). A fragment that
+  looks like half of a comma-split regex (a stray leading/trailing `/`) is **refused
+  loudly** rather than silently taken as two wrong plain names. An **empty value**
+  (`--focus ""`) is a per-occurrence usage error, so one empty flag cannot vanish silently
+  beside a good one.
+- **Fail-closed.** Any name that does not resolve aborts the **whole** render with no
+  output — an `UNRESOLVED` (zero matches), an `AMBIGUOUS` (plain name → ≥2, with the
+  sorted candidate list), a **zero-match regex** (a focus name that selects nothing is
+  a typo, not a legal empty set — unlike an `edge_count` claim's legal `0`), a regex
+  compile error, or a **dangling edge endpoint** (a name that resolves only to an edge
+  endpoint with no node record in this graph — it would get no box and silently drop the
+  edges it induces, so it is named and refused). A silently dropped focus node would be a
+  lie about the induced set, so it is never a partial render.
+- **Isolated nodes still render.** A focused node with no induced edge draws as a lone
+  box (it is force-kept against tier-collapse) — its isolation **is** the finding.
+- **Boundary names with no induced edge are disclosed, not dropped.** A boundary
+  endpoint that no focused caller reaches cannot draw (a boundary node exists only as
+  an edge target); rather than vanish, it is named in a header note
+  (`… boundary endpoints with no induced edge — not drawn: …`). Pruned blind-spot and
+  frontier markers are disclosed the same way `--root` discloses them.
+- **A pin-rescued plumbing node is disclosed, not silently un-collapsed.** A focused
+  tier-3 plumbing node shown **only** because the focus pin rescued it from tier-collapse
+  is named in a header note (`… pinned node(s) above tier N (plumbing); pinned into view:
+  …`), so a reviewer never mistakes a normally-collapsed node for a load-bearing one.
+- **Exclusivity.** `--focus` **requires** `--mermaid` (it is a Mermaid view) and is
+  **mutually exclusive** with `--root`, `--entry`, `--diff`, and `--rollup` — each
+  refused with a reason. `--entry` is load-bearing: an entry-scoped build drops the
+  Frontier section, and the focus view discloses pruned frontier markers, so it must
+  run over the **unscoped** graph (the same reason `--root` refuses `--entry`). The
+  reclaimer flags (`--reclaim*`, `--rebind`) **compose** — they mutate the graph
+  before the view.
+
+The manifest / alias / judgment-overlay layer from the feature request stays
+**consumer-side**: `--focus` takes FQN-resolving names (plain suffix or `/regex/`) and
+nothing else. Because the render is a **byte-deterministic** function of the graph and
+the focus list, a consumer `--check`-style workflow (regenerate-and-diff the focused
+view in CI) is safe — the same input always produces the same bytes.
 
 ---
 
