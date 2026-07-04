@@ -1278,6 +1278,13 @@ a rename would make the check pass vacuously. `no_node` is the one kind where
 deletes the named node can never smuggle a vacuous pass into some *other*
 absence claim. That is precisely why the others must ERROR instead.
 
+Because a plain name is a *suffix* over the node universe, a `no_node` claim can
+only pass because it found nothing — and a plain suffix may miss a function that
+exists only under a variant display FQN (`…Deprecated[int]`, a `$1` closure) or
+that appears solely as a boundary pseudo-node (an edge endpoint, not a declared
+node). When you need `no_node` to be *exhaustive*, write it as a `/regex/` — the
+regex sees the raw FQN and every byte, so it will not silently skip a variant.
+
 **Counting is over unique `(from, to)` pairs** — the same basis defined under
 [`edges[]`](#consuming-graphjson-directly) above: `edge`, `edge_count`, and the
 degree kinds all count a pair once even when the graph carries it under more

@@ -68,10 +68,14 @@ type Result struct {
 var receiverPunct = strings.NewReplacer("(", "", ")", "", "*", "")
 
 // isRegex reports whether query is the explicit /regex/ form: a leading and
-// trailing '/' with at least one byte between them. "/" alone and "" are
-// plain (an FQN never starts with '/', so this cannot shadow a real name).
+// trailing '/' with at least one byte between them. "/", "//", and "" are
+// plain — len must be ≥3 so the inner pattern is non-empty (an empty regex
+// matches EVERY candidate, so treating "//" as a regex would silently resolve
+// an endpoint to the whole universe and pass a claim trivially; fail closed by
+// falling through to the plain suffix rule instead). An FQN never starts with
+// '/', so this cannot shadow a real name.
 func isRegex(query string) bool {
-	return len(query) >= 2 && query[0] == '/' && query[len(query)-1] == '/'
+	return len(query) >= 3 && query[0] == '/' && query[len(query)-1] == '/'
 }
 
 // Resolve matches query against universe (a slice the caller builds once;

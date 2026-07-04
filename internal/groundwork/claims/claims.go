@@ -63,6 +63,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/fqnres"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // Caps on the offender/candidate lists a report line prints. Truncation is
@@ -114,7 +115,13 @@ func LoadFile(path string) (*File, error) {
 		return nil, fmt.Errorf("%s: decode claims: %w", path, err)
 	}
 	// Exactly one JSON value: any trailing token (a second document, stray
-	// bytes) means the input is not the single claims file it claims to be.
+	// bytes) means the input is not the single claims file it claims to be. This
+	// is the same fail-closed single-value guard graph.Load applies to graph
+	// JSON (graph.go) — dec.Token() must reach a clean io.EOF; dec.More() alone
+	// is insufficient because it returns false when the trailing bytes begin
+	// with '}' or ']'. The parity is pinned by TestLoadFileStrict's trailing-data
+	// case (a shared strict-single-value decoder would be the cleaner home if a
+	// third caller appears).
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, fmt.Errorf("%s: trailing data after claims JSON (expected a single object)", path)
 	}
@@ -204,17 +211,26 @@ type model struct {
 	pairs            map[[2]string]bool
 	callers          map[string][]string // to → sorted distinct froms
 	callees          map[string][]string // from → sorted distinct tos
-	nodeTier         map[string]int
-	numNodes         int
-	numUniquePairs   int
+	// nodeTiers maps an FQN to the sorted DISTINCT tiers its node records carry.
+	// graph.Load does not guarantee node-FQN uniqueness (a generic instance's
+	// display FQN is documented non-unique — see graphio.sortGraph), so a single
+	// FQN can carry more than one tier. A tier claim over such an FQN is
+	// ambiguous and abstains (ERROR) rather than grading against an arbitrary
+	// last-write record (fail closed, tenet 2).
+	nodeTiers      map[string][]int
+	numNodes       int
+	numUniquePairs int
 }
 
 func newModel(g *graph.Graph) *model {
 	nodeSet := make(map[string]bool, len(g.Nodes))
-	tier := make(map[string]int, len(g.Nodes))
+	tierSet := make(map[string]map[int]bool, len(g.Nodes))
 	for _, n := range g.Nodes {
 		nodeSet[n.FQN] = true
-		tier[n.FQN] = n.Tier
+		if tierSet[n.FQN] == nil {
+			tierSet[n.FQN] = map[int]bool{}
+		}
+		tierSet[n.FQN][n.Tier] = true
 	}
 	endpointSet := make(map[string]bool, len(nodeSet))
 	for k := range nodeSet {
@@ -231,18 +247,40 @@ func newModel(g *graph.Graph) *model {
 		addSet(calleesSet, e.From, e.To)
 	}
 	return &model{
-		nodeUniverse:     sortedKeys(nodeSet),
-		endpointUniverse: sortedKeys(endpointSet),
+		nodeUniverse:     setutil.SortedKeys(nodeSet),
+		endpointUniverse: setutil.SortedKeys(endpointSet),
 		pairs:            pairs,
 		callers:          sortedSets(callersSet),
 		callees:          sortedSets(calleesSet),
-		nodeTier:         tier,
+		nodeTiers:        sortedIntSets(tierSet),
 		numNodes:         len(g.Nodes),
 		numUniquePairs:   len(pairs),
 	}
 }
 
+// allowedFields lists the fields each kind reads. Strict JSON decoding rejects
+// UNKNOWN field names (a typo'd `form:`), but a KNOWN field on the wrong kind
+// (e.g. `eq` on an `edge`, where the author meant `edge_count` — an ABSENCE
+// assertion) decodes cleanly and would otherwise be silently ignored, inverting
+// the verdict. Rejecting a field the kind does not read closes that (tenet 2).
+var allowedFields = map[string][]string{
+	"edge":       {"from", "to"},
+	"no_edge":    {"from", "to"},
+	"edge_count": {"from", "to", "eq"},
+	"node":       {"fqn", "tier"},
+	"no_node":    {"fqn"},
+	"in_degree":  {"of", "eq", "counterpart_matching", "to_matching"},
+	"out_degree": {"of", "eq", "counterpart_matching", "to_matching"},
+}
+
 func (m *model) eval(c Claim) Result {
+	allowed, ok := allowedFields[c.Kind]
+	if !ok {
+		return errored(c, "unknown claim kind "+strconv.Quote(c.Kind))
+	}
+	if f := unexpectedField(c, allowed); f != "" {
+		return errored(c, c.Kind+" does not accept field "+strconv.Quote(f))
+	}
 	switch c.Kind {
 	case "edge":
 		return m.evalEdge(c)
@@ -263,17 +301,62 @@ func (m *model) eval(c Claim) Result {
 	}
 }
 
-func (m *model) evalEdge(c Claim) Result {
+// unexpectedField returns the json name of the first populated field the kind
+// does not read, or "" when every populated field is allowed. The field order
+// is fixed so the message is deterministic.
+func unexpectedField(c Claim, allowed []string) string {
+	ok := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		ok[a] = true
+	}
+	for _, f := range []struct {
+		name    string
+		present bool
+	}{
+		{"from", c.From != ""},
+		{"to", c.To != ""},
+		{"fqn", c.FQN != ""},
+		{"of", c.Of != ""},
+		{"tier", c.Tier != nil},
+		{"eq", c.Eq != nil},
+		{"counterpart_matching", c.CounterpartMatching != ""},
+		{"to_matching", c.ToMatching != ""},
+	} {
+		if f.present && !ok[f.name] {
+			return f.name
+		}
+	}
+	return ""
+}
+
+// resolveEndpoints resolves an edge claim's from/to endpoints under the shared
+// fail-closed rule (each side plain-unique-or-die / regex-any, ERROR on either
+// failing). It is the ONE place the three edge kinds' resolution contract
+// lives, so a future change to it cannot silently reach only some of them
+// (CLAUDE.md, one source of truth). On failure it returns a non-nil *Result
+// (the ERROR) and the caller returns it verbatim.
+func (m *model) resolveEndpoints(c Claim) (froms, tos []string, bad *Result) {
 	if c.From == "" || c.To == "" {
-		return errored(c, "edge requires 'from' and 'to'")
+		r := errored(c, c.Kind+" requires 'from' and 'to'")
+		return nil, nil, &r
 	}
 	froms, det := m.resolveMany(c.From)
 	if det != "" {
-		return errored(c, det)
+		r := errored(c, det)
+		return nil, nil, &r
 	}
-	tos, det := m.resolveMany(c.To)
+	tos, det = m.resolveMany(c.To)
 	if det != "" {
-		return errored(c, det)
+		r := errored(c, det)
+		return nil, nil, &r
+	}
+	return froms, tos, nil
+}
+
+func (m *model) evalEdge(c Claim) Result {
+	froms, tos, bad := m.resolveEndpoints(c)
+	if bad != nil {
+		return *bad
 	}
 	if m.anyPair(froms, tos) {
 		return pass(c)
@@ -282,16 +365,9 @@ func (m *model) evalEdge(c Claim) Result {
 }
 
 func (m *model) evalNoEdge(c Claim) Result {
-	if c.From == "" || c.To == "" {
-		return errored(c, "no_edge requires 'from' and 'to'")
-	}
-	froms, det := m.resolveMany(c.From)
-	if det != "" {
-		return errored(c, det)
-	}
-	tos, det := m.resolveMany(c.To)
-	if det != "" {
-		return errored(c, det)
+	froms, tos, bad := m.resolveEndpoints(c)
+	if bad != nil {
+		return *bad
 	}
 	present := m.presentPairs(froms, tos)
 	if len(present) == 0 {
@@ -301,21 +377,14 @@ func (m *model) evalNoEdge(c Claim) Result {
 }
 
 func (m *model) evalEdgeCount(c Claim) Result {
-	if c.From == "" || c.To == "" {
-		return errored(c, "edge_count requires 'from' and 'to'")
-	}
 	if c.Eq == nil {
 		return errored(c, "edge_count requires 'eq'")
 	}
-	froms, det := m.resolveMany(c.From)
-	if det != "" {
-		return errored(c, det)
+	froms, tos, bad := m.resolveEndpoints(c)
+	if bad != nil {
+		return *bad
 	}
-	tos, det := m.resolveMany(c.To)
-	if det != "" {
-		return errored(c, det)
-	}
-	n := len(m.presentPairs(froms, tos))
+	n := m.countPresentPairs(froms, tos)
 	if n == *c.Eq {
 		return pass(c)
 	}
@@ -333,8 +402,15 @@ func (m *model) evalNode(c Claim) Result {
 	if c.Tier != nil {
 		var bad []string
 		for _, fqn := range matches {
-			if m.nodeTier[fqn] != *c.Tier {
-				bad = append(bad, fmt.Sprintf("%s tier %d", fqn, m.nodeTier[fqn]))
+			tiers := m.nodeTiers[fqn]
+			if len(tiers) > 1 {
+				// The graph carries this FQN at more than one tier (a non-unique
+				// display FQN): the claim is unanswerable, so abstain rather than
+				// grade against an arbitrary record.
+				return errored(c, fmt.Sprintf("ambiguous tier for %s: graph carries tiers %v", fqn, tiers))
+			}
+			if tiers[0] != *c.Tier {
+				bad = append(bad, fmt.Sprintf("%s tier %d", fqn, tiers[0]))
 			}
 		}
 		if len(bad) > 0 {
@@ -374,10 +450,7 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 	if c.CounterpartMatching != "" && c.ToMatching != "" {
 		return errored(c, "counterpart_matching and to_matching are mutually exclusive")
 	}
-	cp := c.CounterpartMatching
-	if cp == "" {
-		cp = c.ToMatching
-	}
+	cp := counterpartQuery(c)
 	of, det := m.resolveOne(c.Of, m.endpointUniverse)
 	if det != "" {
 		return errored(c, det)
@@ -390,16 +463,44 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 	}
 	n := len(counterparts)
 	if cp != "" {
-		res, err := fqnres.Resolve(cp, counterparts)
+		// The counterpart filter is a set predicate (it may legitimately match
+		// many counterparts, so it is NOT unique-or-die like an endpoint). But it
+		// must still be fail-closed against a typo/rename: resolve it against the
+		// WHOLE endpoint universe first — a filter that matches NOTHING anywhere
+		// is an unresolvable name, not a legitimate "zero counterparts", and
+		// ERRORs (otherwise an `eq: 0` claim would pass vacuously the moment the
+		// filter name is misspelled — the no_node hazard, one level down). Then
+		// count how many of this node's counterparts fall in that matched set.
+		filter, err := fqnres.Resolve(cp, m.endpointUniverse)
 		if err != nil {
 			return errored(c, err.Error())
 		}
-		n = len(res.Matches)
+		if len(filter.Matches) == 0 {
+			return errored(c, "unresolved counterpart filter "+strconv.Quote(cp))
+		}
+		allowed := setutil.StringSet(filter.Matches)
+		n = 0
+		for _, cpn := range counterparts {
+			if allowed[cpn] {
+				n++
+			}
+		}
 	}
 	if n == *c.Eq {
 		return pass(c)
 	}
 	return fail(c, fmt.Sprintf("degree %d, want %d", n, *c.Eq))
+}
+
+// counterpartQuery returns the effective counterpart filter — canonical
+// counterpart_matching preferred, to_matching as the accepted alias. Both the
+// evaluator and label() read it through here so the alias precedence has one
+// source and cannot drift between the verdict and its printed label.
+func counterpartQuery(c Claim) string {
+	if c.CounterpartMatching != "" {
+		return c.CounterpartMatching
+	}
+	return c.ToMatching
 }
 
 // resolveMany resolves an edge endpoint: a plain form must be unique (0 →
@@ -448,24 +549,34 @@ func (m *model) anyPair(froms, tos []string) bool {
 	return false
 }
 
-// presentPairs returns the sorted, distinct "from -> to" strings for every
-// resolved pair that exists in the graph.
+// presentPairs returns the sorted "from -> to" strings for every resolved pair
+// that exists in the graph. froms and tos are each distinct (resolve returns
+// distinct matches), so each (f,t) is visited once — no dedup needed.
 func (m *model) presentPairs(froms, tos []string) []string {
-	seen := map[string]bool{}
 	var out []string
 	for _, f := range froms {
 		for _, t := range tos {
 			if m.pairs[[2]string{f, t}] {
-				s := f + " -> " + t
-				if !seen[s] {
-					seen[s] = true
-					out = append(out, s)
-				}
+				out = append(out, f+" -> "+t)
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// countPresentPairs counts the resolved pairs present in the graph without
+// materializing the offender strings — the count is all edge_count needs.
+func (m *model) countPresentPairs(froms, tos []string) int {
+	n := 0
+	for _, f := range froms {
+		for _, t := range tos {
+			if m.pairs[[2]string{f, t}] {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func ambiguousDetail(query string, candidates []string) string {
@@ -489,11 +600,8 @@ func label(c Claim) string {
 	case "node", "no_node":
 		return c.FQN
 	case "in_degree", "out_degree":
-		if c.CounterpartMatching != "" {
-			return c.Of + " (counterpart " + c.CounterpartMatching + ")"
-		}
-		if c.ToMatching != "" {
-			return c.Of + " (counterpart " + c.ToMatching + ")"
+		if cp := counterpartQuery(c); cp != "" {
+			return c.Of + " (counterpart " + cp + ")"
 		}
 		return c.Of
 	default:
@@ -516,19 +624,27 @@ func addSet(m map[string]map[string]bool, k, v string) {
 	m[k][v] = true
 }
 
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
+// sortedSets freezes an adjacency set to sorted distinct slices. It routes
+// through setutil.SortedKeys — the codebase's single ordering primitive — so
+// its determinism contract cannot drift from every other groundwork pass
+// (CLAUDE.md, one source of truth).
 func sortedSets(m map[string]map[string]bool) map[string][]string {
 	out := make(map[string][]string, len(m))
 	for k, set := range m {
-		out[k] = sortedKeys(set)
+		out[k] = setutil.SortedKeys(set)
+	}
+	return out
+}
+
+func sortedIntSets(m map[string]map[int]bool) map[string][]int {
+	out := make(map[string][]int, len(m))
+	for k, set := range m {
+		vs := make([]int, 0, len(set))
+		for v := range set {
+			vs = append(vs, v)
+		}
+		sort.Ints(vs)
+		out[k] = vs
 	}
 	return out
 }

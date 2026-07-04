@@ -108,12 +108,24 @@ func TestRegexCompileErrorIsError(t *testing.T) {
 	}
 }
 
-// TestNotRegexEdgeForms pins that a single "/" and the empty string are treated
-// as plain, not as a (degenerate) regex.
+// TestNotRegexEdgeForms pins that a single "/", the empty-inner "//", and the
+// empty string are treated as plain, not as a (degenerate) regex. "//" is the
+// load-bearing case: an empty regex matches every candidate, so if "//" were
+// treated as a regex it would resolve an endpoint to the entire universe and
+// pass an edge/node claim trivially — a silent false pass. As plain, "//"
+// suffix-matches (almost) nothing → UNRESOLVED, fail closed.
 func TestNotRegexEdgeForms(t *testing.T) {
-	for _, q := range []string{"/", ""} {
+	for _, q := range []string{"/", "//", ""} {
 		if isRegex(q) {
 			t.Errorf("isRegex(%q) = true, want false (plain)", q)
 		}
+	}
+	// "//" as a claim endpoint must NOT resolve to the whole universe.
+	got, err := Resolve("//", universe)
+	if err != nil {
+		t.Fatalf("Resolve(//): %v", err)
+	}
+	if len(got.Matches) == len(universe) {
+		t.Errorf("Resolve(//) matched the entire universe (%d) — empty regex leaked", len(got.Matches))
 	}
 }

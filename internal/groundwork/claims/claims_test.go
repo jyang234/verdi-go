@@ -175,6 +175,52 @@ func TestDegreeRequiresEq(t *testing.T) {
 	}
 }
 
+// TestUnexpectedFieldRejected pins that a KNOWN field on the wrong kind ERRORs
+// rather than being silently ignored — the failure mode where `eq` on an `edge`
+// (author meant an absence assertion) would evaluate as a presence check.
+func TestUnexpectedFieldRejected(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Eq: intp(0)})
+	if r.Outcome != Errored {
+		t.Errorf("edge with stray eq = %+v, want Errored (not a silent presence check)", r)
+	}
+	// A node claim must not silently accept a degree filter field.
+	if r := evalOne(t, Claim{Kind: "node", FQN: "App).Create", CounterpartMatching: "/x/"}); r.Outcome != Errored {
+		t.Errorf("node with stray counterpart_matching = %+v, want Errored", r)
+	}
+}
+
+// TestCounterpartFilterFailsClosed pins that a counterpart filter matching
+// NOTHING anywhere in the graph is an ERROR (a typo/rename), not a vacuous pass
+// on an eq:0 claim.
+func TestCounterpartFilterFailsClosed(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(0), CounterpartMatching: "/nonexistent-pkg/"})
+	if r.Outcome != Errored {
+		t.Errorf("typo'd counterpart filter with eq:0 = %+v, want Errored (not a vacuous pass)", r)
+	}
+	// A filter that resolves in the graph (matches a real package) but none of
+	// App.Create's callees are in it is a LEGITIMATE zero — it passes eq:0.
+	// (App.Create's callees are Evaluate + the boundary db endpoint; none match
+	// /scoring/.)
+	if r := evalOne(t, Claim{Kind: "out_degree", Of: "App).Create", Eq: intp(0), CounterpartMatching: "/scoring/"}); r.Outcome != Pass {
+		t.Errorf("legit zero-intersection out_degree = %+v, want Pass", r)
+	}
+}
+
+// TestDuplicateFQNTierAbstains pins that a graph carrying one FQN at two tiers
+// makes a tier claim ABSTAIN (ERROR), never grade against an arbitrary record.
+func TestDuplicateFQNTierAbstains(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "svc/gen.F[int]", Tier: 1},
+			{FQN: "svc/gen.F[int]", Tier: 3}, // same display FQN, different tier
+		},
+	}
+	rep := Evaluate(g, &File{Claims: []Claim{{Kind: "node", FQN: "gen.F[int]", Tier: intp(1)}}})
+	if rep.Results[0].Outcome != Errored {
+		t.Errorf("tier claim on duplicate-FQN node = %+v, want Errored (abstain)", rep.Results[0])
+	}
+}
+
 // TestDeterministicOverShuffledInput pins that the report is a pure function of
 // the graph content, not its edge/node arrival order.
 func TestDeterministicOverShuffledInput(t *testing.T) {
@@ -219,6 +265,11 @@ func TestLoadFileStrict(t *testing.T) {
 	// Missing "claims" is an operational error.
 	if _, err := LoadFile(write(`{"other":[]}`)); err == nil {
 		t.Error("missing claims array must error")
+	}
+	// Trailing data after the single object must fail closed (parity with
+	// graph.Load's single-value guard).
+	if _, err := LoadFile(write(`{"claims":[{"kind":"node","fqn":"x"}]} garbage`)); err == nil {
+		t.Error("trailing data after claims JSON must error")
 	}
 }
 
