@@ -1,0 +1,16 @@
+{
+  "algo": "rta",
+  "nodes": [
+    {"fqn": "example.com/attrsvc.Handler", "tier": 1},
+    {"fqn": "example.com/attrsvc.New", "tier": 2},
+    {"fqn": "example.com/attrsvc.Repo", "tier": 2},
+    {"fqn": "example.com/attrsvc.Service", "tier": 1}
+  ],
+  "edges": [
+    {"from": "example.com/attrsvc.Handler", "to": "boundary:db SELECT users", "tier": 2, "boundary": "outbound-sync", "via": "reclaim-y"},
+    {"from": "example.com/attrsvc.Handler", "to": "example.com/attrsvc.New", "tier": 2},
+    {"from": "example.com/attrsvc.Handler", "to": "example.com/attrsvc.Service", "tier": 2, "concurrent": true},
+    {"from": "example.com/attrsvc.Repo", "to": "boundary:db INSERT audit", "tier": 1, "boundary": "outbound-sync"},
+    {"from": "example.com/attrsvc.Service", "to": "example.com/attrsvc.Repo", "tier": 2}
+  ]
+}

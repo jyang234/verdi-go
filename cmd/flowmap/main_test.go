@@ -387,6 +387,54 @@ func firstLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
+// TestRunGraphDiffJSON: bare `graph --diff BASE` (no --mermaid, no --rollup) emits the
+// attribute-aware JSON GraphDelta — the machine-consumable delta the consumer previously
+// hand-built with jq. A self-diff is a well-formed but EMPTY delta (every change list
+// present and empty), proving the comparison actually ran and routed to the delta path
+// rather than falling through to the plain graph JSON; the --mermaid --root --diff
+// combination stays rejected (a rooted diff is unsupported).
+func TestRunGraphDiffJSON(t *testing.T) {
+	dir := t.TempDir()
+	base := captureStdout(t, func() {
+		if err := run([]string{"graph", fixtureDir()}); err != nil {
+			t.Fatalf("graph: %v", err)
+		}
+	})
+	basePath := filepath.Join(dir, "base.graph.json")
+	if err := os.WriteFile(basePath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := run([]string{"graph", "--diff", basePath, fixtureDir()}); err != nil {
+			t.Fatalf("graph --diff: %v", err)
+		}
+	})
+	// It is a GraphDelta, not a plain graph: the delta-only keys must be present.
+	for _, key := range []string{`"nodes_added"`, `"edges_changed"`, `"caveats"`, `"base"`, `"branch"`} {
+		if !strings.Contains(out, key) {
+			t.Errorf("bare --diff must emit a GraphDelta (missing %s):\n%s", key, firstLines(out, 8))
+		}
+	}
+	// Self-diff: the comparison ran and found nothing — every change list is present and empty.
+	for _, empty := range []string{`"nodes_added": []`, `"edges_added": []`, `"edges_changed": []`, `"nodes_changed": []`} {
+		if !strings.Contains(out, empty) {
+			t.Errorf("a self-diff must be an EMPTY delta (missing %s):\n%s", empty, out)
+		}
+	}
+	// And it decodes as a GraphDelta (the delta shape, not the graph shape).
+	var d graphio.GraphDelta
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		t.Fatalf("delta output must be valid GraphDelta JSON: %v", err)
+	}
+
+	// Mutual exclusion unchanged: --root and --diff cannot combine under --mermaid.
+	silenceStdout(t)
+	if err := run([]string{"graph", "--mermaid", "--root", "POST /loan-application", "--diff", basePath, fixtureDir()}); err == nil {
+		t.Error("--mermaid --root --diff must be rejected (a rooted diff is unsupported)")
+	}
+}
+
 // TestRunGraphAlgo: --algo selects the call-graph algorithm. rta/vta/cha all
 // build; an unknown value is rejected before any analysis runs.
 func TestRunGraphAlgo(t *testing.T) {

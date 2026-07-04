@@ -1,0 +1,65 @@
+{
+  "base": {
+    "algo": "rta"
+  },
+  "branch": {
+    "algo": "rta"
+  },
+  "nodes_added": [
+    "example.com/attrsvc.New"
+  ],
+  "nodes_removed": [
+    "example.com/attrsvc.Old"
+  ],
+  "nodes_changed": [
+    {
+      "fqn": "example.com/attrsvc.Service",
+      "field": "tier",
+      "old": 2,
+      "new": 1
+    }
+  ],
+  "edges_added": [
+    {
+      "from": "example.com/attrsvc.Handler",
+      "to": "example.com/attrsvc.New"
+    }
+  ],
+  "edges_removed": [
+    {
+      "from": "example.com/attrsvc.Old",
+      "to": "example.com/attrsvc.Service"
+    }
+  ],
+  "edges_changed": [
+    {
+      "from": "example.com/attrsvc.Handler",
+      "to": "boundary:db SELECT users",
+      "field": "tier",
+      "old": 1,
+      "new": 2
+    },
+    {
+      "from": "example.com/attrsvc.Handler",
+      "to": "boundary:db SELECT users",
+      "field": "via",
+      "old": "reclaim-x",
+      "new": "reclaim-y"
+    },
+    {
+      "from": "example.com/attrsvc.Handler",
+      "to": "example.com/attrsvc.Service",
+      "field": "concurrent",
+      "old": null,
+      "new": true
+    },
+    {
+      "from": "example.com/attrsvc.Service",
+      "to": "example.com/attrsvc.Repo",
+      "field": "concurrent",
+      "old": true,
+      "new": null
+    }
+  ],
+  "caveats": []
+}

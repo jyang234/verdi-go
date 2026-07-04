@@ -11,8 +11,16 @@ package graphio
 // still exists but lost one call" never reads the same as "a function that was
 // removed". A kept node stays neutral grey even when a red removed-edge dangles off
 // it; only a node that is GONE on the branch turns red. Every changed element is
-// triple-cued: fill color, border style, and a +/− label prefix (so the diff
+// triple-cued: fill color, border style, and a +/−/Δ label prefix (so the diff
 // survives greyscale printing and colorblindness).
+//
+// There are FOUR element states, not three: beyond added/removed/kept, a SURVIVING
+// element whose ATTRIBUTES drifted is the `changed` class (amber, Δ) — a node whose
+// tier moved, or a (from,to) pair whose record set changed (became concurrent, gained
+// or lost a `via`, moved tier). It is DERIVED from the same graphio.Delta the JSON
+// `flowmap graph --diff` emits (parity-tested), so the human view and the machine view
+// cannot disagree on what changed. A changed edge keeps the kept ARROW SHAPE (shape is
+// reserved for the add/remove/kept channel) and carries a Δ attribute label.
 //
 // It shares the base renderer's invariants through the same helpers (collectEmitsEffect,
 // keepNode, edgeDecoration, the boundary/id/label helpers) so the two renderers cannot
@@ -91,8 +99,9 @@ func edgeIndex(g *Graph) map[ekey]Edge {
 }
 
 // MermaidDiff renders base → branch. opts.MaxTier collapses unchanged plumbing as
-// in Mermaid, but a node or edge that is part of the delta is ALWAYS shown,
-// whatever its tier — the diff must never hide the very thing it is diffing.
+// in Mermaid, but a node or edge that is part of the delta — added, removed, OR
+// attribute-changed — is ALWAYS shown, whatever its tier: the diff must never hide the
+// very thing it is diffing (a tier-changed node may itself now exceed MaxTier).
 func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 	baseN, branchN := nodeIndex(base), nodeIndex(branch)
 	baseE, branchE := edgeIndex(base), edgeIndex(branch)
@@ -110,9 +119,23 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		return stateOf(b, br)
 	}
 
-	// A node that emits a boundary effect on EITHER side is never hidden (shared rule
-	// with the base renderer); any endpoint of a CHANGED edge is force-shown so the
-	// delta is never collapsed away.
+	// The attribute-aware delta is the ONE source of what changed; the mermaid `changed`
+	// class is DERIVED from it (and parity-tested against the JSON delta) so the two views
+	// cannot disagree on what changed. nodeChanged/pairChanged index it for the loops below.
+	d := Delta(base, branch)
+	nodeChanged := make(map[string]NodeChange, len(d.NodesChanged))
+	for _, nc := range d.NodesChanged {
+		nodeChanged[nc.FQN] = nc
+	}
+	pairChanged := map[ekey][]EdgeChange{}
+	for _, ec := range d.EdgesChanged {
+		pairChanged[ekey{ec.From, ec.To}] = append(pairChanged[ekey{ec.From, ec.To}], ec)
+	}
+
+	// A node that emits a boundary effect on EITHER side is never hidden (shared rule with
+	// the base renderer). Force-show every delta-touched element so a change is never
+	// collapsed away by tier folding: any endpoint of an added/removed OR attribute-changed
+	// edge, plus any node whose own tier drifted (which may itself now sit above MaxTier).
 	emitsEffect := collectEmitsEffect(base.Edges)
 	for fqn := range collectEmitsEffect(branch.Edges) {
 		emitsEffect[fqn] = true
@@ -129,6 +152,15 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		if !isBoundary(k.to) {
 			changedEndpoint[k.to] = true
 		}
+	}
+	for k := range pairChanged {
+		changedEndpoint[k.from] = true
+		if !isBoundary(k.to) {
+			changedEndpoint[k.to] = true
+		}
+	}
+	for fqn := range nodeChanged {
+		changedEndpoint[fqn] = true
 	}
 	// Boundary-target state, precomputed in two single passes (O(E)) rather than a
 	// per-target rescan of both edge maps (the old O(boundary×edges)).
@@ -186,7 +218,7 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 	// first-party count alone — a refactor-scale delta or a wide effect fan-out is the
 	// hairball worst case. Summarize the delta (reusing the pass-A counts) instead.
 	if opts.MaxNodes > 0 && len(shown)+len(bnodes) > opts.MaxNodes {
-		return diffOverview(base, branch, opts, len(shown)+len(bnodes), added, removed)
+		return diffOverview(base, branch, opts, len(shown)+len(bnodes), added, removed, len(nodeChanged)+len(pairChanged))
 	}
 
 	var b strings.Builder
@@ -204,11 +236,20 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 			continue
 		}
 		st := nodeStateOf(fqn)
-		label := prefixFor(st) + mermaidText(frontier.ShortName(fqn))
+		class := classFor(st)
+		name := mermaidText(frontier.ShortName(fqn))
+		label := prefixFor(st) + name
+		// A kept node whose tier drifted is the third class: neutral kept grey would hide
+		// the change, so it recolors to `changed` and names the drift (Δ … tier 2→1). Only
+		// a KEPT node can be changed — an added/removed node already owns its own color.
+		if nc, ok := nodeChanged[fqn]; ok && st == stKept {
+			class = classChanged
+			label = changedPrefix + name + " " + nc.Field + " " + renderDeltaVal(nc.Old) + "→" + renderDeltaVal(nc.New)
+		}
 		if pick(fqn).Fallible {
 			label += " ⚠"
 		}
-		b.WriteString("    " + id + `["` + label + `"]:::` + classFor(st) + "\n")
+		b.WriteString("    " + id + `["` + label + `"]:::` + class + "\n")
 	}
 	for _, bn := range bnodes {
 		open, close := boundaryDelims(bn.class)
@@ -221,7 +262,7 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 
 	// Edges, in union order; collect link indices per state for linkStyle coloring.
 	var idx int
-	var addedIdx, removedIdx, keptIdx []int
+	var addedIdx, removedIdx, keptIdx, changedIdx []int
 	for _, k := range allEdges {
 		var toID string
 		if isBoundary(k.to) {
@@ -248,6 +289,15 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 			e = eBase
 		}
 		st := stateOf(inBase, inBr)
+		// A surviving pair whose attribute record SET drifted is the edge third class: draw
+		// the kept-shape (solid) arrow so the persist/add/remove channel still reads "this
+		// call stayed", but label it Δ with the changed attributes and recolor it changed.
+		if changes, ok := pairChanged[k]; ok && st == stKept {
+			b.WriteString("    " + diffEdgeChangedLine(fromID, toID, edgeDeltaLabel(changes)) + "\n")
+			changedIdx = append(changedIdx, idx)
+			idx++
+			continue
+		}
 		b.WriteString("    " + diffEdgeLine(fromID, toID, e, st) + "\n")
 		switch st {
 		case stAdded:
@@ -263,6 +313,7 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 	writeLinkStyle(&b, addedIdx, "stroke:#1a9d1a,stroke-width:3px")
 	writeLinkStyle(&b, removedIdx, "stroke:#cc3333,stroke-width:2px")
 	writeLinkStyle(&b, keptIdx, "stroke:#cccccc")
+	writeLinkStyle(&b, changedIdx, changedLinkStyle)
 	b.WriteString(diffClassDefs)
 	return b.String()
 }
@@ -326,17 +377,24 @@ func writeDiffHeader(b *strings.Builder, base, branch *Graph) {
 }
 
 // diffOverview renders the over-cap summary: a refactor-scale delta is an illegible
-// red/green hairball, so disclose the added/removed counts (reused from MermaidDiff's
-// pass A — not recomputed) and the provenance caveats rather than drawing it. A valid,
-// deterministic single-node diagram. drawn is the full first-party+boundary node count.
-func diffOverview(base, branch *Graph, opts MermaidOptions, drawn, added, removed int) string {
+// hairball, so disclose the added/removed counts (reused from MermaidDiff's pass A —
+// not recomputed) PLUS the changed count (nodes with a tier drift + attribute-changed
+// pairs, from the Delta) and the provenance caveats, rather than drawing it. Disclosing
+// the changed count is load-bearing: the third class must not vanish silently when the
+// diagram truncates. A valid, deterministic single-node diagram. drawn is the full
+// first-party+boundary node count.
+func diffOverview(base, branch *Graph, opts MermaidOptions, drawn, added, removed, changed int) string {
 	ids := &idAlloc{used: map[string]bool{}}
 	var b strings.Builder
 	writeDiffHeader(&b, base, branch)
 	b.WriteString("    %% " + strconv.Itoa(drawn) + " nodes exceed the render cap (" +
 		strconv.Itoa(opts.MaxNodes) + "); summarizing the delta instead\n")
+	// The changed count rides alongside added/removed so a truncated delta never HIDES that
+	// attributes drifted — silent truncation of the third class would be exactly the
+	// fail-open (a semantic change invisible in the view) this phase closes.
 	msg := "⚠ large delta — " + strconv.Itoa(added) + " added, " + strconv.Itoa(removed) +
-		" removed across " + strconv.Itoa(drawn) + " nodes. Too large to draw legibly; review the JSON diff or raise --max-nodes."
+		" removed, " + strconv.Itoa(changed) + " changed across " + strconv.Itoa(drawn) +
+		" nodes. Too large to draw legibly; review the JSON diff (flowmap graph --diff) or raise --max-nodes."
 	b.WriteString("    " + ids.get("toobig") + `["` + mermaidText(msg) + `"]` + "\n")
 	b.WriteString(diffClassDefs)
 	return b.String()
@@ -390,6 +448,55 @@ func diffEdgeLine(from, to string, e Edge, s diffState) string {
 			return from + " -->|" + d + "| " + to
 		}
 		return from + " --> " + to
+	}
+}
+
+// diffEdgeChangedLine renders a surviving pair whose attributes drifted: the kept-shape
+// (solid) arrow — so the persist/add/remove channel still says "this call stayed" — with a
+// Δ label naming the changed attributes. Color comes from the changed linkStyle; the SHAPE
+// is deliberately the plain kept arrow, since arrow shape is reserved for the diff-state
+// channel (a changed edge is neither an added nor a removed one). The label is data (a
+// `via` value can carry anything), so it is edge-label-safe.
+func diffEdgeChangedLine(from, to, delta string) string {
+	return from + " -->|" + changedPrefix + edgeLabelSafe(delta) + "| " + to
+}
+
+// edgeDeltaLabel joins a pair's changed attributes into "field old→new; …" in the delta's
+// canonical (from,to,field)-sorted order, so the label is deterministic across runs.
+func edgeDeltaLabel(changes []EdgeChange) string {
+	parts := make([]string, len(changes))
+	for i, c := range changes {
+		parts[i] = c.Field + " " + renderDeltaVal(c.Old) + "→" + renderDeltaVal(c.New)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// renderDeltaVal renders one delta value for a human-readable label: the unset ∅ (nil, the
+// JSON null), a scalar, or a bracketed list for a field that varies across a pair's records.
+// A concurrent `true` shows as the diagram's concurrency word `go` (the vocabulary the kept
+// edges already use), so a lost/gained concurrent mode reads consistently with the rest of
+// the flowchart. It is the human twin of the JSON old/new — the two mean the same fact.
+func renderDeltaVal(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "∅"
+	case bool:
+		if x {
+			return "go"
+		}
+		return "∅"
+	case int:
+		return strconv.Itoa(x)
+	case string:
+		return x
+	case []any:
+		parts := make([]string, len(x))
+		for i, e := range x {
+			parts[i] = renderDeltaVal(e)
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	default:
+		return ""
 	}
 }
 
@@ -457,7 +564,7 @@ func reserveLegendIDs(a *idAlloc) {
 
 // legendIDs is the single source for the legend node ids: reserveLegendIDs claims
 // them and writeLegend emits them, so the two cannot drift into a collision.
-var legendIDs = []string{"lg_kept", "lg_added", "lg_removed"}
+var legendIDs = []string{"lg_kept", "lg_added", "lg_removed", "lg_changed"}
 
 func writeLegend(b *strings.Builder) {
 	b.WriteString("    subgraph legend[\"legend — base → branch\"]\n")
@@ -465,9 +572,22 @@ func writeLegend(b *strings.Builder) {
 	b.WriteString("        " + legendIDs[0] + "[\"unchanged\"]:::kept\n")
 	b.WriteString("        " + legendIDs[1] + "[\"＋ added\"]:::added\n")
 	b.WriteString("        " + legendIDs[2] + "[\"− removed\"]:::removed\n")
+	b.WriteString("        " + legendIDs[3] + "[\"Δ changed (tier/attr)\"]:::changed\n")
 	b.WriteString("    end\n")
 }
 
+// classChanged / changedPrefix / changedLinkStyle are the third-class cues — an amber fill,
+// a Δ text prefix, and an amber stroke — a colorway distinct from added-green, removed-red,
+// and kept-grey, so an attribute drift on a SURVIVING element (a call that stayed but became
+// concurrent, a node whose tier moved) reads as neither added nor removed. Triple-cued like
+// the other states (fill + Δ glyph + label text), so it survives greyscale and colorblindness.
+const (
+	classChanged     = "changed"
+	changedPrefix    = "Δ "
+	changedLinkStyle = "stroke:#d98e00,stroke-width:2px"
+)
+
 const diffClassDefs = "    classDef kept fill:#f6f6f6,stroke:#aaaaaa,color:#444444\n" +
 	"    classDef added fill:#e7f9e7,stroke:#1a9d1a,stroke-width:2px,color:#0a5d0a\n" +
-	"    classDef removed fill:#fbeaea,stroke:#cc3333,stroke-width:2px,stroke-dasharray:5 3,color:#7d0a0a\n"
+	"    classDef removed fill:#fbeaea,stroke:#cc3333,stroke-width:2px,stroke-dasharray:5 3,color:#7d0a0a\n" +
+	"    classDef changed fill:#fff6e5,stroke:#d98e00,stroke-width:2px,color:#7a4d00\n"

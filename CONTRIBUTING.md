@@ -37,3 +37,26 @@ The gated artifacts carry a `schema_version` (`flowmap.boundary/v1`,
 bump the version, then regenerate every committed artifact (`flowmap boundary`,
 `go test -update`) in the same change. The version is part of snapshot equality,
 so a bump deliberately fails stale goldens.
+
+## Semantic (output-meaning) changes
+
+Some changes alter what the output *means* without changing which elements it
+contains — the fail-open class this codebase exists to catch. Examples: a
+different `tier` attribution, whether a `go`-launched call carries `concurrent`,
+the boundary-label vocabulary (`POSTGRES` → `postgres`), or a new/renamed
+blind-spot kind. A set-based diff (and a reviewer skimming for added/removed
+lines) reads these as "no change", so they must be named explicitly.
+
+When a change moves output *semantics* rather than the element set, **say so in
+the PR description.** The recommended, mechanical evidence is an attribute-aware
+JSON delta over a committed golden:
+
+```
+flowmap graph --diff testdata/.../some.graph.json testdata/fixtures/somesvc
+```
+
+The `nodes_changed` / `edges_changed` lists are the exact drift to describe (see
+`docs/groundwork/usage.md` → "Attribute-aware diff"). The goldens-manifest ratchet
+(`testdata/groundwork/regen.sh` + `TestGoldenSectionManifest`) already makes an
+attribute change *visible* in the review diff; this convention makes **naming** it
+mandatory rather than left to reviewer alertness.

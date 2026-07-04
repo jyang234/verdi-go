@@ -14,6 +14,14 @@ import (
 // set-based (the known limitation from the pressure test: a new call *site* to an
 // already-called target produces no "added edge"); the structural claims the
 // artifact makes are scoped to exactly this.
+//
+// Deliberately NOT unified with graphio.Delta (internal/static/graphio/delta.go),
+// the attribute-aware consumer-facing delta: this one feeds the review verdict's
+// shape/touch labels (how far a change reaches, which packages it touches) and does
+// not need — or want — an attribute third class, while graphio.Delta reports tier/
+// concurrent/via drift for `flowmap graph --diff` and is blind to the call-site
+// multiplicity this one ignores. Two rules for two artifacts, cross-referenced so
+// they are not mistaken for an accidental fork (CLAUDE.md: one source of truth).
 type graphDelta struct {
 	nodesAdded     []string
 	nodesRemoved   []string
