@@ -22,7 +22,8 @@ package graphio
 // single representative record — is what lets a multiplicity change (two records → one)
 // register as a change; a single-record comparison would silently call it unchanged.
 //
-// Determinism: every output list is sorted on intrinsic keys (fqn; from,to,field), so
+// Determinism: the node/edge lists are sorted on intrinsic keys (fqn; from,to,field), and
+// Caveats is deterministic by construction (provenanceCaveats appends in a fixed order), so
 // the artifact is byte-identical across runs regardless of graph edge/node order.
 //
 // Relationship to groundwork review's own delta: `internal/groundwork/review`'s
@@ -32,6 +33,7 @@ package graphio
 // an accidental fork.
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 	"strconv"
@@ -104,6 +106,14 @@ type EdgeEndpoints struct {
 
 // attrTuple is one edge record's full attribute identity (Phase 0: record identity is the
 // full attribute tuple, not (from,to)). A pair's attribute state is the SET of these.
+//
+// It MUST mirror every Edge field except the pair key (From,To) — the same record identity
+// dedupEdges (full-struct ==) and edgeLess (a total order over every field) enforce. If a
+// new identity-bearing Edge field were added and NOT folded in here, two records that differ
+// only in it would collapse into one tuple, and a real multiplicity change would read as a
+// false "unchanged" — the fail-open (tenet 4) this phase exists to close. The parity is
+// pinned by TestAttrTupleMirrorsEdgeIdentity so that drift fails loudly (CLAUDE.md: a rule in
+// two places is named in a comment AND guarded by a test).
 type attrTuple struct {
 	tier       int
 	boundary   string
@@ -244,18 +254,19 @@ func edgeFieldChanges(k ekey, base, branch map[attrTuple]bool) []EdgeChange {
 	emit := func(field string, old, nw any) {
 		out = append(out, EdgeChange{From: k.from, To: k.to, Field: field, Old: old, New: nw})
 	}
-	if o, n := tierSig(base), tierSig(branch); !slices.Equal(o, n) {
+	tier := func(t attrTuple) (int, bool) { return t.tier, true }
+	boundary := func(t attrTuple) (string, bool) { return t.boundary, t.boundary != "" }
+	via := func(t attrTuple) (string, bool) { return t.via, t.via != "" }
+	if o, n := distinctSorted(base, tier), distinctSorted(branch, tier); !slices.Equal(o, n) {
 		emit("tier", scalarOrList(o), scalarOrList(n))
 	}
-	if o, n := labelSig(base, func(t attrTuple) string { return t.boundary }),
-		labelSig(branch, func(t attrTuple) string { return t.boundary }); !slices.Equal(o, n) {
+	if o, n := distinctSorted(base, boundary), distinctSorted(branch, boundary); !slices.Equal(o, n) {
 		emit("boundary", scalarOrList(o), scalarOrList(n))
 	}
 	if o, n := concurrentPresent(base), concurrentPresent(branch); o != n {
 		emit("concurrent", boolOrNil(o), boolOrNil(n))
 	}
-	if o, n := labelSig(base, func(t attrTuple) string { return t.via }),
-		labelSig(branch, func(t attrTuple) string { return t.via }); !slices.Equal(o, n) {
+	if o, n := distinctSorted(base, via), distinctSorted(branch, via); !slices.Equal(o, n) {
 		emit("via", scalarOrList(o), scalarOrList(n))
 	}
 	if len(out) == 0 {
@@ -264,33 +275,22 @@ func edgeFieldChanges(k ekey, base, branch map[attrTuple]bool) []EdgeChange {
 	return out
 }
 
-// tierSig is the sorted distinct set of tier values across a pair's records.
-func tierSig(set map[attrTuple]bool) []int {
-	seen := map[int]bool{}
-	var out []int
+// distinctSorted is the sorted, deduped set of one attribute's values across a pair's
+// records. get returns the value and whether to INCLUDE it: tier includes every value;
+// boundary/via fold out the empty string (its unset state), so their old/new renders as
+// ∅/null rather than a literal "". One helper for every field, so the dedupe/sort/skip
+// rule lives once (CLAUDE.md: one source of truth) — the same collapse scalarOrList already
+// applied to the int/string variants.
+func distinctSorted[T cmp.Ordered](set map[attrTuple]bool, get func(attrTuple) (T, bool)) []T {
+	seen := map[T]bool{}
+	var out []T
 	for t := range set {
-		if !seen[t.tier] {
-			seen[t.tier] = true
-			out = append(out, t.tier)
-		}
-	}
-	sort.Ints(out)
-	return out
-}
-
-// labelSig is the sorted distinct set of NON-EMPTY values a string attribute (boundary or
-// via) takes across a pair's records — the empty string is the unset state and is folded
-// out, so its old/new renders as ∅/null rather than as a literal "".
-func labelSig(set map[attrTuple]bool, get func(attrTuple) string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for t := range set {
-		if v := get(t); v != "" && !seen[v] {
+		if v, ok := get(t); ok && !seen[v] {
 			seen[v] = true
 			out = append(out, v)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 

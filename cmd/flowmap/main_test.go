@@ -433,6 +433,15 @@ func TestRunGraphDiffJSON(t *testing.T) {
 	if err := run([]string{"graph", "--mermaid", "--root", "POST /loan-application", "--diff", basePath, fixtureDir()}); err == nil {
 		t.Error("--mermaid --root --diff must be rejected (a rooted diff is unsupported)")
 	}
+	// --diff and --entry are mutually exclusive: an entry-scoped branch diffed against a
+	// whole-graph base would report every out-of-cone function as a phantom removal. Fail
+	// closed on BOTH the JSON and the --mermaid consumption.
+	if err := run([]string{"graph", "--diff", basePath, "--entry", "POST /loan-application", fixtureDir()}); err == nil {
+		t.Error("bare --diff --entry must be rejected (scoped branch vs whole-graph base = false delta)")
+	}
+	if err := run([]string{"graph", "--mermaid", "--diff", basePath, "--entry", "POST /loan-application", fixtureDir()}); err == nil {
+		t.Error("--mermaid --diff --entry must be rejected (scoped branch vs whole-graph base = false delta)")
+	}
 }
 
 // TestRunGraphAlgo: --algo selects the call-graph algorithm. rta/vta/cha all

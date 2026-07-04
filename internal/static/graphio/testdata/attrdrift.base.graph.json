@@ -8,6 +8,8 @@
   ],
   "edges": [
     {"from": "example.com/attrsvc.Handler", "to": "boundary:db SELECT users", "tier": 1, "boundary": "outbound-sync", "via": "reclaim-x"},
+    {"from": "example.com/attrsvc.Handler", "to": "example.com/attrsvc.Repo", "tier": 2},
+    {"from": "example.com/attrsvc.Handler", "to": "example.com/attrsvc.Repo", "tier": 2, "concurrent": true},
     {"from": "example.com/attrsvc.Handler", "to": "example.com/attrsvc.Service", "tier": 2},
     {"from": "example.com/attrsvc.Old", "to": "example.com/attrsvc.Service", "tier": 3},
     {"from": "example.com/attrsvc.Repo", "to": "boundary:db INSERT audit", "tier": 1, "boundary": "outbound-sync"},

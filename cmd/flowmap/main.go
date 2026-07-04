@@ -166,6 +166,16 @@ func cmdGraph(args []string) error {
 		return err
 	}
 
+	// A --diff needs comparable base/branch SCOPES. --entry scopes the BRANCH build to one
+	// entry cone, so diffing that against a whole-graph base would paint every out-of-cone
+	// function as removed — a silent, confidently-wrong delta (empirically: a 40-node graph
+	// diffed against its 20-node entry-scoped build reports 20 phantom removed nodes). Fail
+	// closed here, before the build, covering all three --diff consumptions (JSON, --mermaid,
+	// --rollup) — the same whole-service reason --rollup already refuses --entry below.
+	if *diffBase != "" && *entry != "" {
+		return fmt.Errorf("graph --diff and --entry are mutually exclusive: --entry scopes the branch to one entry cone, so a diff against a whole-graph base would report every out-of-cone function as removed (a false delta)")
+	}
+
 	opt, err := algoOption(*algo)
 	if err != nil {
 		return err

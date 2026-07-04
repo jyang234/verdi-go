@@ -27,6 +27,7 @@ package graphio
 // drift on "an effect emitter is never hidden", boundary shaping, or edge annotation.
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,10 +91,20 @@ func nodeIndex(g *Graph) map[string]Node {
 	return m
 }
 
+// edgeIndex maps each (from,to) pair to ONE representative Edge for the diff's presence
+// check and its kept/added decoration. A pair can carry several records (Phase 0: a plain
+// and a `go`-launched call are two facts); the representative is the pair's canonical
+// MAXIMUM under edgeLess — a deterministic choice (never the arrival-order last writer, so
+// the render is byte-identical under edge reordering) that also prefers the most-decorated
+// record (concurrent/via sort after plain), so a surviving pair's concurrent or reclaimer
+// mode is disclosed rather than hidden behind a bare plain record.
 func edgeIndex(g *Graph) map[ekey]Edge {
 	m := make(map[ekey]Edge, len(g.Edges))
 	for _, e := range g.Edges {
-		m[ekey{e.From, e.To}] = e
+		k := ekey{e.From, e.To}
+		if cur, ok := m[k]; !ok || edgeLess(cur, e) {
+			m[k] = e
+		}
 	}
 	return m
 }
@@ -129,7 +140,8 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 	}
 	pairChanged := map[ekey][]EdgeChange{}
 	for _, ec := range d.EdgesChanged {
-		pairChanged[ekey{ec.From, ec.To}] = append(pairChanged[ekey{ec.From, ec.To}], ec)
+		k := ekey{ec.From, ec.To}
+		pairChanged[k] = append(pairChanged[k], ec)
 	}
 
 	// A node that emits a boundary effect on EITHER side is never hidden (shared rule with
@@ -227,7 +239,7 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		b.WriteString("    %% " + plural(hidden, "unchanged node") +
 			" above tier " + strconv.Itoa(opts.MaxTier) + " hidden; changed nodes are always shown\n")
 	}
-	writeLegend(&b)
+	writeLegend(&b, true) // the call-graph diff owns the third `changed` class
 
 	// First-party node declarations, in union order.
 	for _, fqn := range nodeKeys {
@@ -244,7 +256,10 @@ func MermaidDiff(base, branch *Graph, opts MermaidOptions) string {
 		// a KEPT node can be changed — an added/removed node already owns its own color.
 		if nc, ok := nodeChanged[fqn]; ok && st == stKept {
 			class = classChanged
-			label = changedPrefix + name + " " + nc.Field + " " + renderDeltaVal(nc.Old) + "→" + renderDeltaVal(nc.New)
+			// The drift suffix is data (a field value could be anything a future node attribute
+			// carries), so escape it — the same discipline the changed-EDGE label gets via
+			// edgeLabelSafe. Safe-but-a-no-op today (tier is an int), defensive for tomorrow.
+			label = changedPrefix + name + " " + mermaidText(nc.Field+" "+renderDeltaVal(nc.Old)+"→"+renderDeltaVal(nc.New))
 		}
 		if pick(fqn).Fallible {
 			label += " ⚠"
@@ -496,7 +511,11 @@ func renderDeltaVal(v any) string {
 		}
 		return "[" + strings.Join(parts, ",") + "]"
 	default:
-		return ""
+		// Unreachable with today's producers (Old/New are only nil/bool/int/string/[]any from
+		// scalarOrList/boolOrNil/tupleSetRepr). Render the value VISIBLY rather than blanking
+		// it: a laundered unknown that silently vanishes from a change label is the fail-open
+		// this codebase forbids — a visible "%v" surfaces the drift instead (tenet 3).
+		return fmt.Sprintf("%v", x)
 	}
 }
 
@@ -566,13 +585,20 @@ func reserveLegendIDs(a *idAlloc) {
 // them and writeLegend emits them, so the two cannot drift into a collision.
 var legendIDs = []string{"lg_kept", "lg_added", "lg_removed", "lg_changed"}
 
-func writeLegend(b *strings.Builder) {
+// writeLegend emits the shared base→branch legend. withChanged adds the fourth `changed`
+// entry — emitted ONLY by the call-graph diff, which has that third class. The component
+// (C3) rollup diff shares this legend but has NO changed class (tier/concurrent do not
+// exist at package grain), so it passes false: advertising a `Δ changed` swatch it can
+// never draw would launder a blind spot into a covered-looking-but-empty channel (tenet 3).
+func writeLegend(b *strings.Builder, withChanged bool) {
 	b.WriteString("    subgraph legend[\"legend — base → branch\"]\n")
 	b.WriteString("        direction LR\n")
 	b.WriteString("        " + legendIDs[0] + "[\"unchanged\"]:::kept\n")
 	b.WriteString("        " + legendIDs[1] + "[\"＋ added\"]:::added\n")
 	b.WriteString("        " + legendIDs[2] + "[\"− removed\"]:::removed\n")
-	b.WriteString("        " + legendIDs[3] + "[\"Δ changed (tier/attr)\"]:::changed\n")
+	if withChanged {
+		b.WriteString("        " + legendIDs[3] + "[\"Δ changed (tier/attr)\"]:::changed\n")
+	}
 	b.WriteString("    end\n")
 }
 
