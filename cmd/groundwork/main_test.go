@@ -112,7 +112,7 @@ func TestRunErrors(t *testing.T) {
 func TestRunHelpFlagIsCleanAcrossSubcommands(t *testing.T) {
 	for _, cmd := range []string{
 		"reach", "triage", "ground", "chains", "fitness", "review", "verify",
-		"diff", "verify-artifact", "exceptions", "transcript", "init", "policy-check", "mcp",
+		"diff", "assert", "verify-artifact", "exceptions", "transcript", "init", "policy-check", "mcp",
 	} {
 		for _, flag := range []string{"-h", "--help"} {
 			if err := run([]string{cmd, flag}); err != nil {
@@ -130,7 +130,7 @@ func TestRunHelpFlagIsCleanAcrossSubcommands(t *testing.T) {
 func TestUsageBodyDocumentsEverySubcommand(t *testing.T) {
 	subcommands := []string{
 		"reach", "triage", "ground", "mcp", "chains", "fitness", "review",
-		"review-triage", "verify", "diff", "verify-artifact", "exceptions",
+		"review-triage", "verify", "diff", "assert", "verify-artifact", "exceptions",
 		"transcript", "init", "policy-check", "version",
 	}
 	for _, cmd := range subcommands {

@@ -23,6 +23,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/buildinfo"
 	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/claims"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
@@ -104,6 +105,8 @@ func run(args []string) error {
 		return cmdVerify(args[1:])
 	case "diff":
 		return cmdDiff(args[1:])
+	case "assert":
+		return cmdAssert(args[1:])
 	case "verify-artifact":
 		return cmdVerifyArtifact(args[1:])
 	case "exceptions":
@@ -174,6 +177,7 @@ usage:
   groundwork review-triage <base.json> <branch.json> [--json|--mermaid|--summary] [--policy <p.json>] [--scope-fqns <file|->] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage; --summary is an MR-comment digest; --policy adds per-route write movement; --scope-fqns marks the author-edited functions
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--corpus <t.json>...] [--capture <grade>] [--json]  pre-flight gate: new violations, scope creep, breaking contract; --corpus adds a behavioral-impeachment gate, --capture asserts its fidelity grade
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
+  groundwork assert <graph.json> <claims.json>   verify point-in-time doc claims against a graph (a FAIL exits 1; an unresolvable claim exits 2)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
   groundwork transcript <calls.jsonl> [--json]   summarize an mcp --log transcript: sessions, tool/service mix, cross-service hops
@@ -940,6 +944,42 @@ func cmdDiff(args []string) error {
 	}
 	if d.Breaking() {
 		return verdictf("diff: breaking contract change(s)")
+	}
+	return nil
+}
+
+// cmdAssert verifies a point-in-time claims file against a graph — the
+// verification complement to fitness (fitness gates ongoing invariants over a
+// policy; assert checks that THIS graph matches what a design doc asserts about
+// it). Exit codes ride the existing verdict/operational split
+// (TestVerdictVsOperationalErrors): a computed FAIL is a verdictError (exit 1,
+// taking precedence over errors); zero FAILs but ≥1 claim that could not be
+// evaluated (unresolved/ambiguous/malformed) is a plain operational error
+// (exit 2 — "this claim's gate could not run"); all pass → nil. The report
+// prints to stdout in claims-file order before the error return.
+func cmdAssert(args []string) error {
+	fs := flag.NewFlagSet("assert", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: groundwork assert <graph.json> <claims.json>")
+	}
+	g, err := graph.LoadFile(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	cf, err := claims.LoadFile(fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	rep := claims.Evaluate(g, cf)
+	fmt.Print(rep.String())
+	if rep.Failed() > 0 {
+		return verdictf("assert: %d claim(s) failed", rep.Failed())
+	}
+	if rep.Errored() > 0 {
+		return fmt.Errorf("assert: %d claim(s) could not be evaluated", rep.Errored())
 	}
 	return nil
 }

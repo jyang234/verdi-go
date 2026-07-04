@@ -147,6 +147,7 @@ Fail-closed and deterministic:
 - **The gated artifact** is the inter-service boundary contract (§4) plus its blind-spot manifest (§7) — sorted, position-insensitive, canonical JSON. It diffs only on a genuine boundary change, which is what keeps it low-churn enough to route to a human without training rubber-stamping.
 - **The generated, non-gated artifacts** — the full call graph, signatures, and the detail sidecar's source positions — are regenerated on demand and **not** gated, so the function-level churn from renames, extractions, and moves never reaches the gate. Publish them as a CI build artifact and link them from the service README so they stay discoverable without polluting diffs.
 - Canonical JSON, sorted keys throughout — the same determinism discipline as canonicalization (Go map iteration is randomized; sort everything).
+- An edge record's identity is its **full attribute tuple** `(from, to, tier, boundary, concurrent, via)`, not the `(from, to)` pair — the sort keys on all six fields and dedup collapses only full-tuple duplicates, so the same pair legitimately recurs when it carries more than one mode (see `docs/groundwork/usage.md` §"Consuming graph.json directly" for the counting rule consumers must pick).
 
 ---
 
