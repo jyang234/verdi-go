@@ -7,27 +7,52 @@ import (
 	"testing"
 )
 
-// TestAssertLoansvcAcceptance is the phase acceptance: the committed
-// seven-claim file over the pinned loansvc graph exercises all four outcome
-// classes at once — PASS, FAIL, AMBIGUOUS, and UNRESOLVED — and the report is
-// asserted byte-for-byte, with the exit CLASS pinned to a verdictError (a FAIL
-// takes precedence over the errored claims, exit 1).
-//
-// NOTE: the companion prototype spec (verdi-go-fr-prototype-spec-2026-07-03) is
-// a consumer-side artifact not carried in this repo, so its byte-exact §1.6
-// output cannot be reproduced here. This fixture is the in-repo equivalent —
-// authored against the same field-validated semantics and the same loansvc pin
-// (40 nodes / 49 unique edges / 3 Score candidates), exercising every outcome
-// class the acceptance calls for.
+// TestAssertLoansvcAcceptance runs the committed seven-claim file over the
+// pinned loansvc graph, exercising all four outcome classes at once — PASS,
+// FAIL, AMBIGUOUS, and UNRESOLVED — with the report asserted byte-for-byte and
+// the exit CLASS pinned to a verdictError (a FAIL takes precedence over the
+// errored claims, exit 1). This fixture is kept alongside the byte-pinned
+// spec-acceptance case (TestAssertSpecAcceptance) because it exercises cases the
+// spec file does not: a `no_node` claim and a boundary-endpoint edge claim. Its
+// claims carry no `id`, so it also pins the id-less fallback label (the
+// endpoint-derived label) in the report shape.
 func TestAssertLoansvcAcceptance(t *testing.T) {
-	const want = `FAIL edge store.Loans).SelectLoan -> handler.App).Create: no edge between the resolved endpoints
-ERROR node .Score: ambiguous ".Score" (3 candidates): (*example.com/loansvc/internal/client.Bureau).Score, (*example.com/loansvc/internal/scoring.Remote).Score, (*example.com/loansvc/internal/scoring.Stub).Score
-ERROR node handler.App).Delete: unresolved "handler.App).Delete"
+	const want = `FAIL  store.Loans).SelectLoan -> handler.App).Create [edge] 0 edge(s)
+ERROR .Score [node] AMBIGUOUS: '.Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+ERROR handler.App).Delete [node] UNRESOLVED: 'handler.App).Delete' matches no node
 assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
 `
 	args := []string{"assert",
 		"../../testdata/groundwork/goldens/loansvc.graph.json",
 		"../../testdata/groundwork/claims/loansvc-acceptance.claims.json"}
+
+	var err error
+	got := captureStdout(t, func() { err = run(args) })
+	if got != want {
+		t.Errorf("assert report:\n got:\n%s\nwant:\n%s", got, want)
+	}
+	// A FAIL is a verdictError (exit 1), taking precedence over the errored claims.
+	var v verdictError
+	if !errors.As(err, &v) {
+		t.Errorf("run(assert) = %v (%T), want a verdictError (exit 1)", err, err)
+	}
+}
+
+// TestAssertSpecAcceptance is the phase's byte-for-byte pin of the companion
+// spec's §1.6 acceptance case: the verbatim seven-claim file (ids L1–L7, `fn`
+// aliases, `to_matching` on L3) over the pinned loansvc graph must reproduce the
+// spec's expected output exactly, and the exit CLASS is a verdictError (a FAIL
+// takes precedence over the errored claims, exit 1). The byte-pin is the point —
+// if this diverges the schema/report-shape closure regressed, not the golden.
+func TestAssertSpecAcceptance(t *testing.T) {
+	const want = `FAIL  L5-deliberate-fail [edge] 0 edge(s)
+ERROR L6-ambiguous-name [node] AMBIGUOUS: 'Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+ERROR L7-unresolved-name [edge] UNRESOLVED: 'handler.App).Delete' matches no node/endpoint
+assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
+`
+	args := []string{"assert",
+		"../../testdata/groundwork/goldens/loansvc.graph.json",
+		"../../testdata/groundwork/claims/loansvc-spec-acceptance.claims.json"}
 
 	var err error
 	got := captureStdout(t, func() { err = run(args) })

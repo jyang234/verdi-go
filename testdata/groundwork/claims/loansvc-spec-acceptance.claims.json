@@ -1,0 +1,11 @@
+{
+ "claims": [
+  {"id": "L1-create-evaluates", "kind": "edge", "from": "handler.App).Create", "to": "origination.Evaluator).Evaluate"},
+  {"id": "L2-evaluate-tier", "kind": "node", "fn": "origination.Evaluator).Evaluate", "tier": 1},
+  {"id": "L3-no-status-write", "kind": "out_degree", "fn": "handler.App).Status", "eq": 0, "to_matching": "/InsertLedger|boundary:db (INSERT|UPDATE|DELETE)/"},
+  {"id": "L4-no-consumer-to-handler", "kind": "no_edge", "from": "consumer.Payments).OnSettled", "to": "handler.App).Create"},
+  {"id": "L5-deliberate-fail", "kind": "edge", "from": "handler.App).Status", "to": "eventbus.Bus).Publish"},
+  {"id": "L6-ambiguous-name", "kind": "node", "fn": "Score", "tier": 1},
+  {"id": "L7-unresolved-name", "kind": "edge", "from": "handler.App).Delete", "to": "origination.Evaluator).Evaluate"}
+ ]
+}

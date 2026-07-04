@@ -273,6 +273,74 @@ func TestLoadFileStrict(t *testing.T) {
 	}
 }
 
+// TestIDLabelEcho pins that a claim's `id` becomes the report-line label, and
+// an id-less claim falls back to the endpoint-derived label.
+func TestIDLabelEcho(t *testing.T) {
+	// With id: the label is the id verbatim.
+	r := evalOne(t, Claim{ID: "my-check", Kind: "edge", From: "repo.Store).Save", To: "App).Create"})
+	if r.Outcome != Fail || r.Label != "my-check" {
+		t.Errorf("id-labelled claim = %+v, want Fail with Label \"my-check\"", r)
+	}
+	// Without id: the endpoint-derived label.
+	if r := evalOne(t, Claim{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}); r.Label != "repo.Store).Save -> App).Create" {
+		t.Errorf("id-less label = %q, want the endpoint-derived label", r.Label)
+	}
+}
+
+// TestFnAlias pins that `fn` aliases the anchor field on all four kinds that
+// accept it — fqn on node/no_node, of on the degree kinds.
+func TestFnAlias(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "node", Fn: "App).Create", Tier: intp(1)}); r.Outcome != Pass {
+		t.Errorf("node fn alias = %+v, want Pass", r)
+	}
+	if r := evalOne(t, Claim{Kind: "no_node", Fn: "svc/handler.deletedThing"}); r.Outcome != Pass {
+		t.Errorf("no_node fn alias = %+v, want Pass", r)
+	}
+	if r := evalOne(t, Claim{Kind: "in_degree", Fn: "repo.Store).Save", Eq: intp(3)}); r.Outcome != Pass {
+		t.Errorf("in_degree fn alias = %+v, want Pass", r)
+	}
+	if r := evalOne(t, Claim{Kind: "out_degree", Fn: "App).Create", Eq: intp(2)}); r.Outcome != Pass {
+		t.Errorf("out_degree fn alias = %+v, want Pass", r)
+	}
+}
+
+// TestFnCanonicalBothPresentErrors pins that supplying both the alias and its
+// canonical spelling on one claim ERRORs — no silent precedence, mirroring the
+// counterpart_matching/to_matching handling.
+func TestFnCanonicalBothPresentErrors(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "node", FQN: "App).Create", Fn: "App).Create"}); r.Outcome != Errored {
+		t.Errorf("node fn+fqn = %+v, want Errored", r)
+	}
+	if r := evalOne(t, Claim{Kind: "no_node", FQN: "x", Fn: "y"}); r.Outcome != Errored {
+		t.Errorf("no_node fn+fqn = %+v, want Errored", r)
+	}
+	if r := evalOne(t, Claim{Kind: "in_degree", Of: "repo.Store).Save", Fn: "repo.Store).Save", Eq: intp(3)}); r.Outcome != Errored {
+		t.Errorf("in_degree fn+of = %+v, want Errored", r)
+	}
+	if r := evalOne(t, Claim{Kind: "out_degree", Of: "App).Create", Fn: "App).Create", Eq: intp(2)}); r.Outcome != Errored {
+		t.Errorf("out_degree fn+of = %+v, want Errored", r)
+	}
+}
+
+// TestFnOnEdgeIsWrongKind pins that `fn` on an edge kind (which has no anchor
+// field) is a wrong-kind ERROR, not a silently-accepted field.
+func TestFnOnEdgeIsWrongKind(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Fn: "x"}); r.Outcome != Errored {
+		t.Errorf("edge with fn = %+v, want Errored (wrong-kind)", r)
+	}
+}
+
+// TestIDAllowedOnEveryKind pins that `id` is claim metadata, never a wrong-kind
+// field: it does not trip the unexpected-field check on any kind.
+func TestIDAllowedOnEveryKind(t *testing.T) {
+	if r := evalOne(t, Claim{ID: "x", Kind: "node", FQN: "App).Create"}); r.Outcome != Pass {
+		t.Errorf("id on node = %+v, want Pass", r)
+	}
+	if r := evalOne(t, Claim{ID: "x", Kind: "edge", From: "App).Create", To: "repo.Store).Save"}); r.Outcome != Pass {
+		t.Errorf("id on edge = %+v, want Pass", r)
+	}
+}
+
 // TestReportFormat pins the exact line shapes the CLI/golden depend on.
 func TestReportFormat(t *testing.T) {
 	rep := Evaluate(testGraph(), &File{Claims: []Claim{
@@ -280,8 +348,8 @@ func TestReportFormat(t *testing.T) {
 		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}, // fail
 		{Kind: "node", FQN: ".Score"},                               // errored (ambiguous)
 	}})
-	want := "FAIL edge repo.Store).Save -> App).Create: no edge between the resolved endpoints\n" +
-		"ERROR node .Score: ambiguous \".Score\" (2 candidates): (*svc/scoring.Remote).Score, svc/scoring.Score\n" +
+	want := "FAIL  repo.Store).Save -> App).Create [edge] 0 edge(s)\n" +
+		"ERROR .Score [node] AMBIGUOUS: '.Score' matches 2: (*svc/scoring.Remote).Score; svc/scoring.Score\n" +
 		"assert: 1 passed, 1 failed, 1 errored (graph: 5 nodes, 4 unique edges)\n"
 	if got := rep.String(); got != want {
 		t.Errorf("report format:\n got %q\nwant %q", got, want)
