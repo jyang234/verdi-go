@@ -1,0 +1,119 @@
+package fqnres
+
+import (
+	"reflect"
+	"testing"
+)
+
+// universe is a small, deliberately varied FQN set: pointer- and value-receiver
+// methods, a plain function, a generic instance's bracketed display FQN, a
+// closure ($N suffix), and a boundary pseudo-node endpoint.
+var universe = []string{
+	"(*example.com/loansvc/internal/handler.App).Create",
+	"(*example.com/loansvc/internal/store.PostgresStore).GetMessage",
+	"example.com/loansvc/internal/store.PostgresStore.GetMessage", // value-receiver twin
+	"example.com/loansvc/internal/scoring.Score",
+	"(*example.com/loansvc/internal/scoring.Remote).Score",
+	"example.com/loansvc/internal/handler.newReadinessCheck$1",
+	"example.com/loansvc/internal/util.Map[int]",
+	"boundary:db QueryContext",
+}
+
+func TestPlainNormalizedSuffix(t *testing.T) {
+	// Receiver punctuation is stripped from BOTH sides, so the ')' form and the
+	// bare-dot form resolve to the same pointer-receiver method.
+	for _, q := range []string{"handler.App).Create", "handler.App.Create"} {
+		got, err := Resolve(q, universe)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", q, err)
+		}
+		want := []string{"(*example.com/loansvc/internal/handler.App).Create"}
+		if got.Ambiguous || !reflect.DeepEqual(got.Matches, want) {
+			t.Errorf("Resolve(%q) = %+v, want unique %v", q, got, want)
+		}
+	}
+}
+
+func TestPlainUnresolved(t *testing.T) {
+	got, err := Resolve("nope.Missing", universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Matches) != 0 || got.Ambiguous {
+		t.Errorf("Resolve unresolved = %+v, want 0 matches", got)
+	}
+}
+
+func TestPlainAmbiguousSorted(t *testing.T) {
+	// ".Score" suffix-matches three functions; the plain form flags AMBIGUOUS
+	// and returns them sorted (deterministic candidate list).
+	got, err := Resolve(".Score", universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"(*example.com/loansvc/internal/scoring.Remote).Score",
+		"example.com/loansvc/internal/scoring.Score",
+	}
+	if !got.Ambiguous || !reflect.DeepEqual(got.Matches, want) {
+		t.Errorf("Resolve(.Score) = %+v, want ambiguous %v", got, want)
+	}
+}
+
+func TestPlainClosureAndGenericPassThroughAsBytes(t *testing.T) {
+	// A closure's $1 suffix and a generic instance's [int] brackets are matched
+	// as raw bytes (no bracket normalization) under the plain suffix rule.
+	if got, _ := Resolve("newReadinessCheck$1", universe); len(got.Matches) != 1 {
+		t.Errorf("closure suffix = %+v, want 1 match", got)
+	}
+	if got, _ := Resolve("util.Map[int]", universe); len(got.Matches) != 1 {
+		t.Errorf("generic-instance suffix = %+v, want 1 match", got)
+	}
+}
+
+func TestPlainMatchesBoundaryEndpoint(t *testing.T) {
+	got, _ := Resolve("boundary:db QueryContext", universe)
+	if len(got.Matches) != 1 {
+		t.Errorf("boundary endpoint = %+v, want 1 match", got)
+	}
+}
+
+func TestRegexSeesRawBytes(t *testing.T) {
+	// The regex sees the RAW FQN including receiver punctuation, so it can anchor
+	// on ')' — which the plain normalized form has stripped away.
+	got, err := Resolve(`/PostgresStore\).GetMessage$/`, universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"(*example.com/loansvc/internal/store.PostgresStore).GetMessage"}
+	if !got.IsRegex || got.Ambiguous || !reflect.DeepEqual(got.Matches, want) {
+		t.Errorf("regex = %+v, want raw-byte anchored %v", got, want)
+	}
+}
+
+func TestRegexMultiMatchLegal(t *testing.T) {
+	// Unanchored regex over the raw bytes; multi-match is legal (never ambiguous).
+	got, err := Resolve(`/\.Score$/`, universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Ambiguous || len(got.Matches) != 2 {
+		t.Errorf("regex multi-match = %+v, want 2 non-ambiguous matches", got)
+	}
+}
+
+func TestRegexCompileErrorIsError(t *testing.T) {
+	if _, err := Resolve(`/(unclosed/`, universe); err == nil {
+		t.Error("a regex compile error must be surfaced, not a silent no-match")
+	}
+}
+
+// TestNotRegexEdgeForms pins that a single "/" and the empty string are treated
+// as plain, not as a (degenerate) regex.
+func TestNotRegexEdgeForms(t *testing.T) {
+	for _, q := range []string{"/", ""} {
+		if isRegex(q) {
+			t.Errorf("isRegex(%q) = true, want false (plain)", q)
+		}
+	}
+}

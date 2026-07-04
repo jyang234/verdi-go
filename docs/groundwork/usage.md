@@ -1232,6 +1232,73 @@ Decode strictly (groundwork uses `DisallowUnknownFields`): a schema change you
 have not been taught about should fail loudly, not drop fields silently.
 Producer and judge deploy in lockstep — that is a feature.
 
+### Claims files — `groundwork assert <graph.json> <claims.json>`
+
+`assert` is the point-in-time complement to `fitness`. Where `fitness` gates
+ongoing invariants over a policy, `assert` answers a narrower question: **does
+this graph, right now, match what a design doc says about it?** It is the
+mechanical version of the manual audit that catches consumer-side transcription
+drift — a hand-drawn edge that the graph never had, a tier typed from memory.
+Every claim is fail-loud: a claim that cannot be evaluated ERRORs rather than
+passing vacuously.
+
+A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
+
+| `kind` | fields | passes when |
+|---|---|---|
+| `edge` | `from`, `to` | ≥1 edge exists between the resolved endpoints |
+| `no_edge` | `from`, `to` | no edge exists between the resolved endpoints |
+| `edge_count` | `from`, `to`, `eq` | the count of present pairs equals `eq` |
+| `node` | `fqn` [, `tier`] | `fqn` resolves (and its tier equals `tier`, if given) |
+| `no_node` | `fqn` | `fqn` resolves to **zero** nodes |
+| `in_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callers (optionally filtered) equals `eq` |
+| `out_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callees (optionally filtered) equals `eq` |
+
+**Resolving a name — suffix vs. regex.** A plain string is a **normalized-FQN
+suffix**: receiver punctuation (`(`, `)`, `*`) is stripped from both the claim
+and each candidate before matching, so `handler.App).Create` and
+`handler.App.Create` both resolve to
+`(*example.com/loansvc/internal/handler.App).Create`. Plain names are the
+ergonomic form — forgiving about receiver syntax — and **unique-or-nothing**: a
+plain name that matches zero functions is UNRESOLVED and one that matches two or
+more is AMBIGUOUS; both ERROR the claim. A `/regex/` string (leading and
+trailing `/`) is an explicit **Go RE2** regex searched, unanchored, against the
+**raw** FQN — receiver punctuation visible, so you can anchor on it
+(`/PostgresStore\).GetMessage$/`) — and multi-match is legal. RE2 has no
+backreferences or lookahead; a claim using unsupported syntax ERRORs (fail
+closed), never silently matches nothing. Enforcement is **per side**: a regex on
+one endpoint of an `edge` claim does not relax the uniqueness the other side's
+plain form implies.
+
+**Why `no_node` never errors — the FAIL/ERROR asymmetry.** For every kind
+*except* `no_node`, a name that fails to resolve is an ERROR, not a silent pass:
+if `must not exist` could be satisfied by a name that simply no longer resolves,
+a rename would make the check pass vacuously. `no_node` is the one kind where
+**zero matches IS the pass** (that is the whole assertion), so a rename that
+deletes the named node can never smuggle a vacuous pass into some *other*
+absence claim. That is precisely why the others must ERROR instead.
+
+**Counting is over unique `(from, to)` pairs** — the same basis defined under
+[`edges[]`](#consuming-graphjson-directly) above: `edge`, `edge_count`, and the
+degree kinds all count a pair once even when the graph carries it under more
+than one mode. The `counterpart_matching` filter on a degree claim narrows the
+counted counterparts (a plain suffix or a `/regex/`); `to_matching` is accepted
+as a deprecated alias, and supplying both ERRORs.
+
+**Output and exit codes.** The report prints, in claims-file order, the FAIL
+lines then the ERROR lines, then a summary
+(`assert: N passed, N failed, N errored (graph: N nodes, N unique edges)`);
+passing claims are silent. Exit codes ride groundwork's existing split: **≥1
+FAIL exits 1** (a computed verdict failed — takes precedence over errors),
+**zero FAILs but ≥1 errored claim exits 2** (a claim's gate could not run), and
+all-pass exits 0.
+
+Claims files outlive the pins they were written against by design. `assert`
+loads the graph through the same strict decoder as every other groundwork
+command, so a claims file run against a graph from a *newer* flowmap (one that
+added a field) fails the decode — correct (fail closed on schema skew), and a
+signal to rebuild the graph, not a reason to loosen the reader.
+
 ### Component (C3) rollup — `flowmap graph --rollup package`
 
 `flowmap graph --rollup package` rolls the function-level (C4) graph up to the

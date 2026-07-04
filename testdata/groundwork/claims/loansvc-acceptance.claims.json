@@ -1,0 +1,11 @@
+{
+  "claims": [
+    {"kind": "edge", "from": "handler.App).Create", "to": "origination.Evaluator).Evaluate"},
+    {"kind": "node", "fqn": "handler.App).Create", "tier": 1},
+    {"kind": "edge", "from": "origination.Evaluator).Evaluate", "to": "boundary:bus PUBLISH loan.approved"},
+    {"kind": "node", "fqn": ".Score"},
+    {"kind": "node", "fqn": "handler.App).Delete"},
+    {"kind": "edge", "from": "store.Loans).SelectLoan", "to": "handler.App).Create"},
+    {"kind": "no_node", "fqn": "handler.App).Deprecated"}
+  ]
+}
