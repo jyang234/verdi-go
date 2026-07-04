@@ -17,12 +17,18 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/fqnres"
 )
 
+// maxDanglingList caps the dangling-endpoint list the fail-closed error prints, disclosing
+// truncation with " (+N more)" via fqnres.CapList so a capped list never reads as the whole
+// set (tenet 3).
+const maxDanglingList = 8
+
 // MermaidFocus renders the induced subgraph over the resolved focus names — exactly
 // those nodes and every edge with BOTH endpoints in the set. g must be UNSCOPED (Build
 // with entry == ""), so the Frontier/blind-spot disclosure channels are present.
-// Fail-closed: an UNRESOLVED or AMBIGUOUS name (or a regex matching nothing) is an error
-// carrying the sorted candidates — never a partial render, since a silently dropped
-// focus node would be a lie about the induced subgraph (CLAUDE.md tenet 2).
+// Fail-closed: an UNRESOLVED or AMBIGUOUS name, a regex matching nothing, or a name that
+// resolves only to a dangling edge endpoint (no node record in this graph) is an error
+// carrying the sorted detail — never a partial render, since a silently dropped focus node
+// would be a lie about the induced subgraph (CLAUDE.md tenet 2).
 func (g *Graph) MermaidFocus(names []string, opts MermaidOptions) (string, error) {
 	universe := g.endpointUniverse()
 
@@ -72,9 +78,13 @@ func (g *Graph) MermaidFocus(names []string, opts MermaidOptions) (string, error
 	}
 	if len(dangling) > 0 {
 		sort.Strings(dangling)
+		// Endpoint-truthful: count the resolved focus-SET members with no node record, not
+		// the user's names (a single regex can resolve to several). Cap+join through the
+		// shared "; " list separator — a comma join would be misread when a generic FQN or
+		// boundary op contains a comma (fqnres.CapList: one list separator).
 		return "", fmt.Errorf(
-			"--focus: %d focus name(s) resolve to edge endpoints with no node record in this graph (dangling): %s — cannot render an honest induced subgraph",
-			len(dangling), strings.Join(dangling, ", "))
+			"--focus: %d focus endpoint(s) have no node record in this graph (dangling edge endpoints) — cannot render an honest induced subgraph: %s",
+			len(dangling), fqnres.CapList(dangling, maxDanglingList))
 	}
 
 	// Nodes = g.Nodes filtered to the focus set, canonical order preserved (no

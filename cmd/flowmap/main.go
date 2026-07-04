@@ -160,45 +160,28 @@ func cmdGraph(args []string) error {
 	rollup := fs.String("rollup", "", `emit a component-level (C3) rollup grouping nodes by package: "package". Default output is the rollup JSON; with --mermaid it renders the component flowchart, with --diff BASE the component delta (code-vs-disclosure split)`)
 	rollupBands := fs.Bool("rollup-bands", false, "with --rollup --mermaid, group the component boxes into architectural BAND lanes (transport/application/provisioning/storage/infrastructure/tests, read from the package name) with the composition root drawn outside the lanes; a view grouping, never a gate (no-op without --mermaid)")
 	// --focus is REPEATABLE (flag.Func accumulates): each occurrence adds one or more
-	// focus names for the induced-subgraph render. Within one occurrence the value is
-	// comma-split, EXCEPT a single well-formed /regex/ (which may contain commas) is taken
-	// as ONE name — the escape hatch for a comma-bearing regex is to pass it as its own
-	// --focus flag. A fragment that looks like half of a comma-split regex fails closed.
+	// focus names for the induced-subgraph render. The query-list grammar — comma-split,
+	// the whole-value /regex/ exemption (a single /re/ may contain commas), and the
+	// fail-closed ambiguity/split-damage refusals — lives in ONE place, fqnres.SplitQueries
+	// (beside IsRegex), so this splitter shares the exact rule the resolver's query forms
+	// imply instead of keeping a drifting copy of the '/' arithmetic (CLAUDE.md: one source
+	// of truth). A comma-bearing regex that reads as both one regex and a list is refused;
+	// the escape hatch is either its own --focus flag or a literal comma written [,].
 	var focusNames []string
-	fs.Func("focus", "with --mermaid, render the induced subgraph over these names — the named nodes and only the edges among them (a view, never a gate). Repeatable; comma-separated, or a single /regex/ (which may contain commas) per flag. Mutually exclusive with --root/--entry/--diff/--rollup", func(v string) error {
+	fs.Func("focus", "with --mermaid, render the induced subgraph over these names — the named nodes and only the edges among them (a view, never a gate). Repeatable; comma-separated, or a single /regex/ per flag (a comma inside a single regex must leave a damaged half on split or be written [,]; a value that reads as both a regex and a list is refused). Mutually exclusive with --root/--entry/--diff/--rollup", func(v string) error {
+		frags, err := fqnres.SplitQueries(v)
+		if err != nil {
+			return fmt.Errorf("--focus: %w", err)
+		}
 		// An occurrence that contributes ZERO names (--focus "", or all-whitespace) is a
 		// usage error HERE, per occurrence — an empty induced set draws nothing, and a
-		// silent drop (splitList discards empties) would let one bad flag vanish beside a
+		// silent drop (SplitQueries discards empties) would let one bad flag vanish beside a
 		// good one, e.g. `--focus a --focus ""`. Fail closed at the occurrence, not the
 		// aggregate.
-		frags := splitList(v)
 		if len(frags) == 0 {
 			return fmt.Errorf("graph --focus: empty value (no names after splitting); pass at least one name or a /regex/")
 		}
-		// Whole-value-regex exemption: parity with fqnres.IsRegex (leading+trailing '/',
-		// len ≥ 3) — the SAME rule Resolve uses, so a /regex/ is one name in both places.
-		// BUT a value that reads coherently BOTH as one regex AND as a comma-separated list
-		// (e.g. '/a|b/,/c/') is AMBIGUOUS: fail closed rather than silently merge it into one
-		// wrong regex. "Coherent as a list" = every comma fragment is itself either plain (no
-		// '/' at all) or a well-formed /re/. If ANY fragment is a damaged half-regex (splitting
-		// '/a{1,2}/' yields '/a{1' + '2}/'), the single-regex reading is the ONLY coherent one
-		// — keep it, so a genuinely comma-bearing regex still resolves as one name.
-		if fqnres.IsRegex(v) {
-			if len(frags) >= 2 && allCoherentFocus(frags) {
-				return fmt.Errorf("--focus %s is ambiguous: the value reads as both one regex and a comma-separated list of %d regexes; pass each regex as its own --focus flag", v, len(frags))
-			}
-			focusNames = append(focusNames, v)
-			return nil
-		}
-		for _, frag := range frags {
-			// Fail closed on split damage: a fragment that starts with '/' XOR ends with '/'
-			// is a regex a comma split in half — never let a comma inside a regex silently
-			// become two wrong plain names (a confidently-wrong induced set).
-			if strings.HasPrefix(frag, "/") != strings.HasSuffix(frag, "/") {
-				return fmt.Errorf("--focus: %s looks like part of a regex split on ','; pass a comma-bearing regex as its own --focus flag", frag)
-			}
-			focusNames = append(focusNames, frag)
-		}
+		focusNames = append(focusNames, frags...)
 		return nil
 	})
 	if err := fs.Parse(args); err != nil {
@@ -1315,22 +1298,6 @@ func contractToSyscontext(c *boundary.Contract) syscontext.Contract {
 		sc.Deps = append(sc.Deps, syscontext.Dep{Peer: d.Peer, Kind: d.Kind})
 	}
 	return sc
-}
-
-// allCoherentFocus reports whether every comma fragment of a --focus value is coherent
-// as its OWN focus name: either plain (no '/' at all) or a well-formed /regex/ (per
-// fqnres.IsRegex). It is the test for whether a whole-value regex ALSO reads as a
-// comma-separated list — when it does, the value is ambiguous and the flag refuses it.
-// A fragment that carries a '/' but is not a well-formed regex (a half-regex a comma
-// split, e.g. '/a{1') is NOT coherent, so a genuinely comma-bearing regex fails this and
-// keeps its single-regex reading.
-func allCoherentFocus(frags []string) bool {
-	for _, f := range frags {
-		if strings.Contains(f, "/") && !fqnres.IsRegex(f) {
-			return false
-		}
-	}
-	return true
 }
 
 func splitList(csv string) []string {

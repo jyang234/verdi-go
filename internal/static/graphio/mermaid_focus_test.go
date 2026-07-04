@@ -185,7 +185,7 @@ func TestMermaidFocusDisclosesPinnedPlumbing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MermaidFocus: %v", err)
 	}
-	if !strings.Contains(out, "pinned into view:") || !strings.Contains(out, "plumbing-tier (tier 3)") {
+	if !strings.Contains(out, "pinned into view:") || !strings.Contains(out, "above tier 2 (plumbing)") {
 		t.Errorf("focus render must disclose the pin-rescued tier-3 node, not hide it:\n%s", out)
 	}
 	again, _ := g.MermaidFocus(names, MermaidOptions{MaxTier: 2})
@@ -241,6 +241,49 @@ func TestFocusFailsClosedOnDanglingEndpoint(t *testing.T) {
 	}
 }
 
+// TestFocusDanglingEndpointsDeterministic pins that the dangling-endpoint list is
+// deterministic and SORTED even with several dangling members — the list is built from a
+// map range (focus), so without the sort.Strings its order is Go's randomized map
+// iteration and repeated renders would disagree. Deleting the sort must fail here (a
+// fail-closed disclosure whose order varies run-to-run is a determinism violation,
+// CLAUDE.md tenet 1). Every prior dangling test used a single name, so none caught this.
+func TestFocusDanglingEndpointsDeterministic(t *testing.T) {
+	g := &Graph{
+		Algo:  "rta",
+		Nodes: []Node{{FQN: "a.A", Tier: 1}},
+		Edges: []Edge{
+			{From: "a.A", To: "a.D", Tier: 1},
+			{From: "a.A", To: "a.B", Tier: 1},
+			{From: "a.A", To: "a.E", Tier: 1},
+			{From: "a.A", To: "a.C", Tier: 1},
+		},
+	}
+	names := []string{"a.A", "a.D", "a.B", "a.E", "a.C"} // a.B..a.E all dangle (no node record)
+	render1, err := g.MermaidFocus(names, MermaidOptions{MaxTier: 2})
+	if err == nil {
+		t.Fatalf("expected a dangling-endpoint error, got render:\n%s", render1)
+	}
+	first := err.Error()
+	// Byte-identity across many renders — with map iteration this is overwhelmingly likely
+	// to break if the sort is removed (a 4-element permutation matching 16 times is ~0).
+	for i := 0; i < 16; i++ {
+		_, e := g.MermaidFocus(names, MermaidOptions{MaxTier: 2})
+		if e == nil || e.Error() != first {
+			t.Fatalf("dangling error not deterministic across renders:\n first: %s\n got:   %v", first, e)
+		}
+	}
+	// And the list is genuinely sorted (not just stable).
+	marker := "induced subgraph: "
+	i := strings.LastIndex(first, marker)
+	if i < 0 {
+		t.Fatalf("unexpected error shape: %s", first)
+	}
+	list := strings.Split(first[i+len(marker):], "; ")
+	if !sort.StringsAreSorted(list) {
+		t.Errorf("dangling endpoints not sorted: %v", list)
+	}
+}
+
 // TestFocusResolverParityWithAssert pins Part 3 of the companion spec — "one resolver,
 // both features": `--focus` (graphio.endpointUniverse + fqnres) and `groundwork assert`
 // (claims.newModel's endpoint universe + fqnres) resolve a name to the SAME FQN set over
@@ -271,26 +314,19 @@ func TestFocusResolverParityWithAssert(t *testing.T) {
 	}
 
 	// Tie the rebuilt universe to claims' ACTUAL resolution over the ENDPOINT universe: an
-	// EDGE claim whose 'from' is the ambiguous "Score" resolves the from-side against claims'
-	// endpoint universe (resolveMany) and ERRORs AMBIGUOUS, listing exactly the candidates
-	// fqnres returns over that universe. The 'to' is a boundary endpoint that lives ONLY in
-	// the endpoint universe — a node-universe claim would never touch this universe (the old
-	// probe's blind spot).
-	fr, _ := fqnres.Resolve("Score", focusUniverse)
-	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{{Kind: "edge", From: "Score", To: "boundary:db SELECT loans"}}})
-	var detail string
-	for _, r := range rep.Results {
-		if r.Outcome == claims.Errored {
-			detail = r.Detail
-		}
-	}
-	if detail == "" {
-		t.Fatalf("expected claims to ERROR on the ambiguous 'Score' edge from-side, got: %s", rep.String())
-	}
-	for _, cand := range fr.Matches {
-		if !strings.Contains(detail, cand) {
-			t.Errorf("claims resolution %q missing focus candidate %q", detail, cand)
-		}
+	// EDGE claim whose 'from' resolves UNIQUELY ('store.Loans).SelectLoan') and whose 'to'
+	// is a BOUNDARY endpoint ('boundary:db SELECT loans') that lives ONLY in the endpoint
+	// universe (it is never a node). claims MUST resolve the 'to' against the endpoint
+	// universe: a nodes-only universe would leave the boundary 'to' UNRESOLVED and ERROR.
+	// The edge is present in the graph, so with the real endpoint universe the claim
+	// resolves and PASSES — genuinely exercising claims' production endpoint universe. (The
+	// old 'Score' probe short-circuited on an ambiguous 'from' before the boundary 'to' was
+	// ever resolved, so it passed even against a nodes-only universe — a dead probe.)
+	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{
+		{Kind: "edge", From: "store.Loans).SelectLoan", To: "boundary:db SELECT loans"},
+	}})
+	if rep.Errored() != 0 || rep.Passed() != 1 {
+		t.Fatalf("expected the boundary edge claim to resolve and PASS over the endpoint universe (a nodes-only universe would ERROR on the boundary 'to'), got: %s", rep.String())
 	}
 
 	// The (*T).Method asymmetry: a plain, receiver-punctuation-forgiving label resolves

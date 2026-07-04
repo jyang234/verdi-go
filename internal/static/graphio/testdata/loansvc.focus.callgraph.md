@@ -4,7 +4,7 @@ flowchart LR
     %% 1 blind spot outside the focus set shown only in the whole-graph view
     %% 3 frontier markers outside the focus set shown only in the whole-graph view
     %% 1 boundary endpoint(s) in the focus set have no induced edge — not drawn: boundary:db UPDATE loans
-    %% 1 pinned node(s) are plumbing-tier (tier 3); pinned into view: scoring.Stub.Score
+    %% 1 pinned node(s) above tier 2 (plumbing); pinned into view: scoring.Stub.Score
     handler_App_Status["handler.App.Status"]
     scoring_Stub_Score["scoring.Stub.Score ⚠"]:::fallible
     store_Loans_SelectLoan["store.Loans.SelectLoan ⚠"]:::fallible

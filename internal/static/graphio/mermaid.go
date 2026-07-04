@@ -346,7 +346,14 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// keep-decision stays one source of truth: the note never misfires for a
 	// plumbing-tier root that was already kept as an effect-bearing site (a dispatcher
 	// that itself sends). Never a silent change to what the default shows.
-	if opts.pinRoot != "" {
+	//
+	// Gate on pinNodes[pinRoot]: pinRoot is note-WORDING metadata, but force-keep flows
+	// ONLY through pinNodes (above). A caller that set pinRoot WITHOUT putting it in
+	// pinNodes did not actually force-keep the root, so it collapsed like any plumbing
+	// node — claiming it was "pinned into view" would be a lie about a node the render
+	// dropped. MermaidRootedAt always sets both, so this is inert for it; the guard exists
+	// so a pinRoot-only caller cannot get a false rescue claim (fail closed).
+	if opts.pinRoot != "" && opts.pinNodes[opts.pinRoot] {
 		for _, n := range g.Nodes {
 			if n.FQN == opts.pinRoot {
 				if !keepNode(n, opts.MaxTier, emitsEffect, nil) {
@@ -379,8 +386,8 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 			for i, fqn := range rescued {
 				short[i] = frontier.ShortName(fqn)
 			}
-			notes = append(notes, fmt.Sprintf("%d pinned node(s) are plumbing-tier (tier 3); pinned into view: %s",
-				len(rescued), fqnres.CapList(short, maxPinnedList)))
+			notes = append(notes, fmt.Sprintf("%d pinned node(s) above tier %d (plumbing); pinned into view: %s",
+				len(rescued), opts.MaxTier, fqnres.CapList(short, maxPinnedList)))
 		}
 	}
 

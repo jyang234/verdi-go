@@ -1538,22 +1538,28 @@ flowmap graph --mermaid \
   endpoints, so a boundary edge draws only when **both** the caller and the boundary
   are named.
 - **Repeatable flag; a whole-value `/regex/` is one name.** `--focus` accumulates
-  across occurrences. Within one occurrence the value is comma-split, **except** a
-  single well-formed `/regex/` (leading + trailing `/`) is taken as **one** name even
-  if it contains commas — *provided* the comma leaves a damaged half-regex on split
-  (`/a{1,2}/` → `/a{1` + `2}/`, so the single-regex reading is the only coherent one).
-  A value that reads coherently **both** as one regex **and** as a comma-separated list
-  of regexes (`/a|b/,/c/` — each fragment is itself a well-formed `/re/`) is **ambiguous
-  and refused**: pass each regex as its own `--focus` flag. A fragment that looks like
-  half of a comma-split regex (a stray leading/trailing `/`) is **refused loudly** rather
-  than silently taken as two wrong plain names. An **empty value** (`--focus ""`) is a
-  per-occurrence usage error, so one empty flag cannot vanish silently beside a good one.
+  across occurrences. The one query-list grammar lives in `internal/fqnres`
+  (`SplitQueries`, beside the resolver's query forms). Within one occurrence the value is
+  comma-split, **except** a single well-formed `/regex/` (leading + trailing `/`) is taken
+  as **one** name even if it contains commas — *provided* the comma leaves a damaged
+  half-regex on split (`/a{1,2}/` → `/a{1` + `2}/`, so the single-regex reading is the only
+  coherent one). A value that reads coherently **both** as one regex **and** as a
+  comma-separated list (`/a|b/,/c/`, or a mix of plain fragments and regexes each of which
+  is itself undamaged) is **ambiguous and refused**: pass each item as its own `--focus`
+  flag, or spell a literal comma inside a single regex as the RE2 class `[,]` (e.g.
+  `/x[,]y/`, whose split leaves damaged halves so it stays one regex). A fragment that
+  looks like half of a comma-split regex (a stray leading/trailing `/`) is **refused
+  loudly** rather than silently taken as two wrong plain names. An **empty value**
+  (`--focus ""`) is a per-occurrence usage error, so one empty flag cannot vanish silently
+  beside a good one.
 - **Fail-closed.** Any name that does not resolve aborts the **whole** render with no
   output — an `UNRESOLVED` (zero matches), an `AMBIGUOUS` (plain name → ≥2, with the
   sorted candidate list), a **zero-match regex** (a focus name that selects nothing is
-  a typo, not a legal empty set — unlike an `edge_count` claim's legal `0`), or a
-  regex compile error. A silently dropped focus node would be a lie about the induced
-  set, so it is never a partial render.
+  a typo, not a legal empty set — unlike an `edge_count` claim's legal `0`), a regex
+  compile error, or a **dangling edge endpoint** (a name that resolves only to an edge
+  endpoint with no node record in this graph — it would get no box and silently drop the
+  edges it induces, so it is named and refused). A silently dropped focus node would be a
+  lie about the induced set, so it is never a partial render.
 - **Isolated nodes still render.** A focused node with no induced edge draws as a lone
   box (it is force-kept against tier-collapse) — its isolation **is** the finding.
 - **Boundary names with no induced edge are disclosed, not dropped.** A boundary
@@ -1561,6 +1567,10 @@ flowmap graph --mermaid \
   an edge target); rather than vanish, it is named in a header note
   (`… boundary endpoints with no induced edge — not drawn: …`). Pruned blind-spot and
   frontier markers are disclosed the same way `--root` discloses them.
+- **A pin-rescued plumbing node is disclosed, not silently un-collapsed.** A focused
+  tier-3 plumbing node shown **only** because the focus pin rescued it from tier-collapse
+  is named in a header note (`… pinned node(s) above tier N (plumbing); pinned into view:
+  …`), so a reviewer never mistakes a normally-collapsed node for a load-bearing one.
 - **Exclusivity.** `--focus` **requires** `--mermaid` (it is a Mermaid view) and is
   **mutually exclusive** with `--root`, `--entry`, `--diff`, and `--rollup` — each
   refused with a reason. `--entry` is load-bearing: an entry-scoped build drops the

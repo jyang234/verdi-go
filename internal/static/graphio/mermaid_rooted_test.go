@@ -235,6 +235,27 @@ func TestMermaidRootedNonPlumbingRootByteIdentical(t *testing.T) {
 	}
 }
 
+// TestMermaidPinRootWithoutPinNodesDoesNotForceKeep pins the invariant that force-keep
+// flows ONLY through pinNodes: a plumbing-tier root named by pinRoot but ABSENT from
+// pinNodes is NOT force-kept — it collapses like any plumbing node, and no "pinned into
+// view" note fires (a note about a node the render dropped would be a lie). MermaidRootedAt
+// always sets both, so this guards a pinRoot-only caller. Mutation guard: re-adding a
+// second force-keep path (force[opts.pinRoot]=true in mermaid.go) keeps the root and fails
+// the absence assertion — the gap that let every suite pass with the fold-in re-added.
+func TestMermaidPinRootWithoutPinNodesDoesNotForceKeep(t *testing.T) {
+	const publish = "(example.com/svc/internal/outbox.Publisher).Publish"
+	g := dispatcherSampleGraph()
+	// pinRoot set for note-wording, but pinNodes EMPTY — the root is not in the force-keep
+	// set, so a plumbing-tier root must collapse.
+	out := g.mermaid(MermaidOptions{MaxTier: 2, pinRoot: publish}, nil)
+	if strings.Contains(out, "outbox.Publisher.Publish") {
+		t.Errorf("pinRoot without pinNodes must NOT force-keep the plumbing-tier root:\n%s", out)
+	}
+	if strings.Contains(out, "pinned into view") {
+		t.Errorf("no rescue note may fire when the root was not actually force-kept:\n%s", out)
+	}
+}
+
 // TestFilterDisclosuresDropsOutOfReach exercises the DROP path of filterDisclosures — a
 // blind spot and a frontier marker attributed OUTSIDE the root's forward reach — that no
 // --root golden covers (the loansvc golden has every disclosure in reach). Both must be

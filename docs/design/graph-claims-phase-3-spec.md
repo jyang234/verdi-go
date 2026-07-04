@@ -290,6 +290,23 @@ content the CLI must print.)
 - `--max-nodes` keeps its existing meaning; pinned nodes ride the existing
   keep idiom. (A focus list is hand-curated and small; no new cap logic.)
 
+*Amended by the round-2 review (2026-07-04):* three refinements to what the
+draft above specified, without rewriting it. (1) The boundary-note wording is
+**endpoint-based** — it counts the undrawn boundary *endpoints* in the focus set,
+not "focus names" (a single regex can resolve to several, and a name may also
+draw first-party nodes). (2) A focus name that resolves **only to a dangling edge
+endpoint** — an edge `from`/`to` with no node record, so the base renderer draws
+no box and silently drops the edges it induces — is a **fail-closed refusal**
+(named, capped through the shared `; ` list), not a partial render; it joins the
+enumerated abort causes. (3) A focus node shown only because the pin **rescued it
+from tier-collapse** is disclosed in a header note (`… pinned node(s) above tier
+N (plumbing) …`, parameterized on `MaxTier` since tier 4 exists), the same
+honesty channel the pruned-disclosure notes use. Separately, the `--focus`
+query-list grammar (comma-split, whole-value `/regex/` exemption, and the
+fail-closed ambiguity/split-damage refusals) is owned by
+`fqnres.SplitQueries` — beside the resolver's query forms, so the CLI keeps no
+drifting copy of the `/`-boundary rules.
+
 ### 3b.4 CLI wiring
 
 Inside `cmdGraph`'s `if *asMermaid` block, alongside the `--root` branch:
