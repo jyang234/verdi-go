@@ -1,0 +1,8 @@
+{"claims": [
+  {"id": "L1-create-join",            "kind": "entrypoint", "name": "POST /loan-application", "fn": "handler.App).Create"},
+  {"id": "L2-consumer-join",          "kind": "entrypoint", "entry_kind": "consumer", "name": "payment.settled", "fn": "consumer.Payments).OnSettled"},
+  {"id": "L3-wildcard-observed-path", "kind": "entrypoint", "name": "GET /loan-application/42/status", "fn": "handler.App).Status"},
+  {"id": "L4-wrong-fn",               "kind": "entrypoint", "name": "POST /loan-application", "fn": "handler.App).Status"},
+  {"id": "L5-absent-route",           "kind": "entrypoint", "name": "POST /loan-application/archive", "fn": "handler.App).Create"},
+  {"id": "L6-ambiguous-fn",           "kind": "entrypoint", "name": "GET /loan-application/{id}/status", "fn": "Score"}
+]}

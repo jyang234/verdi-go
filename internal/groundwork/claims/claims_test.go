@@ -29,6 +29,19 @@ func testGraph() *graph.Graph {
 			{From: "svc/scoring.Score", To: "(*svc/repo.Store).Save", Tier: 2},
 			{From: "(*svc/scoring.Remote).Score", To: "(*svc/repo.Store).Save", Tier: 2},
 		},
+		// Entrypoint records exercise the join kind: an exact+method-less pair that
+		// AGREE on a handler (multi-match PASS), a wildcard-template record
+		// (observed-path tolerance), a consumer record (entry_kind filter), and an
+		// overlapping /widget/ pair that DISAGREE on the handler (the ambiguous-join
+		// ERROR). All handlers are declared nodes so `fn` resolves.
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "POST /loan", Fn: "(*svc/handler.App).Create"},
+			{Kind: "http", Name: "/loan", Fn: "(*svc/handler.App).Create"}, // method-less; agrees with the above
+			{Kind: "http", Name: "GET /loan/{id}", Fn: "(*svc/handler.App).Create"},
+			{Kind: "consumer", Name: "payment.settled", Fn: "(*svc/repo.Store).Save"},
+			{Kind: "http", Name: "GET /widget/{id}", Fn: "(*svc/handler.App).Create"},
+			{Kind: "http", Name: "GET /widget/{name}", Fn: "(*svc/repo.Store).Save"}, // overlapping pair, different handler
+		},
 	}
 }
 
@@ -261,11 +274,15 @@ func TestDeterministicOverShuffledInput(t *testing.T) {
 	for i, j := 0, len(g2.Nodes)-1; i < j; i, j = i+1, j-1 {
 		g2.Nodes[i], g2.Nodes[j] = g2.Nodes[j], g2.Nodes[i]
 	}
+	for i, j := 0, len(g2.Entrypoints)-1; i < j; i, j = i+1, j-1 {
+		g2.Entrypoints[i], g2.Entrypoints[j] = g2.Entrypoints[j], g2.Entrypoints[i]
+	}
 	cf := &File{Claims: []Claim{
-		{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"}, // errored
-		{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},     // pass
-		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"},  // fail
-		{Kind: "no_node", FQN: ".Save"},                              // fail (offenders listed)
+		{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"},           // errored
+		{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},               // pass
+		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"},            // fail
+		{Kind: "no_node", FQN: ".Save"},                                        // fail (offenders listed)
+		{Kind: "entrypoint", Name: "GET /widget/7", Fn: "handler.App).Create"}, // errored (disagreeing joins — order-independent)
 	}}
 	if a, b := Evaluate(g1, cf).String(), Evaluate(g2, cf).String(); a != b {
 		t.Errorf("report not deterministic across input order:\n%s\n---\n%s", a, b)
@@ -366,6 +383,131 @@ func TestIDAllowedOnEveryKind(t *testing.T) {
 	}
 	if r := evalOne(t, Claim{ID: "x", Kind: "edge", From: "App).Create", To: "repo.Store).Save"}); r.Outcome != Pass {
 		t.Errorf("id on edge = %+v, want Pass", r)
+	}
+}
+
+// TestEntrypointPass pins the PASS forms: an exact/method-less agreeing
+// multi-match, an observed-path wildcard, mount-prefix tolerance, an
+// entry_kind-filtered consumer join, and a /regex/ fn whose match SET (>1)
+// contains the record's handler (membership is the test).
+func TestEntrypointPass(t *testing.T) {
+	// "POST /loan" matches both the exact record and the method-less "/loan"
+	// record; both carry Create, so they agree and PASS.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("exact/method-less agreeing = %+v, want Pass", r)
+	}
+	// Observed path against a {id} template segment.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET /loan/42", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("wildcard observed-path = %+v, want Pass", r)
+	}
+	// Mount tolerance: the alert's mounted path aligns against the registration tail.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /api/v1/loan", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("mount-prefix tolerance = %+v, want Pass", r)
+	}
+	// entry_kind filter selects the consumer record; a topic degrades to equality.
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Pass {
+		t.Errorf("entry_kind-filtered consumer = %+v, want Pass", r)
+	}
+	// A /regex/ fn resolving to MORE than one node still passes when the record's
+	// handler is in that set (the Save record's handler is one of the two matches).
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "payment.settled", Fn: `/\)\.(Save|Score)$/`}); r.Outcome != Pass {
+		t.Errorf("regex fn membership = %+v, want Pass", r)
+	}
+}
+
+// TestEntrypointZeroMatchFails pins the existence polarity: a name matching no
+// record FAILs (not ERRORs), including when an entry_kind filter EXCLUDES the
+// only records the name would otherwise match.
+func TestEntrypointZeroMatchFails(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "DELETE /nonexistent", Fn: "handler.App).Create"})
+	if r.Outcome != Fail {
+		t.Fatalf("absent route = %+v, want Fail", r)
+	}
+	if want := "no entrypoint matches 'DELETE /nonexistent'"; r.Detail != want {
+		t.Errorf("absent-route detail = %q, want %q", r.Detail, want)
+	}
+	// "POST /loan" matches only http records; filtering to consumer excludes them
+	// all, so the claim FAILs zero-match rather than passing.
+	r = evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "POST /loan", Fn: "handler.App).Create"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'POST /loan'" {
+		t.Errorf("entry_kind-excluded = %+v, want Fail zero-match", r)
+	}
+}
+
+// TestEntrypointWrongFnFails pins that a name-matched record whose handler is
+// NOT the resolved fn FAILs with the exact `handled by <fqn>` detail (the raw
+// record FQN), and that the id-less label is the "name -> fn" join shape.
+func TestEntrypointWrongFnFails(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "repo.Store).Save"})
+	if r.Outcome != Fail {
+		t.Fatalf("wrong fn = %+v, want Fail", r)
+	}
+	if want := "handled by (*svc/handler.App).Create"; r.Detail != want {
+		t.Errorf("wrong-fn detail = %q, want %q", r.Detail, want)
+	}
+	if want := "POST /loan -> repo.Store).Save"; r.Label != want {
+		t.Errorf("id-less entrypoint label = %q, want %q", r.Label, want)
+	}
+}
+
+// TestEntrypointDisagreeingJoinsError pins that name-matched records disagreeing
+// on the handler ERROR with the exact join-list detail (deterministic: sorted,
+// deduped, single-quoted names).
+func TestEntrypointDisagreeingJoinsError(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET /widget/7", Fn: "handler.App).Create"})
+	if r.Outcome != Errored {
+		t.Fatalf("disagreeing joins = %+v, want Errored", r)
+	}
+	want := "ambiguous entrypoint: 'GET /widget/7' matches 2 joins with differing handlers: " +
+		"'GET /widget/{id}' -> (*svc/handler.App).Create; 'GET /widget/{name}' -> (*svc/repo.Store).Save"
+	if r.Detail != want {
+		t.Errorf("disagree detail = %q, want %q", r.Detail, want)
+	}
+}
+
+// TestEntrypointFnResolutionErrors pins that a bad `fn` ERRORs before any FAIL
+// polarity is computed — ambiguous and unresolved both, matching every other kind.
+func TestEntrypointFnResolutionErrors(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: ".Score"}); r.Outcome != Errored {
+		t.Errorf("ambiguous fn = %+v, want Errored", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "does.Not.Exist"}); r.Outcome != Errored {
+		t.Errorf("unresolved fn = %+v, want Errored", r)
+	}
+}
+
+// TestEntrypointSchemaErrors pins the fail-closed schema checks: an invalid
+// entry_kind, a missing name, and a missing fn each ERROR.
+func TestEntrypointSchemaErrors(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create", EntryKind: "htp"})
+	if r.Outcome != Errored {
+		t.Fatalf("invalid entry_kind = %+v, want Errored", r)
+	}
+	if want := `unknown entry_kind "htp" (want "http" or "consumer")`; r.Detail != want {
+		t.Errorf("invalid entry_kind detail = %q, want %q", r.Detail, want)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Fn: "handler.App).Create"}); r.Outcome != Errored || r.Detail != "entrypoint requires 'name'" {
+		t.Errorf("missing name = %+v, want Errored 'requires name'", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan"}); r.Outcome != Errored || r.Detail != "entrypoint requires 'fn'" {
+		t.Errorf("missing fn = %+v, want Errored 'requires fn'", r)
+	}
+}
+
+// TestEntrypointWrongKindFields pins the unexpected-field closure both ways:
+// `name` on an edge claim ERRORs (it must not be silently ignored — the exact
+// verdict-inverting hazard), `fqn` on an entrypoint claim ERRORs, and `id` is
+// allowed on an entrypoint claim.
+func TestEntrypointWrongKindFields(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Name: "x"}); r.Outcome != Errored {
+		t.Errorf("name on edge = %+v, want Errored (wrong-kind)", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create", FQN: "x"}); r.Outcome != Errored {
+		t.Errorf("fqn on entrypoint = %+v, want Errored (wrong-kind)", r)
+	}
+	r := evalOne(t, Claim{ID: "e1", Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"})
+	if r.Outcome != Pass || r.Label != "e1" {
+		t.Errorf("id on entrypoint = %+v, want Pass with Label \"e1\"", r)
 	}
 }
 

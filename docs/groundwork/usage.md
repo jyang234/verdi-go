@@ -1253,6 +1253,7 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 | `no_node` | `fqn` | `fqn` resolves to **zero** nodes |
 | `in_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callers (optionally filtered) equals `eq` |
 | `out_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callees (optionally filtered) equals `eq` |
+| `entrypoint` | `name`, `fn` [, `entry_kind`] | a record whose route/topic `name` matches carries a handler equal to the resolved `fn` |
 
 **Claim metadata — `id`.** Any claim may carry a free-form `"id"`, echoed as the
 report-line label so a run's output points back at the exact claim (a suite
@@ -1267,7 +1268,9 @@ Canonical (`fqn`/`of`) is preferred; `fn` is accepted for companion-spec
 conformance. Supplying **both** the alias and its canonical spelling on one claim
 ERRORs (no silent precedence — same rule as `counterpart_matching`/`to_matching`).
 `fn` on an `edge`/`no_edge`/`edge_count` claim — kinds that have no anchor field
-— is a **wrong-kind** ERROR.
+— is a **wrong-kind** ERROR. On the `entrypoint` kind `fn` is not an alias at
+all: it is the **canonical** anchor naming the handler the route/topic must join
+to (see [Entrypoint claims](#entrypoint-claims) below), and it is required there.
 
 **Resolving a name — suffix vs. regex.** A plain string is a **normalized-FQN
 suffix**: receiver punctuation (`(`, `)`, `*`) is stripped from both the claim
@@ -1306,6 +1309,56 @@ degree kinds all count a pair once even when the graph carries it under more
 than one mode. The `counterpart_matching` filter on a degree claim narrows the
 counted counterparts (a plain suffix or a `/regex/`); `to_matching` is accepted
 as a deprecated alias, and supplying both ERRORs.
+
+<a id="entrypoint-claims"></a>
+**Entrypoint claims — pinning the route/topic → handler join.** The `edge`,
+`node`, and degree kinds all evaluate the node/edge universe. The `entrypoint`
+kind reaches the one graph-known fact they cannot: the `entrypoints[]` records
+that join a route or consumed topic to its handler function. An entrypoint record
+is neither a node nor an edge endpoint — the route/topic name it carries lives in
+no other universe — so before this kind no claim could assert "`POST /webhooks/x`
+is handled by `Server).handleX`". A claim names the route/topic in `name` and the
+handler in `fn`:
+
+```json
+{"id": "webhook-join",  "kind": "entrypoint", "name": "POST /webhooks/customerio", "fn": "Server).handleCustomerIOWebhook"}
+{"id": "consumer-join", "kind": "entrypoint", "entry_kind": "consumer", "name": "payment.settled", "fn": "consumer.Payments).OnSettled"}
+```
+
+`fn` resolves against the **node** universe under the same suffix/regex rule as
+every other anchor. `name` is matched against the graph's registration literals
+through the **same segment-wise tolerance** the incident-triage route lens uses:
+a param token (`{id}`, `:id`, `<id>`, `$id`, `*`, `...`) is a single-segment
+wildcard on either side (so a registration `GET /loan/{id}/status` matches an
+observed `GET /loan/42/status`); a method-less registration (a stdlib `HandleFunc`)
+matches any method; and the shorter path aligns against the **tail** of the
+longer, so a mounted route's leaf pattern `/loan` matches an alert's
+`/api/v1/loan`. A consumer topic has no `/` and no method, so it degrades to
+whole-string equality (`payment.settled` matches only `payment.settled`).
+`entry_kind` optionally restricts the claim to records of exactly that kind
+(`http` or `consumer`); any other value ERRORs (fail closed on a typo — a
+misspelled filter must not silently become a zero-match FAIL that reads like a
+real verdict).
+
+The polarity differs from the absence kinds on purpose. **Zero records matching
+`name` is a FAIL, not an ERROR** — existence *is* the assertion, so a
+renamed/removed route fails loudly. This is safe where a general
+unresolved-name would not be (hence every *other* kind ERRORs on a name that
+fails to resolve): unlike `no_node`'s zero-is-pass, an entrypoint claim's
+zero-match is a genuine negative verdict on *this* claim, not a vacuous pass that
+some other absence check could inherit. When **≥1 record matches but they
+disagree on the handler** — overlapping route templates joining to different
+functions — the claim **ERRORs** listing the joins, forcing you to tighten
+`name` rather than grading against whichever record happened to match first.
+Otherwise the matched records agree on one handler `H`, and the claim passes iff
+`H` is in the resolved-`fn` set (else FAILs `handled by <H>`).
+
+**Forward-compat.** An older `groundwork` binary that predates this kind rejects
+a claims file containing entrypoint claims at strict decode (the unknown
+`entry_kind`/`name` field → exit 2) — fail-closed, but at the *file* level, not
+per claim. Until the whole fleet is upgraded, keep entrypoint claims in a
+**separate** claims file so a mixed file does not become unreadable to an old
+binary.
 
 **Output and exit codes.** The report prints, in claims-file order, the FAIL
 lines then the ERROR lines, then a summary; passing claims are silent. Each
@@ -1346,9 +1399,10 @@ added a field) fails the decode — correct (fail closed on schema skew), and a
 signal to rebuild the graph, not a reason to loosen the reader.
 
 **Deviations from the validated prototype.** `assert`'s semantics match the
-field-validated prototype the schema was drawn from, with five intentional
+field-validated prototype the schema was drawn from, with six intentional
 tightenings beyond it — each **fail-closed**, converting a would-be vacuous pass
-into an ERROR, and none able to flip a FAIL into a PASS. If a claim from a
+(or an arbitrary grade) into an ERROR, and none able to flip a FAIL into a PASS.
+If a claim from a
 prototype-era suite newly ERRORs, it is one of these — and the ERROR is
 surfacing a latent vacuous pass the prototype was hiding, not a regression:
 
@@ -1366,6 +1420,12 @@ surfacing a latent vacuous pass the prototype was hiding, not a regression:
    to a plain suffix match (fail closed).
 5. **A `tier` claim over an FQN the graph carries at more than one tier**
    abstains (ERROR) rather than grading against an arbitrary record.
+6. **An `entrypoint` claim whose `name` matches records that disagree on the
+   handler** ERRORs listing the joins, rather than passing on any-record-matches
+   (the FR's reference implementation grades PASS if *any* matched record's
+   handler equals `fn`). Fail-closed like the other five: an overlapping-template
+   ambiguity is surfaced for a tighter `name`, never silently resolved in the
+   claim's favor.
 
 Separately, per-side plain/regex enforcement is adopted from the spec's own
 "quirk to tighten" note: a `/regex/` on one endpoint of an edge claim does not
