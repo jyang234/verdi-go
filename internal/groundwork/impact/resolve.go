@@ -105,6 +105,13 @@ func ResolveTable(ix *graph.Index, table string) Resolution {
 // function) over the CONSUME edge's source (the registration site, typically
 // main/run wiring) — both are kept when both exist, since dropping evidence
 // is guessing in the other direction.
+//
+// Consumer entrypoint names are matched by EXACT equality (ep.Name == event) — a
+// topic is not route grammar. This is the non-http half of the http/consumer split
+// the `groundwork assert` entrypoint claim also applies (claims.evalEntrypoint uses
+// routematch.Match only for an http record with a route-shaped name and exact
+// equality otherwise); the two must not drift, or a consumer topic would resolve one
+// way in triage and another in a claim.
 func ResolveEvent(ix *graph.Index, event string) Resolution {
 	res := resolveEffect(ix, boundarylabel.BusPrefix, event)
 	set := setutil.StringSet(res.Matches)

@@ -3,10 +3,24 @@ package claims
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 )
+
+// evalOneG evaluates a single claim against an arbitrary graph (the sibling of
+// evalOne, which is fixed to testGraph) so an entrypoint test can pin behavior over
+// a purpose-built entrypoints[] universe.
+func evalOneG(t *testing.T, g *graph.Graph, c Claim) Result {
+	t.Helper()
+	rep := Evaluate(g, &File{Claims: []Claim{c}})
+	if len(rep.Results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(rep.Results))
+	}
+	return rep.Results[0]
+}
 
 // testGraph is a small hand-built graph exercising every feature a claim needs:
 // pointer-receiver methods, a value/pointer Score twin (ambiguity), a boundary
@@ -483,7 +497,7 @@ func TestEntrypointSchemaErrors(t *testing.T) {
 	if r.Outcome != Errored {
 		t.Fatalf("invalid entry_kind = %+v, want Errored", r)
 	}
-	if want := `unknown entry_kind "htp" (want "http" or "consumer")`; r.Detail != want {
+	if want := `unknown entry_kind "htp" (known kinds: "callback", "consumer", "http", "worker")`; r.Detail != want {
 		t.Errorf("invalid entry_kind detail = %q, want %q", r.Detail, want)
 	}
 	if r := evalOne(t, Claim{Kind: "entrypoint", Fn: "handler.App).Create"}); r.Outcome != Errored || r.Detail != "entrypoint requires 'name'" {
@@ -508,6 +522,188 @@ func TestEntrypointWrongKindFields(t *testing.T) {
 	r := evalOne(t, Claim{ID: "e1", Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"})
 	if r.Outcome != Pass || r.Label != "e1" {
 		t.Errorf("id on entrypoint = %+v, want Pass with Label \"e1\"", r)
+	}
+}
+
+// TestEntrypointKindAwareMatching pins the closed name-matching bleed: route
+// grammar applies ONLY between a route-shaped claim name and an http record; every
+// other case is exact equality. testGraph carries param-tailed http routes that,
+// under the old unconditional routematch, co-matched a consumer topic and a
+// slash-less name (universal-wildcard false matches).
+func TestEntrypointKindAwareMatching(t *testing.T) {
+	// (1) A consumer-topic claim WITHOUT entry_kind matches ONLY the consumer
+	// record — not the param-tailed http routes ("GET /widget/{id}" etc.) that used
+	// to co-match "payment.settled" via their wildcard tail.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Pass {
+		t.Errorf("topic without entry_kind = %+v, want Pass (consumer-only match)", r)
+	}
+	// (4) A slash-less name "GET" is not a route path: it must NOT tail-match a
+	// param-wildcard registration tail — zero-match FAIL, not a wildcard hit.
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET", Fn: "handler.App).Create"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'GET'" {
+		t.Errorf("slash-less name = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointConsumerTopicFalsePassRegression pins the reproduced silent false
+// SATISFIED: a graph with NO consumer record but an http route whose param tail
+// wildcards the topic name. The old matcher passed (route tail matched the topic);
+// the kind-aware matcher FAILs zero-match (an http record is never matched by a
+// slash-less topic name).
+func TestEntrypointConsumerTopicFalsePassRegression(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "(*svc/replay.Handler).Replay", Tier: 1}},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "POST /replay/{topic}", Fn: "(*svc/replay.Handler).Replay"},
+		},
+	}
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "payment.settled", Fn: "replay.Handler).Replay"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'payment.settled'" {
+		t.Errorf("topic vs http param-tail = %+v, want zero-match Fail (was a silent false PASS)", r)
+	}
+}
+
+// TestEntrypointDollarTopicNotWildcard pins that a "$"-prefixed consumer record —
+// a param token to routematch — does NOT act as a universal wildcard: matched by
+// exact equality only. Old behavior FALSE-PASSED an unrelated claim whose fn equaled
+// the $-topic's handler; the kind-aware matcher FAILs zero-match.
+func TestEntrypointDollarTopicNotWildcard(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "(*svc/audit.Sink).Consume", Tier: 1},
+			{FQN: "(*svc/handler.App).Create", Tier: 1},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "consumer", Name: "$internal.audit", Fn: "(*svc/audit.Sink).Consume"},
+			{Kind: "http", Name: "POST /loans", Fn: "(*svc/handler.App).Create"},
+		},
+	}
+	// entry_kind omitted; fn equals the $-topic's handler so an OLD universal-wildcard
+	// match would have PASSED. The $-topic must not match the unrelated route name.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /unrelated", Fn: "audit.Sink).Consume"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'GET /unrelated'" {
+		t.Errorf("$-topic universal-wildcard = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointCallbackWorkerKinds pins the four-kind vocabulary: a declared
+// callback record (Name an "import/path#Symbol" reference) matches by exact equality;
+// entry_kind "callback"/"worker" are accepted (no unknown-kind ERROR); "htp" still
+// ERRORs with the shared-vocabulary detail.
+func TestEntrypointCallbackWorkerKinds(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "(*svc/jobs.Worker).OnEvent", Tier: 1}},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "callback", Name: "svc/jobs#OnEvent", Fn: "(*svc/jobs.Worker).OnEvent"},
+		},
+	}
+	// Exact-name claim against the declared callback → PASS.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Pass {
+		t.Errorf("callback exact-name = %+v, want Pass", r)
+	}
+	// entry_kind "callback" is accepted (selects the record) → PASS.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "callback", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Pass {
+		t.Errorf("entry_kind callback = %+v, want Pass", r)
+	}
+	// entry_kind "worker" is a KNOWN kind (no unknown-kind ERROR): it excludes the
+	// callback record here, so the claim FAILs zero-match — not ERRORs.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "worker", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Fail {
+		t.Errorf("entry_kind worker (known, excludes) = %+v, want zero-match Fail", r)
+	}
+	// "htp" is still an unknown kind → ERROR with the shared-vocabulary detail.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "htp", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"})
+	if r.Outcome != Errored || r.Detail != `unknown entry_kind "htp" (known kinds: "callback", "consumer", "http", "worker")` {
+		t.Errorf("unknown entry_kind htp = %+v, want the shared-vocabulary ERROR", r)
+	}
+}
+
+// TestEntrypointEmptyUniverseAbstains pins the fail-closed abstention: a graph with
+// ZERO entrypoints[] records ERRORs (the join is absent — blindness, not a removed
+// route), while an entry_kind filter excluding every record over a NON-empty universe
+// stays a zero-match FAIL.
+func TestEntrypointEmptyUniverseAbstains(t *testing.T) {
+	g := &graph.Graph{Nodes: []graph.Node{{FQN: "(*svc/handler.App).Create", Tier: 1}}}
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"})
+	want := "graph carries no entrypoints[] records: the route/topic -> handler join is absent (routers outside root discovery's coverage, or a pre-join producer)"
+	if r.Outcome != Errored || r.Detail != want {
+		t.Errorf("empty entrypoints universe = %+v, want abstain ERROR", r)
+	}
+	// A NON-empty universe with an entry_kind that excludes every match stays a FAIL
+	// (only the empty UNIVERSE abstains): testGraph has no worker records.
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "worker", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Fail {
+		t.Errorf("entry_kind excludes all over non-empty universe = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointExactNameTiebreak pins Fix 4: for the literal-vs-template overlap,
+// a claim whose name equals a registration literal grades against THAT record only
+// (the tightest spelling), so PASS/FAIL is read from the author's exact spelling; a
+// non-verbatim param spelling that matches disagreeing records still ERRORs.
+func TestEntrypointExactNameTiebreak(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "(*svc/handler.App).Me", Tier: 1},
+			{FQN: "(*svc/handler.App).ByID", Tier: 1},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "GET /users/me", Fn: "(*svc/handler.App).Me"},
+			{Kind: "http", Name: "GET /users/{id}", Fn: "(*svc/handler.App).ByID"},
+		},
+	}
+	// "GET /users/me" matches both records (me == literal; me ~ {id}); the exact-name
+	// tiebreak selects the literal record → grades against H1 (Me).
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/me", Fn: "handler.App).Me"}); r.Outcome != Pass {
+		t.Errorf("literal spelling = %+v, want Pass against H1", r)
+	}
+	// "GET /users/{id}" matches both ({id} query wildcards the literal); the tiebreak
+	// selects the verbatim template record → grades against H2 (ByID).
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/{id}", Fn: "handler.App).ByID"}); r.Outcome != Pass {
+		t.Errorf("template spelling = %+v, want Pass against H2", r)
+	}
+	// A NON-verbatim param spelling matches both records and equals neither, so no
+	// tiebreak applies and the disagree ERROR remains (forcing a tighter name). NOTE:
+	// the FR's example query "GET /users/42" cannot reach this branch — a concrete
+	// segment matches only the {id} template, not the "me" literal (verified against
+	// routematch), so a param spelling is used to exercise the still-ambiguous case.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/{uid}", Fn: "handler.App).Me"})
+	if r.Outcome != Errored {
+		t.Fatalf("non-verbatim param spelling = %+v, want disagree Errored", r)
+	}
+	wantErr := "ambiguous entrypoint: 'GET /users/{uid}' matches 2 joins with differing handlers: " +
+		"'GET /users/me' -> (*svc/handler.App).Me; 'GET /users/{id}' -> (*svc/handler.App).ByID"
+	if r.Detail != wantErr {
+		t.Errorf("disagree detail = %q, want %q", r.Detail, wantErr)
+	}
+}
+
+// TestEntrypointWhitespaceName pins Fix 7: a whitespace-only name is not a real
+// route (it would grade against the bare-"/" root), so it hits the requires-'name'
+// ERROR, not a fabricated match.
+func TestEntrypointWhitespaceName(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "   ", Fn: "handler.App).Create"})
+	if r.Outcome != Errored || r.Detail != "entrypoint requires 'name'" {
+		t.Errorf("whitespace-only name = %+v, want requires-'name' ERROR", r)
+	}
+}
+
+// TestUnexpectedFieldCoversClaim pins Fix 6: claimFieldChecks is a COMPLETE parallel
+// of the Claim struct — every json-tagged field except `kind` and `id` (claim
+// metadata) is screened by unexpectedField. A new Claim field missed there would be
+// silently ignored on the wrong kind, the verdict-inverting hazard the check closes.
+func TestUnexpectedFieldCoversClaim(t *testing.T) {
+	checked := map[string]bool{}
+	for _, f := range claimFieldChecks {
+		checked[f.name] = true
+	}
+	rt := reflect.TypeOf(Claim{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := strings.SplitN(rt.Field(i).Tag.Get("json"), ",", 2)[0]
+		if name == "" || name == "-" || name == "kind" || name == "id" {
+			continue
+		}
+		if !checked[name] {
+			t.Errorf("Claim field %q (json:%q) is not screened by claimFieldChecks — a wrong-kind use would be silently ignored", rt.Field(i).Name, name)
+		}
 	}
 }
 

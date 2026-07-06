@@ -33,7 +33,15 @@
 // A name with no '/' and no space — a consumer topic like "payment.settled" —
 // carries no method and splits into a single path segment, so it degrades to
 // whole-string equality via the ordinary single-segment path: "payment.settled"
-// matches "payment.settled" and nothing else (a topic is not a wildcard).
+// matches "payment.settled". This holds ONLY when that single segment is not itself
+// a param token: Match implements ROUTE grammar, so a "$"-prefixed single-segment
+// name ("$internal.events") IS a param wildcard here and matches ANY single-segment
+// query. Match therefore does NOT protect topics on its own — that is the caller's
+// job. Both call sites apply Match to http records only and match non-http names
+// (consumer topics, declared callback/worker "import/path#Symbol" references) by
+// exact equality: impact.ResolveRoute filters to http entrypoints before calling
+// Match; the claims entrypoint predicate calls Match only for an http record with a
+// route-shaped ('/'-bearing) name and uses exact string equality otherwise.
 //
 // # Two look-alikes that must NOT be unified (deliberate non-unification)
 //
@@ -56,13 +64,10 @@ package routematch
 import "strings"
 
 // Match reports whether a hand-authored query names the same entrypoint as a
-// graph entrypoints[].name registration literal. It splits both sides (method +
-// path segments) and applies the full tolerance rule documented on the package:
-// method compares case-insensitively only when BOTH sides carry one; param
-// tokens are single-segment wildcards on either side; the shorter segment list
-// aligns against the tail of the longer; an empty segment list matches only an
-// empty one. A name with no '/' and no space degrades to whole-string equality
-// via the single-segment path.
+// graph entrypoints[].name registration literal, applying the segment-wise route
+// tolerance documented on the package. It implements ROUTE grammar only; callers
+// restrict it to http records and match non-http names by exact equality (see the
+// package doc for the grammar and why the tolerance is safe there but not for topics).
 func Match(entryName, query string) bool {
 	eMethod, eSegs := splitRoute(entryName)
 	qMethod, qSegs := splitRoute(query)

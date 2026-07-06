@@ -195,14 +195,40 @@ type FrontierMarker struct {
 	ReclaimerHint string `json:"reclaimer_hint,omitempty"`
 }
 
-// Entrypoint is one named root flowmap discovered: an HTTP route or a consumed
-// topic, joined to its handler function. Names are registration-site literals
-// (a stdlib root may lack a method; a mounted route carries only its leaf
-// pattern), so consumers match them segment-wise, never exactly-or-nothing.
+// Entrypoint is one named root flowmap emitted into entrypoints[]: a DISCOVERED
+// http route or consumed topic, or a DECLARED callback/worker root, joined to its
+// handler function. Kind is one of EntrypointKinds. For a discovered route/topic,
+// Name is a registration-site literal (a stdlib root may lack a method; a mounted
+// route carries only its leaf pattern), so consumers match it segment-wise, never
+// exactly-or-nothing. For a declared callback/worker root, Name is the config
+// reference it was asserted from — an "import/path#Symbol" form, NOT a route — and
+// is matched by exact equality. This mirrors the producer's own doc (graphio's
+// entrypoints[] emission switch; roots.Kind* constants).
 type Entrypoint struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
 	Fn   string `json:"fn"`
+}
+
+// EntrypointKinds is the closed vocabulary of Entrypoint.Kind values the producer
+// emits into entrypoints[]: the discovered "http"/"consumer" routes and the declared
+// "callback"/"worker" roots. It is kept sorted so any error detail built from it is
+// deterministic. This is the ONE source of truth for the consumer side of the
+// entrypoint-kind vocabulary; its parity with the producer — graphio.go's entrypoints[]
+// emission switch, which emits from roots.KindHTTP/KindConsumer/KindCallback/KindWorker
+// — is guarded by a set-equality test (CLAUDE.md: one source of truth).
+var EntrypointKinds = []string{"callback", "consumer", "http", "worker"}
+
+// KnownEntrypointKind reports whether k is one of the producer's emitted entrypoint
+// kinds (EntrypointKinds). An unknown kind on a claim's entry_kind filter fails
+// closed (ERROR) rather than silently excluding every record.
+func KnownEntrypointKind(k string) bool {
+	for _, kk := range EntrypointKinds {
+		if k == kk {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectOrderFact is one partial-effect order fact flowmap computed from a
