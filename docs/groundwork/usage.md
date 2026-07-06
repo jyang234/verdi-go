@@ -88,7 +88,7 @@ graph JSON between them:
   `concurrent` flags), a blind-spot manifest, and the level-2 disclosure
   sections computed from each function's CFG and the discovered roots:
   `obligations` (path-obligation verdicts), `effect_order` (partial-effect
-  facts), and `entrypoints` (the route/topic → handler join). An optional
+  facts), and `entrypoints` (the route/topic/declared-symbol → handler join). An optional
   `--stamp <sha>` records a caller-supplied identity for `--expect`
   verification. `flowmap boundary <service>` emits the gated inter-service
   **boundary contract** (routes, published/consumed events, external
@@ -1314,7 +1314,8 @@ as a deprecated alias, and supplying both ERRORs.
 **Entrypoint claims — pinning the route/topic → handler join.** The `edge`,
 `node`, and degree kinds all evaluate the node/edge universe. The `entrypoint`
 kind reaches the one graph-known fact they cannot: the `entrypoints[]` records
-that join a route or consumed topic to its handler function. An entrypoint record
+that join a route, consumed topic, or declared callback/worker symbol to its
+handler function. An entrypoint record
 is neither a node nor an edge endpoint — the route/topic name it carries lives in
 no other universe — so before this kind no claim could assert "`POST /webhooks/x`
 is handled by `Server).handleX`". A claim names the route/topic in `name` and the
@@ -1398,6 +1399,19 @@ ERROR L6-ambiguous-name [node] AMBIGUOUS: 'Score' matches 3: (*example.com/loans
 ERROR L7-unresolved-name [edge] UNRESOLVED: 'handler.App).Delete' matches no node/endpoint
 assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
 ```
+
+and the six-claim entrypoint-acceptance fixture exercises the join kind's
+outcome classes the same way:
+
+```
+FAIL  L4-wrong-fn [entrypoint] handled by (*example.com/loansvc/internal/handler.App).Create
+FAIL  L5-absent-route [entrypoint] no entrypoint matches 'POST /loan-application/archive'
+ERROR L6-ambiguous-fn [entrypoint] AMBIGUOUS: 'Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+assert: 3 passed, 2 failed, 1 errored (graph: 40 nodes, 49 unique edges)
+```
+
+Both fixtures are committed under `testdata/groundwork/claims/` and byte-pinned
+by `cmd/groundwork`'s acceptance tests, so these blocks mirror enforced output.
 
 Exit codes ride groundwork's existing split: **≥1 FAIL exits 1** (a computed
 verdict failed — takes precedence over errors), **zero FAILs but ≥1 errored
