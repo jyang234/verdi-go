@@ -88,7 +88,7 @@ graph JSON between them:
   `concurrent` flags), a blind-spot manifest, and the level-2 disclosure
   sections computed from each function's CFG and the discovered roots:
   `obligations` (path-obligation verdicts), `effect_order` (partial-effect
-  facts), and `entrypoints` (the route/topic → handler join). An optional
+  facts), and `entrypoints` (the route/topic/declared-symbol → handler join). An optional
   `--stamp <sha>` records a caller-supplied identity for `--expect`
   verification. `flowmap boundary <service>` emits the gated inter-service
   **boundary contract** (routes, published/consumed events, external
@@ -1208,7 +1208,7 @@ it. Top-level sections:
 | `blind_spots[]` | `{kind, site, detail, severity?, package?}` — where the graph's knowledge stops | the soundness frontier; `package` rides `ExternalBoundaryCall` only; `severity` (`effect-bearing`\|`trivial`) rides every `ExternalBoundaryCall` and tags the benign stdlib subset of the `func()` channel (`context.CancelFunc` → `trivial`) — the signal/noise tier, disclosure-only. A `func()` seam's `detail` names the callee's defined type (e.g. `context.CancelFunc`, `…/api.MiddlewareFunc`) so a census can group by it |
 | `obligations[]` | `{rule, kind, fn, site, status, detail}` per anchored site | statuses are an open vocabulary: **fail closed on ones you don't recognize** |
 | `effect_order[]` | `{fn, effect, effect_site, callee, callee_site, always}` | "effect can/always precedes this fallible call" |
-| `entrypoints[]` | `{kind: http\|consumer, name, fn}` — the route/topic → handler join | names are registration-site literals: match segment-wise, never exactly-or-nothing |
+| `entrypoints[]` | `{kind: http\|consumer\|callback\|worker, name, fn}` — the route/topic/symbol → handler join | discovered `http`/`consumer` names are registration-site literals (match segment-wise); declared `callback`/`worker` names are `import/path#Symbol` references (match exactly) |
 | `stamp` | optional caller-supplied identity (the CI commit SHA) | verify with `triage`/`mcp` `--expect`; absent on local/golden builds by design |
 
 **Edge-record identity — `edges[]` can carry the same `(from, to)` more than
@@ -1253,6 +1253,7 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 | `no_node` | `fqn` | `fqn` resolves to **zero** nodes |
 | `in_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callers (optionally filtered) equals `eq` |
 | `out_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callees (optionally filtered) equals `eq` |
+| `entrypoint` | `name`, `fn` [, `entry_kind`] | a record whose route/topic `name` matches carries a handler equal to the resolved `fn` |
 
 **Claim metadata — `id`.** Any claim may carry a free-form `"id"`, echoed as the
 report-line label so a run's output points back at the exact claim (a suite
@@ -1267,7 +1268,9 @@ Canonical (`fqn`/`of`) is preferred; `fn` is accepted for companion-spec
 conformance. Supplying **both** the alias and its canonical spelling on one claim
 ERRORs (no silent precedence — same rule as `counterpart_matching`/`to_matching`).
 `fn` on an `edge`/`no_edge`/`edge_count` claim — kinds that have no anchor field
-— is a **wrong-kind** ERROR.
+— is a **wrong-kind** ERROR. On the `entrypoint` kind `fn` is not an alias at
+all: it is the **canonical** anchor naming the handler the route/topic must join
+to (see [Entrypoint claims](#entrypoint-claims) below), and it is required there.
 
 **Resolving a name — suffix vs. regex.** A plain string is a **normalized-FQN
 suffix**: receiver punctuation (`(`, `)`, `*`) is stripped from both the claim
@@ -1307,6 +1310,70 @@ than one mode. The `counterpart_matching` filter on a degree claim narrows the
 counted counterparts (a plain suffix or a `/regex/`); `to_matching` is accepted
 as a deprecated alias, and supplying both ERRORs.
 
+<a id="entrypoint-claims"></a>
+**Entrypoint claims — pinning the route/topic → handler join.** The `edge`,
+`node`, and degree kinds all evaluate the node/edge universe. The `entrypoint`
+kind reaches the one graph-known fact they cannot: the `entrypoints[]` records
+that join a route, consumed topic, or declared callback/worker symbol to its
+handler function. An entrypoint record
+is neither a node nor an edge endpoint — the route/topic name it carries lives in
+no other universe — so before this kind no claim could assert "`POST /webhooks/x`
+is handled by `Server).handleX`". A claim names the route/topic in `name` and the
+handler in `fn`:
+
+```json
+{"id": "webhook-join",  "kind": "entrypoint", "name": "POST /webhooks/customerio", "fn": "Server).handleCustomerIOWebhook"}
+{"id": "consumer-join", "kind": "entrypoint", "entry_kind": "consumer", "name": "payment.settled", "fn": "consumer.Payments).OnSettled"}
+```
+
+`fn` resolves against the **node** universe under the same suffix/regex rule as
+every other anchor. `name` matching is **kind-aware** — the same `http`/`consumer`
+split the incident-triage route lens applies. For an **`http`** record whose `name`
+is route-shaped (carries a `/`), matching uses the **segment-wise tolerance** the
+route lens uses: a param token (`{id}`, `:id`, `<id>`, `$id`, `*`, `...`) is a
+single-segment wildcard on either side (so a registration `GET /loan/{id}/status`
+matches an observed `GET /loan/42/status`); a method-less registration (a stdlib
+`HandleFunc`) matches any method; and the shorter path aligns against the **tail** of
+the longer, so a mounted route's leaf pattern `/loan` matches an alert's
+`/api/v1/loan`. **Every other case is exact string equality** — a consumer topic, a
+declared `callback`/`worker` name (an `import/path#Symbol` reference), or a claim
+`name` with no `/`. So `payment.settled` matches only `payment.settled`, and a
+`$`-prefixed topic (`$internal.events`) is *not* a wildcard here (route grammar only
+applies to `http` records — the matcher itself does not protect topics; the
+kind-aware caller does). `entry_kind` optionally restricts the claim to records of
+exactly that kind (`http`, `consumer`, `callback`, or `worker`); any other value
+ERRORs (fail closed on a typo — a misspelled filter must not silently become a
+zero-match FAIL that reads like a real verdict).
+
+The polarity differs from the absence kinds on purpose. **Zero records matching
+`name` is a FAIL, not an ERROR** — existence *is* the assertion, so a
+renamed/removed route fails loudly. This is safe where a general
+unresolved-name would not be (hence every *other* kind ERRORs on a name that
+fails to resolve): unlike `no_node`'s zero-is-pass, an entrypoint claim's
+zero-match is a genuine negative verdict on *this* claim, not a vacuous pass that
+some other absence check could inherit. **The one exception is an empty
+`entrypoints[]` universe** — a graph that carries *zero* records (routers outside
+root discovery's coverage — gin variadic, gorilla chains, gRPC — or a pre-join
+producer). There the join is *absent*, not *removed*, so an entrypoint claim
+**ERRORs (exit 2), abstaining** rather than FAILing every claim from total
+blindness. (An `entry_kind` filter matching zero records over a *non-empty*
+universe stays a FAIL — only the empty universe abstains.) When **≥1 record
+matches but they disagree on the handler** — overlapping route templates joining to
+different functions — the claim **ERRORs** listing the joins, forcing you to tighten
+`name`. The one relief valve is the **exact-spelling tiebreak**: when your `name`
+equals a registration literal *verbatim* (`GET /users/me` against records
+`GET /users/me` and `GET /users/{id}`), that exact record wins the grade — the
+verbatim literal is the tightest possible name, so reading it is not a guess.
+Otherwise the matched records agree on one handler `H`, and the claim passes iff
+`H` is in the resolved-`fn` set (else FAILs `handled by <H>`).
+
+**Forward-compat.** An older `groundwork` binary that predates this kind rejects
+a claims file containing entrypoint claims at strict decode (the unknown
+`entry_kind`/`name` field → exit 2) — fail-closed, but at the *file* level, not
+per claim. Until the whole fleet is upgraded, keep entrypoint claims in a
+**separate** claims file so a mixed file does not become unreadable to an old
+binary.
+
 **Output and exit codes.** The report prints, in claims-file order, the FAIL
 lines then the ERROR lines, then a summary; passing claims are silent. Each
 non-passing claim renders one line:
@@ -1333,6 +1400,19 @@ ERROR L7-unresolved-name [edge] UNRESOLVED: 'handler.App).Delete' matches no nod
 assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
 ```
 
+and the six-claim entrypoint-acceptance fixture exercises the join kind's
+outcome classes the same way:
+
+```
+FAIL  L4-wrong-fn [entrypoint] handled by (*example.com/loansvc/internal/handler.App).Create
+FAIL  L5-absent-route [entrypoint] no entrypoint matches 'POST /loan-application/archive'
+ERROR L6-ambiguous-fn [entrypoint] AMBIGUOUS: 'Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+assert: 3 passed, 2 failed, 1 errored (graph: 40 nodes, 49 unique edges)
+```
+
+Both fixtures are committed under `testdata/groundwork/claims/` and byte-pinned
+by `cmd/groundwork`'s acceptance tests, so these blocks mirror enforced output.
+
 Exit codes ride groundwork's existing split: **≥1 FAIL exits 1** (a computed
 verdict failed — takes precedence over errors), **zero FAILs but ≥1 errored
 claim exits 2** (a claim's gate could not run), and all-pass exits 0. The output
@@ -1346,9 +1426,12 @@ added a field) fails the decode — correct (fail closed on schema skew), and a
 signal to rebuild the graph, not a reason to loosen the reader.
 
 **Deviations from the validated prototype.** `assert`'s semantics match the
-field-validated prototype the schema was drawn from, with five intentional
-tightenings beyond it — each **fail-closed**, converting a would-be vacuous pass
-into an ERROR, and none able to flip a FAIL into a PASS. If a claim from a
+field-validated prototype the schema was drawn from, with nine intentional
+tightenings beyond it — each **fail-closed**, and none able to flip a FAIL into a
+PASS. Most convert a would-be vacuous pass (or an arbitrary grade) into an ERROR
+or a loud FAIL; item 9 runs the other direction, narrowing an unanswerable ERROR
+to a deterministic grade of the author's verbatim spelling — a read, not a guess.
+If a claim from a
 prototype-era suite newly ERRORs, it is one of these — and the ERROR is
 surfacing a latent vacuous pass the prototype was hiding, not a regression:
 
@@ -1366,6 +1449,31 @@ surfacing a latent vacuous pass the prototype was hiding, not a regression:
    to a plain suffix match (fail closed).
 5. **A `tier` claim over an FQN the graph carries at more than one tier**
    abstains (ERROR) rather than grading against an arbitrary record.
+6. **An `entrypoint` claim whose `name` matches records that disagree on the
+   handler** ERRORs listing the joins, rather than passing on any-record-matches
+   (the FR's reference implementation grades PASS if *any* matched record's
+   handler equals `fn`). Fail-closed like the others: an overlapping-template
+   ambiguity is surfaced for a tighter `name`, never silently resolved in the
+   claim's favor.
+7. **Entrypoint `name` matching is kind-aware, not unconditional route grammar.**
+   The FR's reference matcher applies segment-wise route tolerance to every record;
+   `assert` applies it only between a route-shaped `name` and an `http` record and
+   uses exact equality otherwise. This closes a silent false SATISFIED: without it a
+   consumer-topic claim (`entry_kind` omitted) could pass via an `http` route's
+   param-wildcard tail after the real consumer registration was deleted, and a
+   `$`-prefixed topic record would act as a universal wildcard — both matching a name
+   the author never wrote.
+8. **An empty `entrypoints[]` universe abstains (ERROR, exit 2)** rather than FAILing
+   every entrypoint claim. The FR's reference grades each claim against whatever
+   records exist; with *zero* records that is a confident negative from total
+   blindness (the route→handler join is absent, not removed). A zero-*match* over a
+   *non-empty* universe still FAILs.
+9. **An exact-spelling tiebreak precedes the disagreeing-joins ERROR.** When a claim
+   `name` equals a registration literal verbatim, `assert` grades against that record
+   alone (the tightest possible name) rather than ERRORing on an overlapping template
+   whose advice to "tighten the name" is impossible to follow — the literal-vs-template
+   overlap where every spelling matches both. The disagree ERROR (item 6) remains for
+   non-verbatim spellings.
 
 Separately, per-side plain/regex enforcement is adopted from the spec's own
 "quirk to tighten" note: a `/regex/` on one endpoint of an edge claim does not

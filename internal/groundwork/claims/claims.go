@@ -16,24 +16,55 @@
 //
 // # Universes
 //
-//   - Node universe (node / no_node): declared node FQNs only.
+//   - Node universe (node / no_node, and an entrypoint claim's `fn`): declared
+//     node FQNs only.
 //   - Endpoint universe (edge / no_edge / edge_count / in_degree / out_degree):
 //     node FQNs ∪ every edge from/to string, so a boundary pseudo-node
 //     ("boundary:db QueryContext") — which appears only as an edge endpoint —
 //     is claimable.
+//   - Entrypoint-records universe (entrypoint): the graph's entrypoints[]
+//     route/topic → handler join records. An entrypoint record is NEITHER a node
+//     nor an edge endpoint — the route/topic name it carries lives in no other
+//     universe — which is the whole reason the kind exists: it is the one
+//     graph-known fact the node/edge kinds cannot reach.
 //
 // # Claim kinds and outcomes
 //
-//	kind        required           passes when                         resolution failure
-//	----------  -----------------  ----------------------------------  ------------------
-//	edge        from, to           ≥1 unique pair between resolved      ERROR
-//	                               endpoints exists
-//	no_edge     from, to           NO pair between resolved endpoints   ERROR
-//	edge_count  from, to, eq       count of present pairs == eq         ERROR
-//	node        fqn [, tier]       fqn resolves (tier matches if set)   ERROR
-//	no_node     fqn                fqn resolves to ZERO nodes           never (0=pass, ≥1=FAIL)
-//	in_degree   of, eq [, cp]      #distinct callers (filtered) == eq   ERROR
-//	out_degree  of, eq [, cp]      #distinct callees (filtered) == eq   ERROR
+//	kind        required               passes when                         resolution failure
+//	----------  ---------------------  ----------------------------------  ------------------
+//	edge        from, to               ≥1 unique pair between resolved      ERROR
+//	                                   endpoints exists
+//	no_edge     from, to               NO pair between resolved endpoints   ERROR
+//	edge_count  from, to, eq           count of present pairs == eq         ERROR
+//	node        fqn [, tier]           fqn resolves (tier matches if set)   ERROR
+//	no_node     fqn                    fqn resolves to ZERO nodes           never (0=pass, ≥1=FAIL)
+//	in_degree   of, eq [, cp]          #distinct callers (filtered) == eq   ERROR
+//	out_degree  of, eq [, cp]          #distinct callees (filtered) == eq   ERROR
+//	entrypoint  name, fn               a name-matched record's fn equals    ERROR
+//	            [, entry_kind]         the resolved fn
+//
+// entrypoint has its own two-poled polarity, distinct from the absence kinds:
+// ZERO records matching the route/topic name is a FAIL (not an ERROR) — existence
+// IS the assertion, so a renamed/removed route fails loudly, and unlike no_node's
+// zero-is-pass there is no OTHER absence claim a vacuous pass could smuggle into.
+// When ≥1 record matches but they DISAGREE on the handler fn (overlapping route
+// templates), the claim ERRORs listing the joins, forcing a tighter name — the
+// deliberate native tightening over the FR's any-record-passes reference. A
+// resolution failure of `fn` (over the node universe) still ERRORs before any
+// FAIL polarity is computed, exactly like every other kind.
+//
+// Name matching is KIND-AWARE: routematch's segment-wise route tolerance applies
+// only between a route-shaped ('/'-bearing) claim name and an http record; a
+// non-http record (a consumer topic, a declared callback/worker "import/path#Symbol"
+// name) and a slash-less claim name are matched by EXACT equality — the same
+// http/consumer split the triage lens applies (impact.ResolveRoute uses routematch
+// on http records, impact.ResolveEvent matches consumer names exactly). Two further
+// native tightenings, both fail-closed: an EMPTY entrypoints[] universe ABSTAINS
+// (ERROR) rather than FAILing every claim from total blindness (the join is absent —
+// routers outside root discovery's coverage, or a pre-join producer); and among
+// overlapping matched templates a record whose name equals the claim name VERBATIM
+// wins the grade (the exact-spelling tiebreak — the tightest possible name), leaving
+// the disagree ERROR only for non-exact spellings.
 //
 // The no_node asymmetry is load-bearing: zero matches IS the pass, so a rename
 // that deletes the named node cannot vacuously pass some OTHER absence check —
@@ -58,7 +89,9 @@
 // alias for the anchor field — `fqn` on node/no_node, `of` on the degree kinds
 // — accepted for companion-spec conformance; the alias and its canonical
 // spelling both present on one claim is an ERROR, same as the counterpart
-// alias. `fn` on an edge kind is a wrong-kind ERROR.
+// alias. `fn` on an edge kind is a wrong-kind ERROR. The one exception: on the
+// entrypoint kind `fn` is the CANONICAL anchor field (the handler), not an alias
+// — it names the function the route/topic must join to and is required there.
 //
 // # Report shape
 //
@@ -80,6 +113,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/fqnres"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/routematch"
 )
 
 // Caps on the offender/match lists a report line prints. Truncation is disclosed
@@ -118,7 +152,23 @@ type Claim struct {
 	// to_matching). Accepted on those four kinds only (`fn` on an edge claim is a
 	// wrong-kind ERROR). Precedence routes through nodeAnchor/degreeAnchor so the
 	// evaluator and label() cannot drift.
+	//
+	// On the entrypoint kind `fn` is NOT an alias — it is the CANONICAL anchor,
+	// naming the handler function the route/topic (Name) must join to. It is read
+	// directly there (no nodeAnchor/degreeAnchor detour) and is required.
 	Fn string `json:"fn,omitempty"`
+	// Name is the entrypoint claim's route/topic/symbol query (an HTTP route like
+	// "POST /loan-application", a consumer topic like "payment.settled", or a
+	// declared callback/worker "import/path#Symbol" reference). Matching is
+	// KIND-AWARE (evalEntrypoint): internal/routematch's segment-wise tolerance
+	// applies only between a route-shaped ('/'-bearing) Name and an http record;
+	// every other case is exact string equality. entrypoint-only.
+	Name string `json:"name,omitempty"`
+	// EntryKind optionally filters an entrypoint claim to records of exactly this
+	// record Kind — one of graph.EntrypointKinds ("http"/"consumer"/"callback"/
+	// "worker"); any other value ERRORs, fail-closed on an authoring typo.
+	// entrypoint-only.
+	EntryKind string `json:"entry_kind,omitempty"`
 }
 
 // File is a decoded claims file: a single "claims" array.
@@ -248,7 +298,12 @@ type model struct {
 	// FQN can carry more than one tier. A tier claim over such an FQN is
 	// ambiguous and abstains (ERROR) rather than grading against an arbitrary
 	// last-write record (fail closed, tenet 2).
-	nodeTiers      map[string][]int
+	nodeTiers map[string][]int
+	// entrypoints is the graph's entrypoints[] records in graph order. An
+	// entrypoint claim iterates them in this order but every list it emits (the
+	// disagreeing-joins ERROR) is sorted, so the verdict is arrival-order
+	// independent (pinned by TestDeterministicOverShuffledInput).
+	entrypoints    []graph.Entrypoint
 	numNodes       int
 	numUniquePairs int
 }
@@ -278,6 +333,7 @@ func newModel(g *graph.Graph) *model {
 		callers:          sortedSets(callersSet),
 		callees:          sortedSets(calleesSet),
 		nodeTiers:        sortedIntSets(tierSet),
+		entrypoints:      g.Entrypoints,
 		numNodes:         len(g.Nodes),
 		numUniquePairs:   len(pairs),
 	}
@@ -312,7 +368,9 @@ func EndpointUniverse(g *graph.Graph) []string {
 // `id` is claim metadata (allowed on every kind), so it is never listed here
 // and unexpectedField skips it. `fn` is the documented anchor alias — accepted
 // on the four kinds that have an anchor field (node/no_node → `fqn`,
-// in_degree/out_degree → `of`) and a wrong-kind ERROR on the edge kinds.
+// in_degree/out_degree → `of`) and a wrong-kind ERROR on the edge kinds. On
+// entrypoint, `fn` is the CANONICAL anchor (the handler), not an alias, and
+// `name`/`entry_kind` are entrypoint-only.
 var allowedFields = map[string][]string{
 	"edge":       {"from", "to"},
 	"no_edge":    {"from", "to"},
@@ -321,6 +379,7 @@ var allowedFields = map[string][]string{
 	"no_node":    {"fqn", "fn"},
 	"in_degree":  {"of", "eq", "counterpart_matching", "to_matching", "fn"},
 	"out_degree": {"of", "eq", "counterpart_matching", "to_matching", "fn"},
+	"entrypoint": {"name", "fn", "entry_kind"},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -346,36 +405,51 @@ func (m *model) eval(c Claim) Result {
 		return m.evalDegree(c, true)
 	case "out_degree":
 		return m.evalDegree(c, false)
+	case "entrypoint":
+		return m.evalEntrypoint(c)
 	default:
 		return errored(c, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
 }
 
+// claimFieldChecks is the fixed, ordered list of every kind-field unexpectedField
+// screens: the anchor alias `fn` and every per-kind field, each paired with the
+// predicate reading whether a claim populates it. It is a package-level var — not an
+// inline slice — precisely so a reflection test (TestUnexpectedFieldCoversClaim) can
+// assert it stays a COMPLETE parallel of the Claim struct: every json-tagged field
+// except `kind` and `id` (claim metadata, allowed on every kind) must appear here.
+// A new Claim field missed here would be silently ignored on the wrong kind — the
+// verdict-inverting hazard unexpectedField exists to close. The order is fixed so the
+// wrong-kind message is deterministic.
+var claimFieldChecks = []struct {
+	name    string
+	present func(Claim) bool
+}{
+	{"from", func(c Claim) bool { return c.From != "" }},
+	{"to", func(c Claim) bool { return c.To != "" }},
+	{"fqn", func(c Claim) bool { return c.FQN != "" }},
+	{"of", func(c Claim) bool { return c.Of != "" }},
+	{"tier", func(c Claim) bool { return c.Tier != nil }},
+	{"eq", func(c Claim) bool { return c.Eq != nil }},
+	{"counterpart_matching", func(c Claim) bool { return c.CounterpartMatching != "" }},
+	{"to_matching", func(c Claim) bool { return c.ToMatching != "" }},
+	{"fn", func(c Claim) bool { return c.Fn != "" }},
+	{"name", func(c Claim) bool { return c.Name != "" }},
+	{"entry_kind", func(c Claim) bool { return c.EntryKind != "" }},
+}
+
 // unexpectedField returns the json name of the first populated field the kind
-// does not read, or "" when every populated field is allowed. The field order
-// is fixed so the message is deterministic. `id` is intentionally absent from
-// the checked set — it is claim metadata allowed on every kind, never a
+// does not read, or "" when every populated field is allowed. It walks the fixed
+// claimFieldChecks order so the message is deterministic. `id` is intentionally
+// absent from the checked set — it is claim metadata allowed on every kind, never a
 // wrong-kind field.
 func unexpectedField(c Claim, allowed []string) string {
 	ok := make(map[string]bool, len(allowed))
 	for _, a := range allowed {
 		ok[a] = true
 	}
-	for _, f := range []struct {
-		name    string
-		present bool
-	}{
-		{"from", c.From != ""},
-		{"to", c.To != ""},
-		{"fqn", c.FQN != ""},
-		{"of", c.Of != ""},
-		{"tier", c.Tier != nil},
-		{"eq", c.Eq != nil},
-		{"counterpart_matching", c.CounterpartMatching != ""},
-		{"to_matching", c.ToMatching != ""},
-		{"fn", c.Fn != ""},
-	} {
-		if f.present && !ok[f.name] {
+	for _, f := range claimFieldChecks {
+		if f.present(c) && !ok[f.name] {
 			return f.name
 		}
 	}
@@ -560,6 +634,155 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 	return fail(c, fmt.Sprintf("degree %d, want %d", n, *c.Eq))
 }
 
+// evalEntrypoint grades an entrypoint claim: the route/topic/symbol Name must join
+// to the handler Fn in the graph's entrypoints[] records. The order is fixed so a
+// schema/resolution failure ERRORs BEFORE any FAIL polarity is computed, matching
+// every other kind (see the package doc for the polarity WHY):
+//
+//	(a) require Name (non-whitespace) and Fn; validate EntryKind against the shared
+//	    graph.EntrypointKinds vocabulary (an unknown filter fails closed).
+//	(b) if the graph carries ZERO entrypoints[] records, ABSTAIN (ERROR) — the join
+//	    is absent, so a per-name FAIL would be a confident negative from blindness.
+//	(c) resolve Fn over the NODE universe (plain unique-or-die, regex any).
+//	(d) collect records whose Kind matches EntryKind (when set) and whose Name matches
+//	    KIND-AWARELY: routematch's segment-wise tolerance for an http record against a
+//	    route-shaped ('/'-bearing) Name, exact string equality for every other case.
+//	(e) if some matched record's Name equals the claim Name verbatim, narrow to those
+//	    exact records (the exact-spelling tiebreak for overlapping templates).
+//	(f) ZERO matched records is a FAIL — existence IS the assertion.
+//	(g) matched records that DISAGREE on the handler (overlapping templates) ERROR
+//	    listing the joins, forcing a tighter Name — the native tightening over the FR's
+//	    any-record-passes reference.
+//	(h) otherwise the matched records agree on exactly one handler H — PASS iff H is in
+//	    the resolved-fn set (a plain fn resolved to exactly one; a /regex/ fn may have
+//	    resolved to several — membership is the test).
+func (m *model) evalEntrypoint(c Claim) Result {
+	if strings.TrimSpace(c.Name) == "" {
+		// A whitespace-only Name passes a bare != "" check but grades against the
+		// bare-"/" root route — a fabricated match. Require real content (tenet 2).
+		return errored(c, "entrypoint requires 'name'")
+	}
+	if c.Fn == "" {
+		return errored(c, "entrypoint requires 'fn'")
+	}
+	if c.EntryKind != "" && !graph.KnownEntrypointKind(c.EntryKind) {
+		// Fail closed on an authoring typo: an unknown filter value must ERROR, not
+		// silently exclude every record and read like a real zero-match FAIL verdict.
+		// The known set is graph.EntrypointKinds (sorted → deterministic detail).
+		return errored(c, fmt.Sprintf("unknown entry_kind %s (known kinds: %s)",
+			strconv.Quote(c.EntryKind), quotedKinds(graph.EntrypointKinds)))
+	}
+	if len(m.entrypoints) == 0 {
+		// Fail-closed abstention over a BLIND universe: a graph can legitimately carry
+		// zero entrypoints[] records (routers outside root discovery's coverage — gin
+		// variadic, gorilla chains, gRPC — or a pre-join producer). Grading against an
+		// absent join would turn total blindness into a confident "no entrypoint
+		// matches" negative, misread as "the route was removed". Abstain instead
+		// (tenet 2: abstain over a fabricated pole). Distinct from the per-name
+		// zero-match FAIL below, which is only meaningful over a NON-empty join — an
+		// entry_kind filter matching zero records over a non-empty universe stays a FAIL.
+		return errored(c, "graph carries no entrypoints[] records: the route/topic -> handler join is absent (routers outside root discovery's coverage, or a pre-join producer)")
+	}
+	resolved, det := m.resolve(c.Fn, m.nodeUniverse, "node")
+	if det != "" {
+		return errored(c, det)
+	}
+	var matched []graph.Entrypoint
+	for _, ep := range m.entrypoints {
+		if c.EntryKind != "" && ep.Kind != c.EntryKind {
+			continue
+		}
+		// Kind-aware name matching. Route grammar (routematch's segment-wise tolerance)
+		// applies ONLY between a route-shaped ('/'-bearing) query and an http record;
+		// every other case is exact string equality. This is the SAME http/consumer
+		// split the triage lens applies — impact.ResolveRoute filters to http records
+		// and uses routematch.Match; impact.ResolveEvent matches consumer names by
+		// exact equality (parity named on both sides; drift would resolve a topic one
+		// way in triage and another in a claim). Two reproduced hazards this closes:
+		// (1) a NON-http name is not route grammar — a "$"-prefixed topic like
+		// "$internal.events" would act as a universal single-segment wildcard under
+		// routematch, false-matching any query (and a consumer-topic claim could then
+		// false-PASS via an http route's param-wildcard tail after the real consumer
+		// record is deleted — a silent false SATISFIED, tenet 1/4); (2) a claim Name
+		// with no '/' cannot be a route path, so it must not tail-match a param-wildcard
+		// registration tail (Match("GET /widget/{id}", "GET") was true).
+		if ep.Kind == "http" && strings.Contains(c.Name, "/") {
+			if !routematch.Match(ep.Name, c.Name) {
+				continue
+			}
+		} else if ep.Name != c.Name {
+			continue
+		}
+		matched = append(matched, ep)
+	}
+	if len(matched) == 0 {
+		return fail(c, "no entrypoint matches "+fqnres.QuoteSingle(c.Name))
+	}
+	// Exact-name tiebreak: for the idiomatic literal-vs-template overlap (registrations
+	// "GET /users/me" and "GET /users/{id}"), EVERY claim spelling matches both records
+	// (a query-side param token wildcards a registration literal too), so the disagree
+	// ERROR's "tighten the name" advice is impossible to follow. When some matched
+	// record's Name equals the claim Name verbatim, grade against those exact records
+	// only: the verbatim registration literal is the tightest possible name, so
+	// selecting it reads the author's exact spelling, not a guess. Non-exact spellings
+	// still reach the disagree ERROR below.
+	if exact := exactNameMatches(matched, c.Name); len(exact) > 0 {
+		matched = exact
+	}
+	// Track the single agreed handler without materializing the join list; only when
+	// the set DISAGREES do we build the (sorted, deduped, QuoteSingle'd, capped) join
+	// list for the ERROR — a record set that disagrees on the handler cannot yield one
+	// answer, so ERROR and force a tighter Name.
+	h := matched[0].Fn
+	disagree := false
+	for _, ep := range matched[1:] {
+		if ep.Fn != h {
+			disagree = true
+			break
+		}
+	}
+	if disagree {
+		joinSet := make(map[string]bool, len(matched))
+		for _, ep := range matched {
+			joinSet[fqnres.QuoteSingle(ep.Name)+" -> "+ep.Fn] = true
+		}
+		joins := setutil.SortedKeys(joinSet)
+		return errored(c, fmt.Sprintf("ambiguous entrypoint: %s matches %d joins with differing handlers: %s",
+			fqnres.QuoteSingle(c.Name), len(joins), fqnres.CapList(joins, maxMatches)))
+	}
+	// The matched records agree on exactly one handler H — PASS iff H is in the
+	// resolved-fn set (a plain fn resolved to exactly one; a /regex/ fn may have
+	// resolved to several — membership is the test).
+	for _, r := range resolved {
+		if r == h {
+			return pass(c)
+		}
+	}
+	return fail(c, "handled by "+h)
+}
+
+// quotedKinds renders a sorted kind vocabulary as a comma-separated quoted list for a
+// deterministic error detail: `"callback", "consumer", "http", "worker"`.
+func quotedKinds(kinds []string) string {
+	qs := make([]string, len(kinds))
+	for i, k := range kinds {
+		qs[i] = strconv.Quote(k)
+	}
+	return strings.Join(qs, ", ")
+}
+
+// exactNameMatches returns the subset of matched records whose Name equals name
+// verbatim — the exact-spelling tiebreak's selection (the tightest possible name).
+func exactNameMatches(matched []graph.Entrypoint, name string) []graph.Entrypoint {
+	var out []graph.Entrypoint
+	for _, ep := range matched {
+		if ep.Name == name {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
 // counterpartQuery returns the effective counterpart filter — canonical
 // counterpart_matching preferred, to_matching as the accepted alias. Both the
 // evaluator and label() read it through here so the alias precedence has one
@@ -705,8 +928,13 @@ func label(c Claim) string {
 			return q + " (counterpart " + cp + ")"
 		}
 		return q
+	case "entrypoint":
+		// Mirror the edge label shape: the route/topic → handler join the claim
+		// asserts. A required field left empty (an ERRORed claim) renders as an
+		// empty side, same as the edge kinds' From/To fallback.
+		return c.Name + " -> " + c.Fn
 	default:
-		return strings.TrimSpace(c.From + c.To + c.FQN + c.Of + c.Fn)
+		return strings.TrimSpace(c.From + c.To + c.FQN + c.Of + c.Fn + c.Name)
 	}
 }
 

@@ -3,10 +3,24 @@ package claims
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 )
+
+// evalOneG evaluates a single claim against an arbitrary graph (the sibling of
+// evalOne, which is fixed to testGraph) so an entrypoint test can pin behavior over
+// a purpose-built entrypoints[] universe.
+func evalOneG(t *testing.T, g *graph.Graph, c Claim) Result {
+	t.Helper()
+	rep := Evaluate(g, &File{Claims: []Claim{c}})
+	if len(rep.Results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(rep.Results))
+	}
+	return rep.Results[0]
+}
 
 // testGraph is a small hand-built graph exercising every feature a claim needs:
 // pointer-receiver methods, a value/pointer Score twin (ambiguity), a boundary
@@ -28,6 +42,19 @@ func testGraph() *graph.Graph {
 			{From: "(*svc/handler.App).Create", To: "boundary:db QueryContext", Tier: 1, Boundary: "db"},
 			{From: "svc/scoring.Score", To: "(*svc/repo.Store).Save", Tier: 2},
 			{From: "(*svc/scoring.Remote).Score", To: "(*svc/repo.Store).Save", Tier: 2},
+		},
+		// Entrypoint records exercise the join kind: an exact+method-less pair that
+		// AGREE on a handler (multi-match PASS), a wildcard-template record
+		// (observed-path tolerance), a consumer record (entry_kind filter), and an
+		// overlapping /widget/ pair that DISAGREE on the handler (the ambiguous-join
+		// ERROR). All handlers are declared nodes so `fn` resolves.
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "POST /loan", Fn: "(*svc/handler.App).Create"},
+			{Kind: "http", Name: "/loan", Fn: "(*svc/handler.App).Create"}, // method-less; agrees with the above
+			{Kind: "http", Name: "GET /loan/{id}", Fn: "(*svc/handler.App).Create"},
+			{Kind: "consumer", Name: "payment.settled", Fn: "(*svc/repo.Store).Save"},
+			{Kind: "http", Name: "GET /widget/{id}", Fn: "(*svc/handler.App).Create"},
+			{Kind: "http", Name: "GET /widget/{name}", Fn: "(*svc/repo.Store).Save"}, // overlapping pair, different handler
 		},
 	}
 }
@@ -261,11 +288,15 @@ func TestDeterministicOverShuffledInput(t *testing.T) {
 	for i, j := 0, len(g2.Nodes)-1; i < j; i, j = i+1, j-1 {
 		g2.Nodes[i], g2.Nodes[j] = g2.Nodes[j], g2.Nodes[i]
 	}
+	for i, j := 0, len(g2.Entrypoints)-1; i < j; i, j = i+1, j-1 {
+		g2.Entrypoints[i], g2.Entrypoints[j] = g2.Entrypoints[j], g2.Entrypoints[i]
+	}
 	cf := &File{Claims: []Claim{
-		{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"}, // errored
-		{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},     // pass
-		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"},  // fail
-		{Kind: "no_node", FQN: ".Save"},                              // fail (offenders listed)
+		{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"},           // errored
+		{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},               // pass
+		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"},            // fail
+		{Kind: "no_node", FQN: ".Save"},                                        // fail (offenders listed)
+		{Kind: "entrypoint", Name: "GET /widget/7", Fn: "handler.App).Create"}, // errored (disagreeing joins — order-independent)
 	}}
 	if a, b := Evaluate(g1, cf).String(), Evaluate(g2, cf).String(); a != b {
 		t.Errorf("report not deterministic across input order:\n%s\n---\n%s", a, b)
@@ -366,6 +397,313 @@ func TestIDAllowedOnEveryKind(t *testing.T) {
 	}
 	if r := evalOne(t, Claim{ID: "x", Kind: "edge", From: "App).Create", To: "repo.Store).Save"}); r.Outcome != Pass {
 		t.Errorf("id on edge = %+v, want Pass", r)
+	}
+}
+
+// TestEntrypointPass pins the PASS forms: an exact/method-less agreeing
+// multi-match, an observed-path wildcard, mount-prefix tolerance, an
+// entry_kind-filtered consumer join, and a /regex/ fn whose match SET (>1)
+// contains the record's handler (membership is the test).
+func TestEntrypointPass(t *testing.T) {
+	// "POST /loan" matches both the exact record and the method-less "/loan"
+	// record; both carry Create, so they agree and PASS.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("exact/method-less agreeing = %+v, want Pass", r)
+	}
+	// Observed path against a {id} template segment.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET /loan/42", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("wildcard observed-path = %+v, want Pass", r)
+	}
+	// Mount tolerance: the alert's mounted path aligns against the registration tail.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /api/v1/loan", Fn: "handler.App).Create"}); r.Outcome != Pass {
+		t.Errorf("mount-prefix tolerance = %+v, want Pass", r)
+	}
+	// entry_kind filter selects the consumer record; a topic degrades to equality.
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Pass {
+		t.Errorf("entry_kind-filtered consumer = %+v, want Pass", r)
+	}
+	// A /regex/ fn resolving to MORE than one node still passes when the record's
+	// handler is in that set (the Save record's handler is one of the two matches).
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "payment.settled", Fn: `/\)\.(Save|Score)$/`}); r.Outcome != Pass {
+		t.Errorf("regex fn membership = %+v, want Pass", r)
+	}
+}
+
+// TestEntrypointZeroMatchFails pins the existence polarity: a name matching no
+// record FAILs (not ERRORs), including when an entry_kind filter EXCLUDES the
+// only records the name would otherwise match.
+func TestEntrypointZeroMatchFails(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "DELETE /nonexistent", Fn: "handler.App).Create"})
+	if r.Outcome != Fail {
+		t.Fatalf("absent route = %+v, want Fail", r)
+	}
+	if want := "no entrypoint matches 'DELETE /nonexistent'"; r.Detail != want {
+		t.Errorf("absent-route detail = %q, want %q", r.Detail, want)
+	}
+	// "POST /loan" matches only http records; filtering to consumer excludes them
+	// all, so the claim FAILs zero-match rather than passing.
+	r = evalOne(t, Claim{Kind: "entrypoint", EntryKind: "consumer", Name: "POST /loan", Fn: "handler.App).Create"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'POST /loan'" {
+		t.Errorf("entry_kind-excluded = %+v, want Fail zero-match", r)
+	}
+}
+
+// TestEntrypointWrongFnFails pins that a name-matched record whose handler is
+// NOT the resolved fn FAILs with the exact `handled by <fqn>` detail (the raw
+// record FQN), and that the id-less label is the "name -> fn" join shape.
+func TestEntrypointWrongFnFails(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "repo.Store).Save"})
+	if r.Outcome != Fail {
+		t.Fatalf("wrong fn = %+v, want Fail", r)
+	}
+	if want := "handled by (*svc/handler.App).Create"; r.Detail != want {
+		t.Errorf("wrong-fn detail = %q, want %q", r.Detail, want)
+	}
+	if want := "POST /loan -> repo.Store).Save"; r.Label != want {
+		t.Errorf("id-less entrypoint label = %q, want %q", r.Label, want)
+	}
+}
+
+// TestEntrypointDisagreeingJoinsError pins that name-matched records disagreeing
+// on the handler ERROR with the exact join-list detail (deterministic: sorted,
+// deduped, single-quoted names).
+func TestEntrypointDisagreeingJoinsError(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET /widget/7", Fn: "handler.App).Create"})
+	if r.Outcome != Errored {
+		t.Fatalf("disagreeing joins = %+v, want Errored", r)
+	}
+	want := "ambiguous entrypoint: 'GET /widget/7' matches 2 joins with differing handlers: " +
+		"'GET /widget/{id}' -> (*svc/handler.App).Create; 'GET /widget/{name}' -> (*svc/repo.Store).Save"
+	if r.Detail != want {
+		t.Errorf("disagree detail = %q, want %q", r.Detail, want)
+	}
+}
+
+// TestEntrypointFnResolutionErrors pins that a bad `fn` ERRORs before any FAIL
+// polarity is computed — ambiguous and unresolved both, matching every other kind.
+func TestEntrypointFnResolutionErrors(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: ".Score"}); r.Outcome != Errored {
+		t.Errorf("ambiguous fn = %+v, want Errored", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "does.Not.Exist"}); r.Outcome != Errored {
+		t.Errorf("unresolved fn = %+v, want Errored", r)
+	}
+}
+
+// TestEntrypointSchemaErrors pins the fail-closed schema checks: an invalid
+// entry_kind, a missing name, and a missing fn each ERROR.
+func TestEntrypointSchemaErrors(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create", EntryKind: "htp"})
+	if r.Outcome != Errored {
+		t.Fatalf("invalid entry_kind = %+v, want Errored", r)
+	}
+	if want := `unknown entry_kind "htp" (known kinds: "callback", "consumer", "http", "worker")`; r.Detail != want {
+		t.Errorf("invalid entry_kind detail = %q, want %q", r.Detail, want)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Fn: "handler.App).Create"}); r.Outcome != Errored || r.Detail != "entrypoint requires 'name'" {
+		t.Errorf("missing name = %+v, want Errored 'requires name'", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan"}); r.Outcome != Errored || r.Detail != "entrypoint requires 'fn'" {
+		t.Errorf("missing fn = %+v, want Errored 'requires fn'", r)
+	}
+}
+
+// TestEntrypointWrongKindFields pins the unexpected-field closure both ways:
+// `name` on an edge claim ERRORs (it must not be silently ignored — the exact
+// verdict-inverting hazard), `fqn` on an entrypoint claim ERRORs, and `id` is
+// allowed on an entrypoint claim.
+func TestEntrypointWrongKindFields(t *testing.T) {
+	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Name: "x"}); r.Outcome != Errored {
+		t.Errorf("name on edge = %+v, want Errored (wrong-kind)", r)
+	}
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create", FQN: "x"}); r.Outcome != Errored {
+		t.Errorf("fqn on entrypoint = %+v, want Errored (wrong-kind)", r)
+	}
+	r := evalOne(t, Claim{ID: "e1", Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"})
+	if r.Outcome != Pass || r.Label != "e1" {
+		t.Errorf("id on entrypoint = %+v, want Pass with Label \"e1\"", r)
+	}
+}
+
+// TestEntrypointKindAwareMatching pins the closed name-matching bleed: route
+// grammar applies ONLY between a route-shaped claim name and an http record; every
+// other case is exact equality. testGraph carries param-tailed http routes that,
+// under the old unconditional routematch, co-matched a consumer topic and a
+// slash-less name (universal-wildcard false matches).
+func TestEntrypointKindAwareMatching(t *testing.T) {
+	// (1) A consumer-topic claim WITHOUT entry_kind matches ONLY the consumer
+	// record — not the param-tailed http routes ("GET /widget/{id}" etc.) that used
+	// to co-match "payment.settled" via their wildcard tail.
+	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Pass {
+		t.Errorf("topic without entry_kind = %+v, want Pass (consumer-only match)", r)
+	}
+	// (4) A slash-less name "GET" is not a route path: it must NOT tail-match a
+	// param-wildcard registration tail — zero-match FAIL, not a wildcard hit.
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "GET", Fn: "handler.App).Create"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'GET'" {
+		t.Errorf("slash-less name = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointConsumerTopicFalsePassRegression pins the reproduced silent false
+// SATISFIED: a graph with NO consumer record but an http route whose param tail
+// wildcards the topic name. The old matcher passed (route tail matched the topic);
+// the kind-aware matcher FAILs zero-match (an http record is never matched by a
+// slash-less topic name).
+func TestEntrypointConsumerTopicFalsePassRegression(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "(*svc/replay.Handler).Replay", Tier: 1}},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "POST /replay/{topic}", Fn: "(*svc/replay.Handler).Replay"},
+		},
+	}
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "payment.settled", Fn: "replay.Handler).Replay"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'payment.settled'" {
+		t.Errorf("topic vs http param-tail = %+v, want zero-match Fail (was a silent false PASS)", r)
+	}
+}
+
+// TestEntrypointDollarTopicNotWildcard pins that a "$"-prefixed consumer record —
+// a param token to routematch — does NOT act as a universal wildcard: matched by
+// exact equality only. Old behavior FALSE-PASSED an unrelated claim whose fn equaled
+// the $-topic's handler; the kind-aware matcher FAILs zero-match.
+func TestEntrypointDollarTopicNotWildcard(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "(*svc/audit.Sink).Consume", Tier: 1},
+			{FQN: "(*svc/handler.App).Create", Tier: 1},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "consumer", Name: "$internal.audit", Fn: "(*svc/audit.Sink).Consume"},
+			{Kind: "http", Name: "POST /loans", Fn: "(*svc/handler.App).Create"},
+		},
+	}
+	// entry_kind omitted; fn equals the $-topic's handler so an OLD universal-wildcard
+	// match would have PASSED. The $-topic must not match the unrelated route name.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /unrelated", Fn: "audit.Sink).Consume"})
+	if r.Outcome != Fail || r.Detail != "no entrypoint matches 'GET /unrelated'" {
+		t.Errorf("$-topic universal-wildcard = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointCallbackWorkerKinds pins the four-kind vocabulary: a declared
+// callback record (Name an "import/path#Symbol" reference) matches by exact equality;
+// entry_kind "callback"/"worker" are accepted (no unknown-kind ERROR); "htp" still
+// ERRORs with the shared-vocabulary detail.
+func TestEntrypointCallbackWorkerKinds(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: "(*svc/jobs.Worker).OnEvent", Tier: 1}},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "callback", Name: "svc/jobs#OnEvent", Fn: "(*svc/jobs.Worker).OnEvent"},
+		},
+	}
+	// Exact-name claim against the declared callback → PASS.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Pass {
+		t.Errorf("callback exact-name = %+v, want Pass", r)
+	}
+	// entry_kind "callback" is accepted (selects the record) → PASS.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "callback", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Pass {
+		t.Errorf("entry_kind callback = %+v, want Pass", r)
+	}
+	// entry_kind "worker" is a KNOWN kind (no unknown-kind ERROR): it excludes the
+	// callback record here, so the claim FAILs zero-match — not ERRORs.
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "worker", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"}); r.Outcome != Fail {
+		t.Errorf("entry_kind worker (known, excludes) = %+v, want zero-match Fail", r)
+	}
+	// "htp" is still an unknown kind → ERROR with the shared-vocabulary detail.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", EntryKind: "htp", Name: "svc/jobs#OnEvent", Fn: "jobs.Worker).OnEvent"})
+	if r.Outcome != Errored || r.Detail != `unknown entry_kind "htp" (known kinds: "callback", "consumer", "http", "worker")` {
+		t.Errorf("unknown entry_kind htp = %+v, want the shared-vocabulary ERROR", r)
+	}
+}
+
+// TestEntrypointEmptyUniverseAbstains pins the fail-closed abstention: a graph with
+// ZERO entrypoints[] records ERRORs (the join is absent — blindness, not a removed
+// route), while an entry_kind filter excluding every record over a NON-empty universe
+// stays a zero-match FAIL.
+func TestEntrypointEmptyUniverseAbstains(t *testing.T) {
+	g := &graph.Graph{Nodes: []graph.Node{{FQN: "(*svc/handler.App).Create", Tier: 1}}}
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create"})
+	want := "graph carries no entrypoints[] records: the route/topic -> handler join is absent (routers outside root discovery's coverage, or a pre-join producer)"
+	if r.Outcome != Errored || r.Detail != want {
+		t.Errorf("empty entrypoints universe = %+v, want abstain ERROR", r)
+	}
+	// A NON-empty universe with an entry_kind that excludes every match stays a FAIL
+	// (only the empty UNIVERSE abstains): testGraph has no worker records.
+	if r := evalOne(t, Claim{Kind: "entrypoint", EntryKind: "worker", Name: "payment.settled", Fn: "repo.Store).Save"}); r.Outcome != Fail {
+		t.Errorf("entry_kind excludes all over non-empty universe = %+v, want zero-match Fail", r)
+	}
+}
+
+// TestEntrypointExactNameTiebreak pins Fix 4: for the literal-vs-template overlap,
+// a claim whose name equals a registration literal grades against THAT record only
+// (the tightest spelling), so PASS/FAIL is read from the author's exact spelling; a
+// non-verbatim param spelling that matches disagreeing records still ERRORs.
+func TestEntrypointExactNameTiebreak(t *testing.T) {
+	g := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "(*svc/handler.App).Me", Tier: 1},
+			{FQN: "(*svc/handler.App).ByID", Tier: 1},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "GET /users/me", Fn: "(*svc/handler.App).Me"},
+			{Kind: "http", Name: "GET /users/{id}", Fn: "(*svc/handler.App).ByID"},
+		},
+	}
+	// "GET /users/me" matches both records (me == literal; me ~ {id}); the exact-name
+	// tiebreak selects the literal record → grades against H1 (Me).
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/me", Fn: "handler.App).Me"}); r.Outcome != Pass {
+		t.Errorf("literal spelling = %+v, want Pass against H1", r)
+	}
+	// "GET /users/{id}" matches both ({id} query wildcards the literal); the tiebreak
+	// selects the verbatim template record → grades against H2 (ByID).
+	if r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/{id}", Fn: "handler.App).ByID"}); r.Outcome != Pass {
+		t.Errorf("template spelling = %+v, want Pass against H2", r)
+	}
+	// A NON-verbatim param spelling matches both records and equals neither, so no
+	// tiebreak applies and the disagree ERROR remains (forcing a tighter name). NOTE:
+	// the FR's example query "GET /users/42" cannot reach this branch — a concrete
+	// segment matches only the {id} template, not the "me" literal (verified against
+	// routematch), so a param spelling is used to exercise the still-ambiguous case.
+	r := evalOneG(t, g, Claim{Kind: "entrypoint", Name: "GET /users/{uid}", Fn: "handler.App).Me"})
+	if r.Outcome != Errored {
+		t.Fatalf("non-verbatim param spelling = %+v, want disagree Errored", r)
+	}
+	wantErr := "ambiguous entrypoint: 'GET /users/{uid}' matches 2 joins with differing handlers: " +
+		"'GET /users/me' -> (*svc/handler.App).Me; 'GET /users/{id}' -> (*svc/handler.App).ByID"
+	if r.Detail != wantErr {
+		t.Errorf("disagree detail = %q, want %q", r.Detail, wantErr)
+	}
+}
+
+// TestEntrypointWhitespaceName pins Fix 7: a whitespace-only name is not a real
+// route (it would grade against the bare-"/" root), so it hits the requires-'name'
+// ERROR, not a fabricated match.
+func TestEntrypointWhitespaceName(t *testing.T) {
+	r := evalOne(t, Claim{Kind: "entrypoint", Name: "   ", Fn: "handler.App).Create"})
+	if r.Outcome != Errored || r.Detail != "entrypoint requires 'name'" {
+		t.Errorf("whitespace-only name = %+v, want requires-'name' ERROR", r)
+	}
+}
+
+// TestUnexpectedFieldCoversClaim pins Fix 6: claimFieldChecks is a COMPLETE parallel
+// of the Claim struct — every json-tagged field except `kind` and `id` (claim
+// metadata) is screened by unexpectedField. A new Claim field missed there would be
+// silently ignored on the wrong kind, the verdict-inverting hazard the check closes.
+func TestUnexpectedFieldCoversClaim(t *testing.T) {
+	checked := map[string]bool{}
+	for _, f := range claimFieldChecks {
+		checked[f.name] = true
+	}
+	rt := reflect.TypeOf(Claim{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := strings.SplitN(rt.Field(i).Tag.Get("json"), ",", 2)[0]
+		if name == "" || name == "-" || name == "kind" || name == "id" {
+			continue
+		}
+		if !checked[name] {
+			t.Errorf("Claim field %q (json:%q) is not screened by claimFieldChecks — a wrong-kind use would be silently ignored", rt.Field(i).Name, name)
+		}
 	}
 }
 

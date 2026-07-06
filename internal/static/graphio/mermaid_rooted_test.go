@@ -352,6 +352,12 @@ func TestRouteMatchesSegmentwise(t *testing.T) {
 		{"POST /loan-application", "GET /loan-application", false}, // method differs
 		{"payment.settled", "payment.settled", true},
 		{"POST /a", "POST /b", false},
+		// Non-unification pin: this routeMatches is a diagram-rooting VIEW with NO
+		// param wildcards — "{id}" matches only a literal "{id}", so a template segment
+		// never unifies with a concrete one. This is deliberately DIFFERENT from
+		// internal/routematch.Match (where the same pair is TRUE); see the "must NOT
+		// be unified" note in routematch's package doc.
+		{"/loans/{id}", "/loans/42", false},
 	}
 	for _, c := range cases {
 		if got := routeMatches(c.name, c.query); got != c.want {

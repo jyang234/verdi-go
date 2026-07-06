@@ -7,6 +7,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/routematch"
 )
 
 // Resolution is a symptom resolved against the graph. Matches are the suspect
@@ -71,82 +72,26 @@ func frameToFQN(s string) string {
 // ResolveRoute resolves an HTTP route symptom to its handler via the graph's
 // entrypoints section. Route names are REGISTRATION-SITE literals, so matching
 // is segment-aware rather than exact-or-nothing (the never-guess contract,
-// fourth application): a param segment on either side ({id}, :id, <id>, *)
-// matches any single segment; a root with no method (stdlib HandleFunc)
-// matches any queried method; and the shorter path may match as a SUFFIX of
-// the longer (mount tolerance: the alert says /api/v1/loans, the registration
-// site saw /loans). Multiple matches return all candidates flagged ambiguous.
-// Routers outside root discovery's coverage (gin variadic, gorilla chains,
-// gRPC) are simply absent — a loud no-match, never a guess.
+// fourth application). The segment-wise tolerance rule — param wildcards on
+// either side, method-less sides matching any method, and shorter-path suffix
+// (mount) tolerance — lives in internal/routematch.Match, the ONE matcher this
+// lens shares with the `groundwork assert` entrypoint claim kind; TestResolveRoute
+// exercises the delegation and is the parity guard for that shared rule.
+// Multiple matches return all candidates flagged ambiguous. Routers outside root
+// discovery's coverage (gin variadic, gorilla chains, gRPC) are simply absent —
+// a loud no-match, never a guess.
 func ResolveRoute(ix *graph.Index, route string) Resolution {
-	qMethod, qSegs := splitRoute(route)
 	matches := map[string]bool{}
 	for _, ep := range ix.Entrypoints() {
 		if ep.Kind != "http" {
 			continue
 		}
-		eMethod, eSegs := splitRoute(ep.Name)
-		if qMethod != "" && eMethod != "" && !strings.EqualFold(qMethod, eMethod) {
-			continue
-		}
-		if routeSegsMatch(eSegs, qSegs) {
+		if routematch.Match(ep.Name, route) {
 			matches[ep.Fn] = true
 		}
 	}
 	m := setutil.SortedKeys(matches)
 	return Resolution{Matches: m, Ambiguous: len(m) > 1}
-}
-
-// splitRoute separates an optional leading method token from the path and
-// splits the path into segments. "POST /loans/{id}" → ("POST", [loans {id}]);
-// "/transfer" → ("", [transfer]).
-func splitRoute(s string) (method string, segs []string) {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, ' '); i > 0 && !strings.Contains(s[:i], "/") {
-		method, s = s[:i], strings.TrimSpace(s[i+1:])
-	}
-	for _, seg := range strings.Split(strings.Trim(s, "/"), "/") {
-		if seg != "" {
-			segs = append(segs, seg)
-		}
-	}
-	return method, segs
-}
-
-// routeSegsMatch aligns the shorter segment list against the TAIL of the
-// longer (mount tolerance) and compares segment-wise, with param tokens on
-// either side acting as single-segment wildcards. An empty list matches only
-// an empty list (the bare "/" route).
-func routeSegsMatch(a, b []string) bool {
-	short, long := a, b
-	if len(short) > len(long) {
-		short, long = long, short
-	}
-	if len(short) == 0 {
-		return len(long) == 0
-	}
-	long = long[len(long)-len(short):]
-	for i := range short {
-		if !routeSegEq(short[i], long[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func routeSegEq(x, y string) bool {
-	return isParamSeg(x) || isParamSeg(y) || x == y
-}
-
-func isParamSeg(s string) bool {
-	if s == "*" || s == "..." {
-		return true
-	}
-	switch s[0] {
-	case '{', ':', '<', '$':
-		return true
-	}
-	return false
 }
 
 // ResolveTable resolves a DB table to the functions that touch it (any
@@ -160,6 +105,13 @@ func ResolveTable(ix *graph.Index, table string) Resolution {
 // function) over the CONSUME edge's source (the registration site, typically
 // main/run wiring) — both are kept when both exist, since dropping evidence
 // is guessing in the other direction.
+//
+// Consumer entrypoint names are matched by EXACT equality (ep.Name == event) — a
+// topic is not route grammar. This is the non-http half of the http/consumer split
+// the `groundwork assert` entrypoint claim also applies (claims.evalEntrypoint uses
+// routematch.Match only for an http record with a route-shaped name and exact
+// equality otherwise); the two must not drift, or a consumer topic would resolve one
+// way in triage and another in a claim.
 func ResolveEvent(ix *graph.Index, event string) Resolution {
 	res := resolveEffect(ix, boundarylabel.BusPrefix, event)
 	set := setutil.StringSet(res.Matches)

@@ -66,6 +66,36 @@ assert: 4 passed, 1 failed, 2 errored (graph: 40 nodes, 49 unique edges)
 	}
 }
 
+// TestAssertEntrypointAcceptance byte-pins the FR's six-claim entrypoint
+// acceptance file over the pinned loansvc graph — the kind that pins the
+// route/topic → handler join the node/edge kinds cannot reach. It exercises the
+// PASS cases (exact join L1, entry_kind-filtered consumer L2, observed-path
+// wildcard L3) silently and the non-passing set loudly: a wrong-handler FAIL
+// (L4), a zero-match FAIL on a removed route (L5), and an AMBIGUOUS `fn`
+// resolution ERROR (L6). Exit CLASS is a verdictError (a FAIL takes precedence
+// over the errored claim, exit 1).
+func TestAssertEntrypointAcceptance(t *testing.T) {
+	const want = `FAIL  L4-wrong-fn [entrypoint] handled by (*example.com/loansvc/internal/handler.App).Create
+FAIL  L5-absent-route [entrypoint] no entrypoint matches 'POST /loan-application/archive'
+ERROR L6-ambiguous-fn [entrypoint] AMBIGUOUS: 'Score' matches 3: (*example.com/loansvc/internal/client.Bureau).Score; (*example.com/loansvc/internal/scoring.Remote).Score; (*example.com/loansvc/internal/scoring.Stub).Score
+assert: 3 passed, 2 failed, 1 errored (graph: 40 nodes, 49 unique edges)
+`
+	args := []string{"assert",
+		"../../testdata/groundwork/goldens/loansvc.graph.json",
+		"../../testdata/groundwork/claims/loansvc-entrypoint-acceptance.claims.json"}
+
+	var err error
+	got := captureStdout(t, func() { err = run(args) })
+	if got != want {
+		t.Errorf("assert report:\n got:\n%s\nwant:\n%s", got, want)
+	}
+	// A FAIL is a verdictError (exit 1), taking precedence over the errored claim.
+	var v verdictError
+	if !errors.As(err, &v) {
+		t.Errorf("run(assert) = %v (%T), want a verdictError (exit 1)", err, err)
+	}
+}
+
 // TestAssertExitClasses pins the three-way exit split on minimal graphs: a
 // clean pass (nil), a FAIL (verdictError, exit 1), and an errored-only run
 // (plain operational error, exit 2 — the claim's gate could not run).
