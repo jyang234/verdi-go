@@ -75,8 +75,9 @@ func TestServeMCPHTTPSession(t *testing.T) {
 		t.Errorf("ground card over HTTP missing binding rules: %q", text)
 	}
 	// The shared team log attributes by session id, not line order: the
-	// init line carries the minted id, and the echoed header labels the call.
-	if got := log.String(); !strings.Contains(got, `{"init":true,"session":"`+sid+`"}`) ||
+	// init line carries the minted id (and the log v2 marker), and the echoed
+	// header labels the call.
+	if got := log.String(); !strings.Contains(got, `{"init":true,"log":2,"session":"`+sid+`"}`) ||
 		!strings.Contains(got, `"service":"obligsvc","session":"`+sid+`"`) {
 		t.Errorf("log missing session attribution for %q:\n%s", sid, got)
 	}
