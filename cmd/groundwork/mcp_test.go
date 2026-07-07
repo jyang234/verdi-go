@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
@@ -260,10 +263,12 @@ func TestServeMCPFleetSession(t *testing.T) {
 
 // The transcript is deterministic on purpose (no timestamps, sequential
 // session ids): the same session produces identical bytes, so the log's
-// shape is locked exactly — an id-stamped init line per initialize, and per
-// call the raw params plus the resolution (answering service, "*" for
-// fleet-wide, absent when resolution failed), the session id, and the
-// isError outcome. `groundwork transcript` reads this.
+// shape is locked exactly — an id-stamped init line per initialize carrying the
+// log v2 marker "log":2, and per call the raw params plus the resolution
+// (answering service, "*" for fleet-wide, absent when resolution failed), the
+// session id, and the isError outcome. A non-verdict / errored call carries no
+// "result" (that field is exercised in TestMCPTranscriptLogV2Verdict).
+// `groundwork transcript` reads this.
 func TestMCPTranscriptLog(t *testing.T) {
 	srv := &mcpServer{path: "../../testdata/groundwork/goldens/obligsvc.graph.json"}
 	if err := srv.load(); err != nil {
@@ -285,15 +290,144 @@ func TestMCPTranscriptLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := strings.Join([]string{
-		`{"init":true,"session":"1"}`,
+		`{"init":true,"log":2,"session":"1"}`,
 		`{"call":{"name":"ground","arguments":{"fqn":"example.com/obligsvc/internal/app.DisburseAndCharge"}},"service":"oblig","session":"1"}`,
 		`{"call":{"name":"fleet-events","arguments":{}},"service":"*","session":"1"}`,
 		`{"call":{"name":"reach","arguments":{"service":"nope","fqn":"x"}},"session":"1","isError":true}`,
-		`{"init":true,"session":"2"}`,
+		`{"init":true,"log":2,"session":"2"}`,
 		`{"call":{"name":"triage","arguments":{}},"service":"oblig","session":"2","isError":true}`,
 	}, "\n") + "\n"
 	if log.String() != want {
 		t.Errorf("transcript bytes:\ngot:\n%swant:\n%s", log.String(), want)
+	}
+}
+
+// TestMCPTranscriptLogV2Verdict pins the log v2 emission end-to-end through serveMCP:
+// the init line carries the "log":2 marker, a SUCCESSFUL fitness call splices a
+// structured "result" verdict whose violated[] holds the finding's prose-free
+// identity (rule kind|From|To), two identical fitness calls produce BYTE-IDENTICAL
+// lines (determinism — the verdict is a pure function of policy+graph, sorted before
+// emission), and a policy-less fitness ERRORS with no "result" (error lines carry no
+// verdict — v2 requirement 4).
+func TestMCPTranscriptLogV2Verdict(t *testing.T) {
+	const route = "example.com/svc/internal/handler.Handle"
+	g := &graph.Graph{
+		Algo:  "vta",
+		Nodes: []graph.Node{{FQN: route, Sig: "func()", Tier: 1}},
+		Edges: []graph.Edge{{From: route, To: "boundary:db INSERT users", Boundary: "outbound-sync"}},
+	}
+	// A budget of 0 over the route's single write ⇒ one io_budget violation whose
+	// structured identity is "io_budget|<route>|" (a budget violation carries a From
+	// but no To, hence the trailing empty field). vta policy over a vta graph ⇒ no
+	// substrate-mismatch caution.
+	p := &policy.Policy{Service: "svc", Version: 1, Substrate: "vta", IOBudget: &policy.IOBudget{MaxWritesPerRoute: 0}}
+	srv := &mcpServer{ix: graph.NewIndex(g), p: p}
+	fleet := newMCPFleet(map[string]*mcpServer{"svc": srv})
+	var log strings.Builder
+	fleet.log = &log
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fitness","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fitness","arguments":{}}}`,
+	}, "\n") + "\n"
+	if err := serveMCP(strings.NewReader(in), io.Discard, fleet); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 log lines (init + two fitness), got %d:\n%s", len(lines), log.String())
+	}
+	if !strings.Contains(lines[0], `{"init":true,"log":2,`) {
+		t.Errorf("init line missing the log v2 marker: %s", lines[0])
+	}
+	// The sole violation, emitted as a prose-free structured identity in a one-element
+	// array, followed by the cautions count.
+	wantVerdict := `"result":{"violated":["io_budget|` + route + `|"],"cautions":`
+	if !strings.Contains(lines[1], wantVerdict) {
+		t.Errorf("fitness line missing the v2 structured verdict %q:\n%s", wantVerdict, lines[1])
+	}
+	if strings.Contains(lines[1], "isError") {
+		t.Errorf("a successful fitness call must not carry isError: %s", lines[1])
+	}
+	// Determinism: two identical fitness calls in one session ⇒ byte-identical lines
+	// (identical params, service, session, and — the point — identical result bytes).
+	if lines[1] != lines[2] {
+		t.Errorf("identical fitness calls produced differing transcript lines:\n%s\n%s", lines[1], lines[2])
+	}
+
+	// A verdict-bearing tool that ERRORS (policy-less fitness) carries no "result".
+	noPolicy := &mcpServer{ix: graph.NewIndex(g)}
+	ef := newMCPFleet(map[string]*mcpServer{"svc": noPolicy})
+	var elog strings.Builder
+	ef.log = &elog
+	ein := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fitness","arguments":{}}}`,
+	}, "\n") + "\n"
+	if err := serveMCP(strings.NewReader(ein), io.Discard, ef); err != nil {
+		t.Fatal(err)
+	}
+	elines := strings.Split(strings.TrimSpace(elog.String()), "\n")
+	fitnessLine := elines[len(elines)-1]
+	if !strings.Contains(fitnessLine, `"isError":true`) {
+		t.Errorf("policy-less fitness must log isError: %s", fitnessLine)
+	}
+	if strings.Contains(fitnessLine, `"result":`) {
+		t.Errorf("an errored fitness call must carry NO result (v2 requirement 4): %s", fitnessLine)
+	}
+}
+
+// TestFitnessVerdictLogSortsDedupsTruncates pins the v2 "result" builder in isolation:
+// violation identities are the prose-free (rule kind|From|To) form, DEDUPED, sorted
+// lexicographically, and capped at maxLoggedViolations with an explicit truncated
+// flag — never a silent drop — and the emitted bytes are deterministic.
+func TestFitnessVerdictLogSortsDedupsTruncates(t *testing.T) {
+	// Unsorted input, a duplicate identity (same kind/From/To, differing only in the
+	// Summary instance name — which is prose, not identity, so the two collapse), and
+	// two cautions of different kinds.
+	res := fitness.Result{Findings: []fitness.Finding{
+		{Rule: "must_not_reach", Severity: fitness.Violation, Summary: "rule-b: reaches", From: "api.Z", To: "boundary:db DELETE ledger"},
+		{Rule: "io_budget", Severity: fitness.Violation, Summary: "Handle reaches 3 writes", From: "api.A"},
+		{Rule: "must_not_reach", Severity: fitness.Violation, Summary: "rule-a: a DIFFERENT instance name", From: "api.Z", To: "boundary:db DELETE ledger"},
+		{Rule: "layering", Severity: fitness.Caution, Summary: "upward call"},
+		{Rule: "must_not_reach", Severity: fitness.Caution, Summary: "no path found, frontier blind"},
+	}}
+	got := string(fitnessVerdictLog(res))
+	want := `{"violated":["io_budget|api.A|","must_not_reach|api.Z|boundary:db DELETE ledger"],"cautions":2}`
+	if got != want {
+		t.Errorf("verdict result:\ngot:  %s\nwant: %s", got, want)
+	}
+	// Determinism: identical input ⇒ byte-identical bytes.
+	if again := string(fitnessVerdictLog(res)); again != got {
+		t.Errorf("fitnessVerdictLog is not deterministic:\n%s\n%s", got, again)
+	}
+
+	// Truncation: more than maxLoggedViolations DISTINCT identities ⇒ capped, with
+	// truncated:true, and the kept prefix is the SORTED head (so the cap is
+	// deterministic, not "whichever arrived first"). Input is reversed so a
+	// sort-before-truncate is load-bearing.
+	var many []fitness.Finding
+	for i := 0; i < maxLoggedViolations+10; i++ {
+		many = append(many, fitness.Finding{Rule: "must_not_reach", Severity: fitness.Violation, From: fmt.Sprintf("api.F%03d", i), To: "t"})
+	}
+	for i, j := 0, len(many)-1; i < j; i, j = i+1, j-1 {
+		many[i], many[j] = many[j], many[i]
+	}
+	var out fitnessLogResult
+	if err := json.Unmarshal(fitnessVerdictLog(fitness.Result{Findings: many}), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Truncated {
+		t.Error("a violation set over the cap must set truncated:true, never drop silently")
+	}
+	if len(out.Violated) != maxLoggedViolations {
+		t.Errorf("violated len = %d, want the cap %d", len(out.Violated), maxLoggedViolations)
+	}
+	if !sort.StringsAreSorted(out.Violated) {
+		t.Errorf("violated must stay sorted even when truncated: %v", out.Violated)
+	}
+	if out.Violated[0] != "must_not_reach|api.F000|t" {
+		t.Errorf("truncation kept a non-head prefix (sort must precede the cap): first = %q", out.Violated[0])
 	}
 }
 

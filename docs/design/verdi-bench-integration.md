@@ -52,7 +52,14 @@ suite — verdi-bench is where it runs.
 - **Read-only MCP surface + deterministic `--log` transcript** (`cmd/groundwork/mcp.go`):
   the call log is the source of verdi-bench's tool-usage funnel metrics
   (ground-before-edit, check-after-last-edit, verdict-heeded) — the quantitative half
-  of E4, exactly as instrumented here. Keep the JSONL shape stable or version it.
+  of E4, exactly as instrumented here. The JSONL shape is **versioned**: the
+  session-init line carries `"log":2` (its absence = v1), and a *successful*
+  verdict-bearing call (`fitness`) carries a structured `result`
+  `{"violated":[<rule kind>|<from>|<to>, …],"cautions":<int>[,"truncated":true]}` —
+  a prose-free, sorted, capped identity set the funnel matches rules against (see
+  [usage.md](../groundwork/usage.md) "`--log` format v2"). v1 logs stay readable;
+  bump the marker only on a further shape change, never for an additive field a v2
+  reader already tolerates.
 - **Pinned install path**: `go install …/cmd/{flowmap,groundwork}@<ref>` (the
   `setup-groundwork` action pattern) + `internal/buildinfo` self-reported versions,
   which land in verdi-bench's grade/trial provenance.

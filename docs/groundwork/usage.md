@@ -971,6 +971,40 @@ interleave. No timestamps, so a replayed drill produces identical bytes.
 `groundwork transcript calls.jsonl`
 is the reader: sessions, per-session query counts, tool/service mix,
 cross-service hops, error/correction rates.
+
+**`--log` format v2.** The session-init line carries a format marker so a
+consumer (the verdi-bench tool-usage funnel;
+[verdi-bench-integration](../design/verdi-bench-integration.md)) can tell v2
+from the pre-versioning v1 without inspecting later lines. The marker is
+`"log":2` — **its absence means v1**. Line by line:
+
+- **init** — `{"init":true,"log":2,"session":"<id>"}`. The `"log":2` is THE
+  version marker (bumped only on a change to a logged line's *shape*, never for
+  an additive optional field a v2 reader already tolerates).
+- **call** — `{"call":{"name":…,"arguments":…},"service":…,"session":…}`, then
+  **either** `,"isError":true` on a tool error **or** `,"result":{…}` on a
+  *successful* verdict-bearing call — never both. A v1 error line is therefore
+  byte-identical under v2 (an errored tool gains no `result`).
+- **`result` (fitness)** — `{"violated":[<identity>,…],"cautions":<int>}`, with
+  `"truncated":true` appended when the list was capped. `violated` is the
+  **distinct, lexicographically-sorted** set of violation identities, capped at
+  64 (`maxLoggedViolations`) with the cap flagged, never a silent drop.
+  `cautions` is the count of caution findings (the graph legibly abstaining).
+- **identity** — `<rule kind>|<from>|<to>`, e.g.
+  `must_not_reach|api.H|boundary:db INSERT x`, or `io_budget|<route>|` when a
+  finding has no `to`. It is built **only** from a finding's structured fields
+  (`Rule`, `From`, `To`) and is **prose-free by contract** — the rule *instance*
+  name lives only in the human `Summary` and is deliberately not part of the
+  identity, so two findings that differ only by instance name collapse to one
+  identity, and a consumer matches on the rule *kind* (the field before the
+  first `|`) without parsing a sentence.
+
+Only verdict-bearing tools emit `result`; today that is `fitness`. `ground` does
+**not** — its binding rules are exposed on the card only as rendered prose, and
+reaching a structured identity through that prose is exactly what the prose-free
+contract forbids, so it fails closed and emits nothing. The `result` is a pure
+function of (policy, graph): identical calls over an identical graph produce
+byte-identical `result` bytes, preserving the transcript's replay determinism.
 **No write tools, ever**: a tool that edited rules would let the
 agent author its own guardrails. The
 agent's edit loop becomes ground → edit → verify with one rule set at both

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -467,11 +468,25 @@ func maxLoggedSession(data []byte) int {
 
 var sessionIDRe = regexp.MustCompile(`"session":"(\d+)"`)
 
+// logFormatVersion is THE --log format marker (log v2): every session-init line
+// carries "log":2. Its ABSENCE means v1 — the pre-versioning format that logged
+// only the call, never a structured verdict result. An external consumer (the
+// verdi-bench tool-usage funnel; docs/design/verdi-bench-integration.md) branches
+// on this marker: present ⇒ verdict-bearing calls carry a "result" object it can
+// match rules against; absent ⇒ the coarse call-only reading. Bump on any change
+// to a logged line's SHAPE, never for an additive optional field a v2 reader
+// already tolerates.
+const logFormatVersion = 2
+
 // newSession issues the next session id and records the boundary in the
 // transcript. Ids are sequential, not random — deterministic, like the rest
 // of the transcript — and they are attribution labels only: the fleet keeps
 // no per-session state. A session that begins and then asks nothing is
 // itself E4 evidence, which is why the boundary is recorded immediately.
+//
+// The init line carries the log-format marker "log":2 (logFormatVersion) so a
+// reader can tell v2 (verdict-bearing calls carry a "result") from v1 (absent)
+// without inspecting later lines.
 //
 // Numbering continues past any session already present in an appended log
 // (maxLoggedSession, set at startup), so a restart cannot reissue an id the prior
@@ -482,20 +497,28 @@ func (f *mcpFleet) newSession() string {
 	f.sessionN++
 	sid := strconv.Itoa(f.sessionN)
 	if f.log != nil {
-		_, _ = fmt.Fprintf(f.log, "{\"init\":true,\"session\":%q}\n", sid)
+		_, _ = fmt.Fprintf(f.log, "{\"init\":true,\"log\":%d,\"session\":%q}\n", logFormatVersion, sid)
 	}
 	return sid
 }
 
 // logCall writes one transcript line, AFTER the call so the line carries its
 // resolution: the service that answered ("*" for the fleet-wide lenses,
-// absent when resolution failed), the session the call belongs to, and the
-// isError outcome. Deterministic on purpose — no timestamps — so a replayed
-// drill produces identical bytes; `groundwork transcript` is the reader.
+// absent when resolution failed), the session the call belongs to, the
+// isError outcome, and — for a verdict-bearing tool that succeeded (log v2) —
+// a structured "result" object (verdict is its pre-marshaled bytes, nil
+// otherwise). Deterministic on purpose — no timestamps, and the verdict bytes
+// are sorted/deduped at build time — so a replayed drill produces identical
+// bytes; `groundwork transcript` is the reader.
 // Only the line itself is atomic: concurrent HTTP clients interleave lines
 // freely, and attribution survives because it rides the session id, never
 // the line order.
-func (f *mcpFleet) logCall(params json.RawMessage, service, session string, result map[string]any) {
+//
+// isError and result are mutually exclusive: an errored tool carries no result
+// (verdict is nil on error by construction — see verdictLog), so a v2 line is
+// EITHER `,"isError":true` OR `,"result":{…}` OR neither, never both. This keeps
+// the v1 error-line shape byte-identical (an isError line gains nothing under v2).
+func (f *mcpFleet) logCall(params json.RawMessage, service, session string, result map[string]any, verdict json.RawMessage) {
 	if f.log == nil {
 		return
 	}
@@ -521,10 +544,81 @@ func (f *mcpFleet) logCall(params json.RawMessage, service, session string, resu
 	}
 	if isErr, _ := result["isError"].(bool); isErr {
 		line = append(line, []byte(`,"isError":true`)...)
+	} else if len(verdict) > 0 {
+		// The v2 verdict result: pre-marshaled deterministic bytes (verdictLog).
+		// Only on a successful verdict-bearing call, so it can never ride an
+		// isError line (the branch above already took that case).
+		line = append(append(line, []byte(`,"result":`)...), verdict...)
 	}
 	f.logMu.Lock()
 	_, _ = f.log.Write(append(line, '}', '\n'))
 	f.logMu.Unlock()
+}
+
+// maxLoggedViolations caps the structured violated[] identity list on a v2 --log
+// "result" object, so a pathological policy over a dense graph cannot balloon a
+// single JSONL line past the transcript reader's line buffer. The cap is EXPLICIT:
+// a truncated list carries "truncated":true — never a silent drop (fail-loud). Set
+// generously; real policies surface far fewer distinct violation identities.
+const maxLoggedViolations = 64
+
+// fitnessLogResult is the structured verdict spliced into a successful fitness
+// call's v2 --log line as "result". Built ONLY from structured Finding fields
+// (findingIdentity: rule kind + From + To), NEVER from Summary prose — the rule
+// INSTANCE name lives only in prose and is not an identity. Field order is fixed
+// (violated, cautions, truncated) so the emitted bytes are byte-deterministic for
+// identical (policy, graph).
+//
+//   - Violated: the DISTINCT set of violation identities, sorted lexicographically
+//     and capped at maxLoggedViolations. Always a JSON array (never null) so the
+//     consumer can key on "non-empty ⇒ a verdict was surfaced".
+//   - Cautions: the count of caution findings (the graph legibly abstaining), which
+//     the consumer reads as "N unprovable-frontier cautions surfaced".
+//   - Truncated: present (true) only when the cap dropped identities.
+type fitnessLogResult struct {
+	Violated  []string `json:"violated"`
+	Cautions  int      `json:"cautions"`
+	Truncated bool     `json:"truncated,omitempty"`
+}
+
+// findingIdentity is the log v2 structured identity of a fitness finding: the rule
+// KIND (Finding.Rule, e.g. "must_not_reach"), the From symbol, and the To target,
+// joined by '|' — e.g. "must_not_reach|api.H|boundary:db INSERT x". It is
+// DELIBERATELY not Finding.Key() (which folds in Summary prose for the base-vs-branch
+// set diff): the log identity is prose-free by contract, so an external consumer can
+// match on the rule kind (the field before the first '|') without parsing a human
+// sentence. A consequence of excluding prose: two findings that differ ONLY in their
+// instance name (same kind/From/To) collapse to one identity — intended, since the
+// instance name is not part of the structured identity.
+func findingIdentity(f fitness.Finding) string {
+	return f.Rule + "|" + f.From + "|" + f.To
+}
+
+// fitnessVerdictLog builds the pre-marshaled "result" bytes for a successful fitness
+// call's v2 log line from the one fitness.Check the call already ran. Deterministic:
+// the violation identities are deduped, sorted lexicographically, then capped (with
+// an explicit truncated flag) — so identical (policy, graph) yields identical bytes.
+func fitnessVerdictLog(res fitness.Result) json.RawMessage {
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(res.Findings)) // non-nil ⇒ marshals as [] when empty, never null
+	for _, f := range res.Violations() {
+		id := findingIdentity(f)
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	out := fitnessLogResult{Violated: ids, Cautions: len(res.Cautions())}
+	if len(out.Violated) > maxLoggedViolations {
+		out.Violated = out.Violated[:maxLoggedViolations] // sorted ⇒ the kept prefix is deterministic
+		out.Truncated = true
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil // unreachable for this struct; omit rather than emit a broken line
+	}
+	return b
 }
 
 // dispatch answers one JSON-RPC request — the transport-independent core
@@ -549,8 +643,8 @@ func (f *mcpFleet) dispatch(req rpcRequest, session string) rpcResponse {
 	case "tools/list":
 		resp.Result = map[string]any{"tools": toolDefs()}
 	case "tools/call":
-		result, service := f.callTool(req.Params)
-		f.logCall(req.Params, service, session, result)
+		result, service, verdict := f.callTool(req.Params)
+		f.logCall(req.Params, service, session, result, verdict)
 		resp.Result = result
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found: " + req.Method}
@@ -664,16 +758,19 @@ type toolArgs struct {
 // are answered here; everything else resolves to one service first. The
 // second return is the transcript's resolution label: the answering
 // service's name, "*" for a fleet-wide answer, "" when resolution failed.
+// The third return is the log v2 structured verdict "result" (verdictLog),
+// non-nil only for a verdict-bearing tool that succeeded — the fleet-wide
+// lenses and every resolution failure carry none.
 //
 // Every tool reads per-service state and runs read-locked, concurrently;
 // reload, the lone mutator, takes the write lock so no card can straddle it.
-func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
+func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string, json.RawMessage) {
 	var call struct {
 		Name      string   `json:"name"`
 		Arguments toolArgs `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &call); err != nil {
-		return toolError("malformed tools/call params: " + err.Error()), ""
+		return toolError("malformed tools/call params: " + err.Error()), "", nil
 	}
 	if call.Name == "reload" {
 		f.mu.Lock()
@@ -683,23 +780,55 @@ func (f *mcpFleet) callTool(params json.RawMessage) (map[string]any, string) {
 		defer f.mu.RUnlock()
 	}
 	if call.Name == "fleet-events" {
-		return f.fleetEvents(), "*"
+		return f.fleetEvents(), "*", nil
 	}
 	if call.Name == "chains" {
-		return f.chains(), "*"
+		return f.chains(), "*", nil
 	}
 	if call.Name == "entrypoints" && call.Arguments.Service == "" && len(f.names) > 1 {
-		return f.fleetEntrypoints(), "*"
+		return f.fleetEntrypoints(), "*", nil
 	}
 	srv, errRes := f.resolve(call.Arguments.Service)
 	if errRes != nil {
-		return errRes, ""
+		return errRes, "", nil
 	}
 	service := call.Arguments.Service
 	if service == "" {
 		service = f.names[0] // the lone service: resolve already enforced it
 	}
-	return srv.call(call.Name, call.Arguments), service
+	result := srv.call(call.Name, call.Arguments)
+	return result, service, srv.verdictLog(call.Name, result)
+}
+
+// verdictLog builds the log v2 structured "result" object for a verdict-bearing
+// tool call, or nil for every other tool and for an errored call (error lines
+// carry no result — the v2 contract). Today only `fitness` is verdict-bearing.
+//
+// It recomputes fitness.Check rather than threading the rendered card's result out
+// of call(): fitness.Check is a PURE function of (policy, graph), and call() and
+// this method run under the SAME read lock over inputs reload cannot mutate midway,
+// so the recomputed verdict is byte-identical to the one the agent's card was
+// rendered from — the log line and the card can never disagree. The cost is one
+// extra check on the opt-in --log path, never on the agent's answer.
+func (s *mcpServer) verdictLog(name string, result map[string]any) json.RawMessage {
+	if isErr, _ := result["isError"].(bool); isErr {
+		return nil // an errored tool carries no verdict result (requirement 4)
+	}
+	switch name {
+	case "fitness":
+		if s.p == nil {
+			return nil // policy-less fitness already errored above; explicit guard
+		}
+		return fitnessVerdictLog(fitness.Check(s.p, s.ix))
+	default:
+		// `ground` and every other tool: no structured verdict result. ground's
+		// binding rules exist ONLY as rendered prose on the card (ground.Card.Binding
+		// is []string of sentences); the structured rule identity is computed inside
+		// ground.bindingRules and then discarded, so the handler has no prose-free
+		// identity to emit — and the v2 contract forbids reaching through prose. Fail
+		// closed: emit nothing rather than launder a prose-parsed identity.
+		return nil
+	}
 }
 
 // fleetEntrypoints lists every service's named roots, prefixed by service —

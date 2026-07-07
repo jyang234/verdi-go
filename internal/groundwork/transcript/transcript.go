@@ -30,12 +30,31 @@ import (
 // Lines written by servers older than any of these fields decode fine — all
 // are optional, and sessionless lines fall back to positional init-marker
 // grouping.
+//
+// Log v2 (cmd/groundwork/mcp.go logFormatVersion) adds two optional fields, both
+// tolerated here so this reader loads v1 AND v2 logs:
+//   - Log: the format marker on the init line ("log":2); absent (0) on v1 logs.
+//   - Result: the structured verdict on a verdict-bearing call line (fitness),
+//     {"violated":[…],"cautions":N[,"truncated":true]}. Absent on v1 and on every
+//     non-verdict or errored call.
 type Entry struct {
 	Init    bool            `json:"init,omitempty"`
+	Log     int             `json:"log,omitempty"`
 	Call    json.RawMessage `json:"call,omitempty"`
 	Service string          `json:"service,omitempty"`
 	Session string          `json:"session,omitempty"`
 	IsError bool            `json:"isError,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+}
+
+// verdictResult is the decoded shape of a v2 call line's "result" object — the
+// structured fitness verdict (cmd/groundwork/mcp.go fitnessLogResult). Decoded
+// strictly (validateVerdict) so a malformed or future-shaped result fails loudly
+// at Load, never skews the verdict tally silently (tenet 6).
+type verdictResult struct {
+	Violated  []string `json:"violated"`
+	Cautions  int      `json:"cautions"`
+	Truncated bool     `json:"truncated,omitempty"`
 }
 
 // toolName decodes the called tool's name from raw MCP call params. Unknown
@@ -62,6 +81,21 @@ func (e Entry) Tool() string {
 		return "(unnamed)"
 	}
 	return name
+}
+
+// validateVerdict strictly decodes a v2 call line's "result" object. Unknown or
+// missing-shaped fields are an error the caller MUST surface — the same fail-loud
+// posture Load applies to call params (tenet 6), so a future or garbled verdict
+// result can never be silently mis-tallied as "no violation surfaced". Returns the
+// decoded verdict for the caller to reuse.
+func validateVerdict(raw json.RawMessage) (verdictResult, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var v verdictResult
+	if err := dec.Decode(&v); err != nil {
+		return verdictResult{}, fmt.Errorf("malformed verdict result: %w", err)
+	}
+	return v, nil
 }
 
 // Load decodes a transcript, strictly: the format is this toolset's own, so
@@ -100,6 +134,14 @@ func Load(path string) ([]Entry, error) {
 				return nil, fmt.Errorf("transcript: %s:%d: %w", path, lineNo, err)
 			}
 		}
+		// A v2 "result" object is validated the same way: a malformed or
+		// future-shaped verdict fails loudly here, so Summarize can tally it
+		// without re-checking and a garbled result never reads as "no violation".
+		if len(e.Result) > 0 {
+			if _, err := validateVerdict(e.Result); err != nil {
+				return nil, fmt.Errorf("transcript: %s:%d: %w", path, lineNo, err)
+			}
+		}
 		out = append(out, e)
 	}
 	if err := sc.Err(); err != nil {
@@ -116,6 +158,10 @@ type Count struct {
 }
 
 // Summary is the deterministic reading of one transcript.
+//
+// The three trailing fields are the log v2 verdict surface (absent/zero on a v1
+// log). They are omitempty so a v1 transcript's JSON summary is byte-identical to
+// what it was before v2 existed — the added fields simply do not appear.
 type Summary struct {
 	Sessions              int     `json:"sessions"`
 	Calls                 int     `json:"calls"`
@@ -128,6 +174,13 @@ type Summary struct {
 	Services              []Count `json:"services"`
 	CrossServiceHops      int     `json:"cross_service_hops"`
 	SessionsWithHop       int     `json:"sessions_with_hop"`
+	// MaxLogVersion is the highest "log" marker seen (log v2 ⇒ 2; a v1 log ⇒ 0,
+	// omitted). VerdictResults counts call lines carrying a structured verdict
+	// result; VerdictsSurfaced counts the subset whose violated[] was non-empty —
+	// the "a verdict was surfaced to the agent" signal the funnel consumer reads.
+	MaxLogVersion    int `json:"max_log_version,omitempty"`
+	VerdictResults   int `json:"verdict_results,omitempty"`
+	VerdictsSurfaced int `json:"verdicts_surfaced,omitempty"`
 }
 
 // fleetLabel and unresolvedLabel name the two non-service resolutions in the
@@ -165,7 +218,23 @@ func Summarize(entries []Entry) Summary {
 	}
 	posN := 0
 	posKey := "" // current positional session; registered lazily so an empty leading session does not count
+	// Log v2 verdict tally, transcript-global (independent of session grouping):
+	// the format marker, the count of structured verdict results, and how many
+	// surfaced ≥1 violation. On a v1 log every one stays 0.
+	var maxLogVer, verdictResults, verdictsSurfaced int
 	for _, e := range entries {
+		if e.Log > maxLogVer {
+			maxLogVer = e.Log
+		}
+		if len(e.Result) > 0 {
+			verdictResults++
+			// Load already validated every Result strictly, so this decode cannot
+			// fail on Load-produced entries; the err guard is defensive for entries
+			// built by other means, and never counts a garbled result as surfaced.
+			if v, err := validateVerdict(e.Result); err == nil && len(v.Violated) > 0 {
+				verdictsSurfaced++
+			}
+		}
 		if e.Init {
 			if e.Session != "" {
 				register("id:" + e.Session)
@@ -187,7 +256,7 @@ func Summarize(entries []Entry) Summary {
 		sessions[key] = append(sessions[key], call{tool: e.Tool(), service: e.Service, isError: e.IsError})
 	}
 
-	s := Summary{Sessions: len(order)}
+	s := Summary{Sessions: len(order), MaxLogVersion: maxLogVer, VerdictResults: verdictResults, VerdictsSurfaced: verdictsSurfaced}
 	tools, services := map[string]*Count{}, map[string]*Count{}
 	tally := func(m map[string]*Count, name string, isErr bool) {
 		c := m[name]
@@ -281,6 +350,12 @@ func Render(s Summary) string {
 		}
 	}
 	fmt.Fprintf(&b, "\ncross-service hops: %d, in %d of %d session(s)\n", s.CrossServiceHops, s.SessionsWithHop, s.Sessions)
+	// The log v2 verdict surface, shown only when the log actually carried one — a
+	// v1 log (VerdictResults 0) renders byte-identically to before v2 existed.
+	if s.VerdictResults > 0 {
+		fmt.Fprintf(&b, "\nverdict results (log v2): %d call(s) carried a structured verdict, %d surfaced ≥1 violation\n",
+			s.VerdictResults, s.VerdictsSurfaced)
+	}
 	b.WriteString("\nThese counts measure usage, not value: whether conclusions cite card\nfacts (E4's qualitative half) stays human-judged.\n")
 	return b.String()
 }
