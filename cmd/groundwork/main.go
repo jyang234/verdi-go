@@ -172,7 +172,7 @@ usage:
   groundwork mcp --service <name>=<graph.json> ...      same server holding several services' maps (+ fleet-events lens)
   groundwork mcp ... --http <addr> [--token <secret>]    team-shared streamable-HTTP transport (token required off loopback)
   groundwork chains <graph.json>... [--service <name>=<graph.json>]... [--policy <p.json>]...  cross-service effect chains (CX-5, observational)
-  groundwork fitness <policy.json> <graph.json> [--expect <sha>] [--sarif <out>] [--json]  evaluate the policy's invariants (non-zero exit on violation; --sarif writes a SARIF report)
+  groundwork fitness <policy.json> <graph.json> [--expect <sha>] [--sarif <out>]  evaluate the policy's invariants (non-zero exit on violation; --sarif writes a SARIF report)
   groundwork review <policy> <base.json> <branch.json> [--expect <sha>] [--json]   computed MR review artifact (BLOCK exits non-zero)
   groundwork review-triage <base.json> <branch.json> [--json|--mermaid|--summary] [--policy <p.json>] [--scope-fqns <file|->] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage; --summary is an MR-comment digest; --policy adds per-route write movement; --scope-fqns marks the author-edited functions
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--corpus <t.json>...] [--capture <grade>] [--json]  pre-flight gate: new violations, scope creep, breaking contract; --corpus adds a behavioral-impeachment gate, --capture asserts its fidelity grade

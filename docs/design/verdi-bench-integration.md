@@ -28,7 +28,7 @@ suite — verdi-bench is where it runs.
    + calibration, not per-instance capability; nulls are published.
 2. **Grader backend (harness-side).** verdi-bench's grade container regenerates the
    branch graph from the agent's workspace (`flowmap graph --stamp`) and evaluates
-   `groundwork verify/fitness --json` against the committed policy and base graph.
+   `groundwork verify/review --json` against the committed policy and base graph.
    Verdicts map onto its assertion model with the epistemics preserved:
    pass → passed, fail → failed, **NO-STRUCTURAL-SIGNAL → abstain (never pass)**;
    operational failure → the trial is un-gradeable, never silently clean.
@@ -38,8 +38,8 @@ suite — verdi-bench is where it runs.
 - **Exit-code contract**: `0` clean / `1` verdict failed / `2` operational error
   (`cmd/groundwork/main.go`). The 1-vs-2 distinction maps to "graded fail" vs
   "cant_grade" and is load-bearing.
-- **Canonical `--json` output** of `fitness`/`review`/`verify`, byte-stable per tool
-  version, with rule ids present.
+- **Canonical `--json` output** of `review`/`verify` (`fitness` is text/`--sarif` only),
+  byte-stable per tool version, with rule ids present.
 - **Byte-determinism per build (R11)** of `graph.json` for a fixed tree — verdi-bench
   pins one binary across trial images, grader image, and committed base graphs, and
   runs a k=5 zero-tolerance flake baseline that would surface any regression here.
