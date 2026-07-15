@@ -136,6 +136,45 @@ func TestLoadRejectsEmptyBoundaryPrefix(t *testing.T) {
 	}
 }
 
+// An OpenAPI client hint must carry all three fields (package, peer, spec). Any one
+// blank is a silently-disabled labeler, refused at load; a complete entry loads and
+// round-trips. The spec file itself is not read here (that is the labeler-build
+// check), so a well-formed hint with a not-yet-existing path still loads.
+func TestLoadOpenAPIClients(t *testing.T) {
+	const y = `
+classify:
+  openapiClients:
+    - package: gitlab.com/acme/event-bus/clients/admin
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml
+`
+	c, err := Load([]byte(y))
+	if err != nil {
+		t.Fatalf("a complete openapiClients entry must load: %v", err)
+	}
+	if len(c.Classify.OpenAPIClients) != 1 {
+		t.Fatalf("openapiClients = %+v, want 1 entry", c.Classify.OpenAPIClients)
+	}
+	h := c.Classify.OpenAPIClients[0]
+	if h.Package != "gitlab.com/acme/event-bus/clients/admin" || h.Peer != "event-bus" || h.Spec != "api/event-bus.openapi.yaml" {
+		t.Errorf("openapiClients[0] = %+v", h)
+	}
+
+	for _, tc := range []struct {
+		name string
+		y    string
+	}{
+		{"missing package", "classify:\n  openapiClients:\n    - peer: p\n      spec: s.yaml\n"},
+		{"missing peer", "classify:\n  openapiClients:\n    - package: ex.com/c\n      spec: s.yaml\n"},
+		{"missing spec", "classify:\n  openapiClients:\n    - package: ex.com/c\n      peer: p\n"},
+		{"blank peer", "classify:\n  openapiClients:\n    - package: ex.com/c\n      peer: \"  \"\n      spec: s.yaml\n"},
+	} {
+		if _, err := Load([]byte(tc.y)); err == nil {
+			t.Errorf("%s: expected a load error", tc.name)
+		}
+	}
+}
+
 func TestLoadRejectsDeclaredBlindSpotMissingFields(t *testing.T) {
 	if _, err := Load([]byte("static:\n  declaredBlindSpots:\n    - reason: stated\n")); err == nil {
 		t.Fatal("expected error on a declared blind spot with no site")

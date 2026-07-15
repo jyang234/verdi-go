@@ -81,7 +81,7 @@ func TestDetectEmitsNoDeclaredKind(t *testing.T) {
 
 func TestKindBoundaryClassification(t *testing.T) {
 	gated := []blindspots.Kind{blindspots.NonConstantBoundaryArg, blindspots.UnresolvedDispatch}
-	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall, blindspots.ConcurrentDispatch, blindspots.ExternalBoundaryCall}
+	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall, blindspots.ConcurrentDispatch, blindspots.ExternalBoundaryCall, blindspots.UnresolvedSpecOperation}
 	for _, k := range gated {
 		if !k.Boundary() {
 			t.Errorf("%q should be a gated boundary blind spot", k)
@@ -90,6 +90,22 @@ func TestKindBoundaryClassification(t *testing.T) {
 	for _, k := range nonGated {
 		if k.Boundary() {
 			t.Errorf("%q is a graph-completeness disclosure and must not gate", k)
+		}
+	}
+}
+
+// TestDisclosureOnlyFrontierClassification pins the disclosure-only partition: a kind
+// that names a callee still present in the graph (ExternalBoundaryCall's known external
+// leaf; UnresolvedSpecOperation's un-named-but-resolved client call) must NOT act as a
+// reachability/severance frontier, so a must_not_reach proof over it stays unchanged.
+func TestDisclosureOnlyFrontierClassification(t *testing.T) {
+	disclosureOnly := map[blindspots.Kind]bool{
+		blindspots.ExternalBoundaryCall:    true,
+		blindspots.UnresolvedSpecOperation: true,
+	}
+	for _, k := range blindspots.Kinds() {
+		if got, want := k.IsDisclosureOnlyFrontier(), disclosureOnly[k]; got != want {
+			t.Errorf("IsDisclosureOnlyFrontier(%q) = %v, want %v", k, got, want)
 		}
 	}
 }

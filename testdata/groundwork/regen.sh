@@ -79,6 +79,15 @@ flowmap graph --reclaim testdata/fixtures/reclaimsvc >internal/static/graphio/te
 strip_tool internal/static/graphio/testdata/reclaimsvc.reclaimed.graph.json
 echo "wrote internal/static/graphio/testdata/reclaimsvc.reclaimed.graph.json"
 
+# oapiclientsvc built WITH --reclaim-openapi is graphio's OpenAPI-labeler fixture: the
+# outbound calls through a spec-generated client, NAMED boundary:event-bus <METHOD>
+# <template> and tagged via=openapi-client, plus the UnresolvedSpecOperation disclosure
+# for the non-operation constructor call. Graphio-local (out of the section manifest);
+# the .callgraph.md view rebases below with the other graphio goldens.
+flowmap graph --reclaim-openapi testdata/fixtures/oapiclientsvc >internal/static/graphio/testdata/oapiclientsvc.openapi.graph.json
+strip_tool internal/static/graphio/testdata/oapiclientsvc.openapi.graph.json
+echo "wrote internal/static/graphio/testdata/oapiclientsvc.openapi.graph.json"
+
 # The human-readable Mermaid flowchart views (*.callgraph.md) are a PURE function
 # of the graph JSON above — their golden harness decodes the committed .graph.json
 # and re-renders, so it needs no flowmap run here. Rebase the views in lockstep so a

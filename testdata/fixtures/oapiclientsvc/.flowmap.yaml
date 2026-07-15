@@ -1,0 +1,13 @@
+service: oapiclientsvc
+
+# The outbound calls to the event-bus peer go through a spec-generated client
+# (clients/eventbus, a hand-written oapi-codegen v2.x stand-in). Its routes are
+# fmt.Sprintf-assembled from path params, so the constant-fold HTTP labeler cannot
+# name them. classify.openapiClients declares the client package, the peer token, and
+# the OpenAPI document (path relative to this file) that supplies each operationId's
+# method and path template. Opt in with `flowmap graph --reclaim-openapi`.
+classify:
+  openapiClients:
+    - package: example.com/oapiclientsvc/clients/eventbus
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml

@@ -94,6 +94,18 @@ const (
 	// gated, each carrying the impeachment witness as its reason. flowmap merges it
 	// so the next run abstains at the seam (NEVER → CANT-PROVE) — the safe direction.
 	ImpeachmentSeam Kind = "ImpeachmentSeam"
+	// UnresolvedSpecOperation is a call from first-party code into a DECLARED
+	// OpenAPI-client package (classify.openapiClients) whose callee matched NO spec
+	// operation under the opt-in --reclaim-openapi labeler — a client helper/transport
+	// (a constructor, an editor, a middleware applier) or generator DRIFT that dropped
+	// an operation the code still calls. The labeler names the operation call sites it
+	// CAN resolve (boundary:<peer> <METHOD> <template>, via=openapi-client) and
+	// discloses the ones it cannot HERE, with the callee FQN, rather than guessing a
+	// label or silently leaving the edge unnamed (CLAUDE.md tenet 3). It is
+	// DISCLOSURE-ONLY (Kind.IsDisclosureOnlyFrontier): the callee edge is still in the
+	// graph — labeling failed, not reachability — so it severs nothing and blinds no
+	// proof. Emitted only under --reclaim-openapi, so a default build is byte-identical.
+	UnresolvedSpecOperation Kind = "UnresolvedSpecOperation"
 )
 
 // Kinds returns every blind-spot category. It exists so exhaustiveness guards —
@@ -102,7 +114,7 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, ExternalBoundaryCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
+		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, ExternalBoundaryCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam, UnresolvedSpecOperation,
 	}
 }
 
@@ -205,11 +217,14 @@ func (k Kind) Boundary() bool {
 // proof (fitness.firstReachBlinding skips it) nor enters the frontier marker set /
 // ReclaimableShare (frontier.Classify skips it): the effect it names is the same
 // leaf the call graph already terminates at, hiding no in-scope path and severing
-// nothing. ExternalBoundaryCall is the one such kind today. Centralized here so the
-// two skip sites read one predicate instead of each re-deciding by literal Kind —
-// a future disclosure-only kind flips this and both honor it.
+// nothing. ExternalBoundaryCall and UnresolvedSpecOperation are the such kinds today.
+// Centralized here so the two skip sites read one predicate instead of each
+// re-deciding by literal Kind — a future disclosure-only kind flips this and both
+// honor it. UnresolvedSpecOperation qualifies because the openapi labeler failing to
+// NAME a declared-client callee leaves that callee's edge in the graph untouched: the
+// reachability the frontier reasons over is unchanged, only the label is absent.
 func (k Kind) IsDisclosureOnlyFrontier() bool {
-	return k == ExternalBoundaryCall
+	return k == ExternalBoundaryCall || k == UnresolvedSpecOperation
 }
 
 // Severity is the signal/noise TIER a blind spot carries. It exists so a bare

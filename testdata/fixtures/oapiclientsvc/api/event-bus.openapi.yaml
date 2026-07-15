@@ -1,0 +1,27 @@
+openapi: 3.0.3
+info:
+  title: event-bus
+  version: "1.0"
+# The operation table the OpenAPI-client labeler reads: each operationId maps to a
+# method + path template, and the path template is carried into the boundary label
+# verbatim (with its {param} placeholders). oapi-codegen derives every generated
+# function name (CreateEvent, CreateEventWithResponse, NewCreateEventRequest, …) from
+# the operationId, which is how the labeler joins a call site back to this table.
+paths:
+  /v1/publishers/{publisherId}/eventTypes/{eventType}/versions/{version}/events/{eventId}:
+    parameters:
+      - name: publisherId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: CreateEvent
+      summary: Publish an event
+      responses:
+        "201": { description: created }
+  /v1/events/{eventId}:
+    get:
+      operationId: GetEvent
+      summary: Fetch an event
+      responses:
+        "200": { description: ok }

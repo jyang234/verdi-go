@@ -328,6 +328,90 @@ func TestRunGraph(t *testing.T) {
 	}
 }
 
+// oapiClientFixtureDir resolves the oapiclientsvc fixture (a service calling a
+// spec-generated client stand-in) from this test file's location.
+func oapiClientFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "fixtures", "oapiclientsvc")
+}
+
+// TestRunGraphReclaimOpenAPI pins the CLI surface of --reclaim-openapi: with the flag
+// the generated-client calls are NAMED boundary:event-bus … via=openapi-client, and
+// without it the output carries no openapi footprint (strictly opt-in).
+func TestRunGraphReclaimOpenAPI(t *testing.T) {
+	on := captureStdout(t, func() {
+		if err := run([]string{"graph", "--reclaim-openapi", oapiClientFixtureDir()}); err != nil {
+			t.Fatalf("graph --reclaim-openapi: %v", err)
+		}
+	})
+	if !strings.Contains(on, `"via": "openapi-client"`) {
+		t.Errorf("--reclaim-openapi output must carry via=openapi-client edges; got header:\n%s", firstLines(on, 8))
+	}
+	if !strings.Contains(on, "boundary:event-bus POST /v1/publishers/{publisherId}") {
+		t.Errorf("--reclaim-openapi output must name the POST operation from the spec")
+	}
+	if !strings.Contains(on, "UnresolvedSpecOperation") {
+		t.Errorf("--reclaim-openapi output must disclose the non-operation constructor call")
+	}
+
+	off := captureStdout(t, func() {
+		if err := run([]string{"graph", oapiClientFixtureDir()}); err != nil {
+			t.Fatalf("graph: %v", err)
+		}
+	})
+	if strings.Contains(off, "openapi-client") || strings.Contains(off, "boundary:event-bus") || strings.Contains(off, "UnresolvedSpecOperation") {
+		t.Errorf("without the flag the graph must carry no openapi footprint (strictly opt-in)")
+	}
+}
+
+// TestRunGraphReclaimOpenAPIBadSpec pins the fail-closed contract: a config entry
+// whose spec is missing or unparseable fails the run with the entry named and writes
+// NO output (no partial graph). The service source is copied into a temp dir so the
+// spec path can be broken without touching the committed fixture.
+func TestRunGraphReclaimOpenAPIBadSpec(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec string // spec-file contents; "" means write no spec file at all (missing)
+	}{
+		{"missing spec", ""},
+		{"unparseable spec", "\tnot: [valid yaml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWrite(t, filepath.Join(dir, "go.mod"), "module example.com/badoapi\n\ngo 1.25.0\n")
+			mustWrite(t, filepath.Join(dir, "main.go"), "package main\n\nfunc main() {}\n")
+			mustWrite(t, filepath.Join(dir, ".flowmap.yaml"),
+				"classify:\n  openapiClients:\n    - package: example.com/badoapi/client\n      peer: p\n      spec: api/spec.yaml\n")
+			if tc.spec != "" {
+				mustWrite(t, filepath.Join(dir, "api", "spec.yaml"), tc.spec)
+			}
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = run([]string{"graph", "--reclaim-openapi", dir})
+			})
+			if runErr == nil {
+				t.Fatal("expected an error on a missing/unparseable spec")
+			}
+			if !strings.Contains(runErr.Error(), "example.com/badoapi/client") {
+				t.Errorf("error must name the config entry, got: %v", runErr)
+			}
+			if out != "" {
+				t.Errorf("no graph output must be written on the spec error (no partial output), got %d bytes", len(out))
+			}
+		})
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The graph header carries the PRODUCER version (the `tool` field, R11): flowmap
 // stamps its own buildinfo.Version so groundwork can flag a base/branch built by
 // two flowmap builds. It is derived at the CLI boundary, not in graphio.Build, so
