@@ -38,6 +38,10 @@ func publish(w http.ResponseWriter, r *http.Request) {
 	// The GET operation, through its WithResponse method.
 	_, _ = cr.GetEventWithResponse(ctx, "e1")
 
+	// A GET whose spec operationId is camelCase (getEventStatus): the labeler must
+	// normalize it to match oapi-codegen's PascalCase GetEventStatusWithResponse.
+	_, _ = cr.GetEventStatusWithResponse(ctx, "e1")
+
 	// The package-level request builders (New<Op>Request[WithBody]) — also NAMED, since
 	// fn.Name() is the bare symbol for a package function just as for a method.
 	if req, err := eventbus.NewCreateEventRequest(server, "pub1", "created", "v1", "e1"); err == nil {

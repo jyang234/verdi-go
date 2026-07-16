@@ -300,7 +300,16 @@ func filter(bs []BlindSpot, keep func(Kind) bool) []BlindSpot {
 // gated boundary subset and the non-gated graph-completeness disclosures —
 // sorted and de-duplicated for deterministic output. Callers split it with
 // Boundary / Graph.
-func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
+//
+// inOpenAPIClient, when non-nil, reports whether a callee is defined in a declared
+// OpenAPI-client package (--reclaim-openapi). Such a call is NOT an ExternalBoundaryCall:
+// the openapi channel already owns that package's disclosure — a named boundary edge for
+// a resolved operation, or an UnresolvedSpecOperation for a helper — so a generic EBC on
+// the same call would double-count exactly the surface the labeler classified, the same
+// way isExternalBoundary already exempts a callee a DB/HTTP/bus hint classifies. Nil (the
+// gated boundary contract, and every un-reclaimed build) restores the prior behavior, so
+// those artifacts are byte-identical.
+func Detect(res *analyze.Result, hints *features.HintSet, inOpenAPIClient func(*ssa.Function) bool) []BlindSpot {
 	var out []BlindSpot
 	cfg := res.Config
 	if cfg == nil {
@@ -363,7 +372,7 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 					Site:   site,
 					Detail: "reflective call; downstream edges are invisible to the static call graph",
 				})
-			case isExternalBoundary(res.Program, hints, callee):
+			case isExternalBoundary(res.Program, hints, inOpenAPIClient, callee):
 				// A handoff into a third-party package we do not analyze and have not
 				// classified as a typed boundary effect. Detail names the package, not
 				// the symbol, so multiple callees in one package at this site dedup to a
@@ -538,7 +547,7 @@ func FuncValueTypeName(t types.Type) string {
 // telemetry/publish/consume/DB/HTTP is disclosed as a typed boundary effect, so
 // re-flagging it here would double-count. What remains — an unclassified
 // third-party dependency — is the surface this discloses.
-func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee *ssa.Function) bool {
+func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, inOpenAPIClient func(*ssa.Function) bool, callee *ssa.Function) bool {
 	path := features.PkgPath(callee)
 	if path == "" || prog.IsFirstPartyPath(path) || features.IsStdlib(path) {
 		return false
@@ -551,6 +560,13 @@ func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee 
 	}
 	if _, ok := hints.MethodNamedOutboundKind(callee); ok {
 		return false // a typed method-named outbound effect (blob/cache/rpc), disclosed there
+	}
+	if inOpenAPIClient != nil && inOpenAPIClient(callee) {
+		// A declared OpenAPI-client package (--reclaim-openapi): the openapi channel owns
+		// its disclosure (a named boundary edge for a resolved operation, an
+		// UnresolvedSpecOperation for a helper), so a generic EBC here would double-count
+		// the exact call the labeler classified — parallel to the hint exemptions above.
+		return false
 	}
 	return !hints.IsTelemetry(callee) && !hints.IsPublish(callee) && !hints.IsConsume(callee) &&
 		!hints.IsDB(callee) && !hints.IsHTTP(callee)

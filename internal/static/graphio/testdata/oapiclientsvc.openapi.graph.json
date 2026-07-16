@@ -35,6 +35,16 @@
       "end_line": 78
     },
     {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventStatusWithResponse",
+      "sig": "func (*eventbus.ClientWithResponses).GetEventStatusWithResponse(ctx context.Context, eventID string) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 117,
+      "end_line": 123
+    },
+    {
       "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventWithResponse",
       "sig": "func (*eventbus.ClientWithResponses).GetEventWithResponse(ctx context.Context, eventID string) (*http.Response, error)",
       "tier": 3,
@@ -60,7 +70,7 @@
       "package": "example.com/oapiclientsvc",
       "file": "main.go",
       "line": 24,
-      "end_line": 49
+      "end_line": 53
     },
     {
       "fqn": "example.com/oapiclientsvc/clients/eventbus.NewClientWithResponses",
@@ -100,6 +110,16 @@
       "file": "clients/eventbus/client.gen.go",
       "line": 93,
       "end_line": 96
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewGetEventStatusRequest",
+      "sig": "func eventbus.NewGetEventStatusRequest(server string, eventID string) (*http.Request, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 111,
+      "end_line": 114
     }
   ],
   "edges": [
@@ -119,6 +139,11 @@
       "tier": 3
     },
     {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventStatusWithResponse",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewGetEventStatusRequest",
+      "tier": 3
+    },
+    {
       "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventWithResponse",
       "to": "example.com/oapiclientsvc/clients/eventbus.NewGetEventRequest",
       "tier": 3
@@ -126,6 +151,13 @@
     {
       "from": "example.com/oapiclientsvc.publish",
       "to": "boundary:event-bus GET /v1/events/{eventId}",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client"
+    },
+    {
+      "from": "example.com/oapiclientsvc.publish",
+      "to": "boundary:event-bus GET /v1/events/{eventId}/status",
       "tier": 1,
       "boundary": "outbound-sync",
       "via": "openapi-client"

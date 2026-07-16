@@ -592,7 +592,15 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		Nodes:      []Node{}, Edges: []Edge{}, BlindSpots: []blindspots.BlindSpot{},
 		foldSQL: o.foldSQL,
 	}
-	if gs := blindspots.Graph(blindspots.Detect(res, hints)); len(gs) > 0 {
+	// Under --reclaim-openapi, a call into a declared client package is disclosed by the
+	// openapi channel (a named boundary edge, or an UnresolvedSpecOperation below), so it
+	// must not ALSO surface as a generic ExternalBoundaryCall — pass the labeler's
+	// package predicate so Detect exempts it (nil when the labeler is off, byte-identical).
+	var inOpenAPIClient func(*ssa.Function) bool
+	if o.openapi != nil {
+		inOpenAPIClient = o.openapi.InDeclaredPackage
+	}
+	if gs := blindspots.Graph(blindspots.Detect(res, hints, inOpenAPIClient)); len(gs) > 0 {
 		g.BlindSpots = gs
 	}
 	// OpenAPI-client disclosures (--reclaim-openapi): a call from first-party code into

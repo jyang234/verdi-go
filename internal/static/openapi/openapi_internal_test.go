@@ -115,6 +115,50 @@ func TestGeneratedNameLookup(t *testing.T) {
 	}
 }
 
+// goName mirrors oapi-codegen's ToCamelCase: the labeler must match the PascalCase
+// names oapi-codegen actually generates, not the raw operationId. Pin the casings.
+func TestGoName(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"CreateEvent", "CreateEvent"},  // already PascalCase — unchanged
+		{"createEvent", "CreateEvent"},  // camelCase (the common real case)
+		{"create_event", "CreateEvent"}, // snake_case
+		{"create-event", "CreateEvent"}, // kebab-case
+		{"get.event.status", "GetEventStatus"},
+		{"listV2Events", "ListV2Events"}, // digits and existing caps preserved
+		{"  spaced name ", "SpacedName"}, // trimmed + space separator
+		{"___", ""},                      // all separators → empty (contributes nothing)
+		{"", ""},
+	} {
+		if got := goName(tc.in); got != tc.want {
+			t.Errorf("goName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A camelCase operationId (oapi-codegen normalizes it to PascalCase for the generated
+// names) must still resolve to the generated shapes — the fix for the raw-operationId
+// gap that silently missed every non-PascalCase id.
+func TestGeneratedNameLookupCamelCase(t *testing.T) {
+	c := newClientTable("event-bus", []Operation{
+		{OperationID: "getEventStatus", Method: "GET", Template: "/v1/events/{id}/status"},
+	})
+	const label = "event-bus GET /v1/events/{id}/status"
+	for _, name := range []string{
+		"GetEventStatus",
+		"GetEventStatusWithResponse",
+		"GetEventStatusWithBodyWithResponse",
+		"NewGetEventStatusRequest",
+	} {
+		if got := c.byName[name]; got != label {
+			t.Errorf("byName[%q] = %q, want %q (camelCase operationId must normalize)", name, got, label)
+		}
+	}
+	// The raw camelCase form must NOT be a key (it is not what oapi-codegen generates).
+	if _, ok := c.byName["getEventStatusWithResponse"]; ok {
+		t.Error("raw camelCase name must not be a lookup key")
+	}
+}
+
 // When two operations' generated names collide (here operationId "Foo" generates
 // "FooWithResponse", and operationId "FooWithResponse" generates it as the bare form),
 // the colliding name is DROPPED — the fail-closed choice, so the callee surfaces as a
@@ -136,6 +180,31 @@ func TestAmbiguousGeneratedNameDropped(t *testing.T) {
 	}
 	if got := c.byName["FooWithResponseWithResponse"]; got != "peer POST /foo-wr" {
 		t.Errorf("byName[FooWithResponseWithResponse] = %q, want %q", got, "peer POST /foo-wr")
+	}
+}
+
+// A quoted, space-padded package/peer/spec passes config validation (TrimSpace is
+// non-empty), so NewLabeler must trim before keying/matching — else the padded package
+// would never equal features.EffectivePkgPath and the client would be a silent no-op.
+func TestNewLabelerTrimsFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "s.yaml"), []byte(eventBusSpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewLabeler([]config.OpenAPIClientHint{{Package: "  ex.com/c  ", Peer: " event-bus ", Spec: " s.yaml "}}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := l.byPkg["ex.com/c"]
+	if c == nil {
+		t.Fatalf("byPkg must key on the TRIMMED package; keys=%v", l.byPkg)
+	}
+	if c.peer != "event-bus" {
+		t.Errorf("peer = %q, want trimmed %q", c.peer, "event-bus")
+	}
+	// The trimmed peer flows into labels (no doubled/edge spaces).
+	if got := c.byName["CreateEventWithResponse"]; !strings.HasPrefix(got, "event-bus POST ") {
+		t.Errorf("label = %q, want it to start with the trimmed peer", got)
 	}
 }
 

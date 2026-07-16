@@ -103,3 +103,21 @@ func (c *ClientWithResponses) GetEventWithResponse(ctx context.Context, eventID 
 	}
 	return c.HTTP.Do(req.WithContext(ctx))
 }
+
+// --- GetEventStatus: GET /v1/events/{eventId}/status (spec operationId is camelCase
+// `getEventStatus`; oapi-codegen normalizes it to these PascalCase names) ---
+
+// NewGetEventStatusRequest builds the GetEventStatus request (fmt.Sprintf path assembly).
+func NewGetEventStatusRequest(server, eventID string) (*http.Request, error) {
+	p := fmt.Sprintf("/v1/events/%s/status", eventID)
+	return http.NewRequest(http.MethodGet, server+p, nil)
+}
+
+// GetEventStatusWithResponse is the typed-response generated method for GetEventStatus.
+func (c *ClientWithResponses) GetEventStatusWithResponse(ctx context.Context, eventID string) (*http.Response, error) {
+	req, err := NewGetEventStatusRequest(c.Server, eventID)
+	if err != nil {
+		return nil, err
+	}
+	return c.HTTP.Do(req.WithContext(ctx))
+}

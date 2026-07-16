@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -53,22 +55,31 @@ func NewLabeler(clients []config.OpenAPIClientHint, dir string) (*Labeler, error
 	}
 	l := &Labeler{byPkg: make(map[string]*clientTable, len(clients))}
 	for i, h := range clients {
-		if _, dup := l.byPkg[h.Package]; dup {
-			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d]: package %q is declared more than once (ambiguous peer/spec)", i, h.Package)
+		// Trim the declared fields: config.validate rejects an all-whitespace field, but
+		// a quoted, space-PADDED value ("pkg ") passes it, and the padded package would
+		// then never equal features.EffectivePkgPath (no spaces) — a silent no-op. Match
+		// and key on the trimmed values so a padded declaration works rather than fails
+		// closed-but-silent (the peer likewise, so a padded peer never doubles a label's
+		// spaces; the spec, so a padded path still opens).
+		pkg := strings.TrimSpace(h.Package)
+		peer := strings.TrimSpace(h.Peer)
+		spec := strings.TrimSpace(h.Spec)
+		if _, dup := l.byPkg[pkg]; dup {
+			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d]: package %q is declared more than once (ambiguous peer/spec)", i, pkg)
 		}
-		specPath := filepath.Join(dir, filepath.FromSlash(h.Spec))
+		specPath := filepath.Join(dir, filepath.FromSlash(spec))
 		b, err := os.ReadFile(specPath)
 		if err != nil {
-			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): reading spec %q: %w", i, h.Package, h.Spec, err)
+			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): reading spec %q: %w", i, pkg, spec, err)
 		}
 		ops, err := ParseSpec(b)
 		if err != nil {
-			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec %q: %w", i, h.Package, h.Spec, err)
+			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec %q: %w", i, pkg, spec, err)
 		}
 		if len(ops) == 0 {
-			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec %q declares no operation with an operationId (nothing to label — wrong file?)", i, h.Package, h.Spec)
+			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec %q declares no operation with an operationId (nothing to label — wrong file?)", i, pkg, spec)
 		}
-		l.byPkg[h.Package] = newClientTable(h.Peer, ops)
+		l.byPkg[pkg] = newClientTable(peer, ops)
 	}
 	return l, nil
 }
@@ -76,13 +87,18 @@ func NewLabeler(clients []config.OpenAPIClientHint, dir string) (*Labeler, error
 // newClientTable builds the generated-name → label lookup for one client. For every
 // operation it stamps the six oapi-codegen generated names to the operation's label;
 // a name two distinct operations both generate (or a duplicate operationId) is dropped
-// and permanently excluded, so an ambiguous callee is never labeled with a guess.
+// and permanently excluded, so an ambiguous callee is never labeled with a guess. An
+// operationId that normalizes to an empty Go name (all separators) contributes nothing.
 func newClientTable(peer string, ops []Operation) *clientTable {
 	byName := make(map[string]string)
 	ambiguous := make(map[string]bool)
 	for _, op := range ops {
+		base := goName(op.OperationID)
+		if base == "" {
+			continue
+		}
 		label := peer + " " + op.Method + " " + op.Template
-		for _, name := range generatedNames(op.OperationID) {
+		for _, name := range generatedNames(base) {
 			if ambiguous[name] {
 				continue
 			}
@@ -97,20 +113,56 @@ func newClientTable(peer string, ops []Operation) *clientTable {
 	return &clientTable{peer: peer, byName: byName}
 }
 
-// generatedNames returns the oapi-codegen v2.x generated function names for an
-// operationId — the shapes the FR enumerates: the bare client method, its
-// WithResponse / WithBody / WithBodyWithResponse variants, and the package-level
-// New<Op>Request[WithBody] request builders. Both a method call (<Op>WithResponse on
-// *ClientWithResponses) and a package-function call (New<Op>Request) match on name
-// alone, since fn.Name() is the bare symbol for either.
-func generatedNames(operationID string) []string {
+// goName converts an operationId to the Go identifier oapi-codegen derives its
+// generated function names from — its ToCamelCase: capitalize the first letter and the
+// letter after each `_ - . ` separator, drop the separators, and preserve existing
+// case and digits. So `createEvent`, `create_event`, `create-event`, and `CreateEvent`
+// all yield `CreateEvent`, matching the actual generated `CreateEventWithResponse` /
+// `NewCreateEventRequest`. Matching the RAW operationId (as before) only worked for
+// operationIds already in PascalCase and silently missed every camelCase/snake/kebab id
+// (the common case) — a real gap, though fail-closed (a miss surfaces as
+// UnresolvedSpecOperation, never a wrong label). An exact byte-for-byte match with a
+// specific oapi-codegen version is not required for the same reason: a residual miss is
+// disclosed, never mislabeled. An unmapped rune (punctuation, a symbol) is dropped, as
+// oapi-codegen's ToCamelCase drops it.
+func goName(operationID string) string {
+	var b strings.Builder
+	capNext := true
+	for _, r := range strings.TrimSpace(operationID) {
+		switch {
+		case unicode.IsUpper(r), unicode.IsDigit(r):
+			b.WriteRune(r)
+			capNext = false
+		case unicode.IsLower(r):
+			if capNext {
+				b.WriteRune(unicode.ToUpper(r))
+			} else {
+				b.WriteRune(r)
+			}
+			capNext = false
+		case r == '_' || r == '-' || r == '.' || r == ' ':
+			capNext = true
+		default:
+			capNext = false // a rune ToCamelCase maps to nothing: drop it
+		}
+	}
+	return b.String()
+}
+
+// generatedNames returns the oapi-codegen v2.x generated function names for a
+// normalized (goName) operation base — the shapes the FR enumerates: the bare client
+// method, its WithResponse / WithBody / WithBodyWithResponse variants, and the
+// package-level New<Op>Request[WithBody] request builders. Both a method call
+// (<Op>WithResponse on *ClientWithResponses) and a package-function call
+// (New<Op>Request) match on name alone, since fn.Name() is the bare symbol for either.
+func generatedNames(base string) []string {
 	return []string{
-		operationID,
-		operationID + "WithResponse",
-		operationID + "WithBody",
-		operationID + "WithBodyWithResponse",
-		"New" + operationID + "Request",
-		"New" + operationID + "RequestWithBody",
+		base,
+		base + "WithResponse",
+		base + "WithBody",
+		base + "WithBodyWithResponse",
+		"New" + base + "Request",
+		"New" + base + "RequestWithBody",
 	}
 }
 

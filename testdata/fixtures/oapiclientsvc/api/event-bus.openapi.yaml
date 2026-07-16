@@ -25,3 +25,12 @@ paths:
       summary: Fetch an event
       responses:
         "200": { description: ok }
+  /v1/events/{eventId}/status:
+    get:
+      # camelCase operationId — oapi-codegen normalizes it (ToCamelCase) to the
+      # PascalCase generated names GetEventStatus/GetEventStatusWithResponse/etc., so
+      # the labeler must normalize too, not match the raw operationId.
+      operationId: getEventStatus
+      summary: Fetch an event's delivery status
+      responses:
+        "200": { description: ok }
