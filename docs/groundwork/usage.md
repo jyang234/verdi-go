@@ -132,6 +132,15 @@ The one caveat to keep stating is unchanged by algorithm: soundness is **modulo
 reflection/unsafe** for all three. Adopting VTA does not widen that hole; it only
 changes precision.
 
+**`followWrappers` hits this same RTA coarseness.** Widening the SSA horizon for
+a declared client package (`classify.openapiClients[i].followWrappers`) can
+surface newly-materialized closures as spurious interface-dispatch candidates
+under the default `rta`, inflating unrelated blind spots — even on a plain
+`flowmap graph` with no `--reclaim-openapi` flag, since the widening runs
+unconditionally once configured. `--algo vta` resolves it; see
+[`docs/guides/adopting-flowmap.md`](../guides/adopting-flowmap.md) ("Configure
+classification") for the mechanism and the field-measured numbers.
+
 **Provenance.** The graph records which algorithm built it (`algo`) and its notes
 (`caveats`), and `fitness`, `review`, and `verify` echo them on a `substrate:`
 line — so a gated verdict self-certifies the substrate it was computed on
