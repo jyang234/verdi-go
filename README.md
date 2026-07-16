@@ -147,7 +147,7 @@ threaded through every output.
 ```
 cmd/flowmap/     CLI: boundary [--check] | graph [--entry] [--algo] [--reclaim] [--reclaim-middleware] [--stamp] | frontier | schema-drift | taint | diff | coverage | behavior ingest | version
 cmd/groundwork/  CLI: reach | triage | ground | chains | fitness | review | verify | diff | verify-artifact
-                      | exceptions | transcript | init | policy-check | mcp | version
+                      | assert | gen-diagram | exceptions | transcript | init | policy-check | mcp | version
 harness/ capture/ flow/ ir/   PUBLIC: in-process flow-test capture + the canonical IR
 internal/        the engines (static/, canon/, groundwork/, …)
 testdata/        hermetic fixture services (own modules) + committed goldens

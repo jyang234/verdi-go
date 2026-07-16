@@ -88,6 +88,17 @@ flowmap graph --reclaim-openapi testdata/fixtures/oapiclientsvc >internal/static
 strip_tool internal/static/graphio/testdata/oapiclientsvc.openapi.graph.json
 echo "wrote internal/static/graphio/testdata/oapiclientsvc.openapi.graph.json"
 
+# wrapclientsvc built WITH --reclaim-openapi is graphio's wrapper-DESCENT fixture: its
+# outbound calls go through hand-written wrappers over a SEPARATE-MODULE generated client
+# (classify.openapiClients[i].followWrappers), so it covers the descent's every outcome —
+# a one-operation wrapper NAMED via=openapi-client-wrapper, a two-operation wrapper left
+# ambiguous, a zero-operation wrapper disclosed, and a DIRECT generated call kept plain
+# via=openapi-client. Graphio-local (out of the section manifest); the .callgraph.md view
+# rebases below with the other graphio goldens.
+flowmap graph --reclaim-openapi testdata/fixtures/wrapclientsvc >internal/static/graphio/testdata/wrapclientsvc.openapi.graph.json
+strip_tool internal/static/graphio/testdata/wrapclientsvc.openapi.graph.json
+echo "wrote internal/static/graphio/testdata/wrapclientsvc.openapi.graph.json"
+
 # The human-readable Mermaid flowchart views (*.callgraph.md) are a PURE function
 # of the graph JSON above — their golden harness decodes the committed .graph.json
 # and re-renders, so it needs no flowmap run here. Rebase the views in lockstep so a

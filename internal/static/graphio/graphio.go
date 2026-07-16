@@ -1177,9 +1177,30 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 	// (New<Op>Request calling fmt.Sprintf/http.NewRequest) is not the SERVICE's
 	// outbound edge, so labeling it would double-name the operation. Left "" when the
 	// labeler is off, the caller is a client, or the callee matches no operation.
+	//
+	// oapiVia records the provenance of a resolved label: openapi.Via for a DIRECT
+	// generated-method call (the common path), openapi.ViaWrapper when the label was
+	// recovered by descending a hand-written wrapper (followWrappers). It defaults to
+	// openapi.Via so the direct case — and every committed golden — is byte-identical.
 	var oapiLabel string
+	oapiVia := openapi.Via
 	if oapi != nil && !oapi.InDeclaredPackage(e.Caller.Func) {
-		oapiLabel, _ = oapi.Label(callee)
+		if oapiLabel, _ = oapi.Label(callee); oapiLabel == "" &&
+			oapi.InDeclaredPackage(callee) && oapi.FollowWrappers(callee) {
+			// The direct callee is a hand-written wrapper in a declared client package (it
+			// matched no generated-name shape) whose package opted into descent. Descend
+			// the wrapper's declared-package call tree; a COMPLETE walk that reaches a SINGLE
+			// operation names this edge, tagged via=openapi-client-wrapper (distinct from the
+			// direct via so a descended label stays auditable separately). Zero, multiple, or
+			// an INCOMPLETE walk (depth-cap truncation or a bodiless un-widened hop, whose
+			// label set is only a lower bound) leaves oapiLabel "" — the edge stays unnamed
+			// and the disclosure channel (openapiBlindSpots, running the SAME descendWrapper)
+			// handles it. Never guess, and never name a walk that could not finish.
+			if r := descendWrapper(oapi, e.Callee); r.complete() && len(r.labels) == 1 {
+				oapiLabel = r.labels[0]
+				oapiVia = openapi.ViaWrapper
+			}
+		}
 	}
 
 	switch {
@@ -1275,16 +1296,17 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		// A generated-client operation call (oapi-codegen et al.): the constant-fold
 		// labeler cannot name it (the route is fmt.Sprintf-assembled from path params),
 		// but the declared spec can. Emit the spec-derived outbound-sync boundary edge,
-		// tagged via=openapi.Via so a spec-ASSERTED label is never mistaken for a
-		// discovered constant. It is classified through ext.External (not the outer f):
-		// the callee is a generated function, not a classify hint, so ext.Edge reads it
-		// as compute/tier-3 — External tiers it as the peer call it is (tier 1). This
-		// REPLACES the internal edge, exactly as an IsHTTP hint replaces the seam edge
-		// with its boundary edge; the client function stays a node with its own
-		// (mostly stdlib, invisible) body edges.
+		// tagged via=oapiVia (openapi.Via for a direct call, openapi.ViaWrapper for a
+		// wrapper-descended one) so a spec-ASSERTED label is never mistaken for a
+		// discovered constant, and a descended label stays distinguishable from a direct
+		// one. It is classified through ext.External (not the outer f): the callee is a
+		// generated function, not a classify hint, so ext.Edge reads it as compute/tier-3
+		// — External tiers it as the peer call it is (tier 1). This REPLACES the internal
+		// edge, exactly as an IsHTTP hint replaces the seam edge with its boundary edge;
+		// the client function stays a node with its own (mostly stdlib, invisible) body edges.
 		fx := ext.External(oapiLabel)
 		t, _ := ext.Classify(fx)
-		return []Edge{{From: from, To: "boundary:" + oapiLabel, Tier: t, Boundary: string(fx.Boundary), Via: openapi.Via, Concurrent: concurrent}}
+		return []Edge{{From: from, To: "boundary:" + oapiLabel, Tier: t, Boundary: string(fx.Boundary), Via: oapiVia, Concurrent: concurrent}}
 	case scope[callee]:
 		return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
 	default:

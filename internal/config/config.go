@@ -412,6 +412,19 @@ type OpenAPIClientHint struct {
 	Package string `yaml:"package"`
 	Peer    string `yaml:"peer"`
 	Spec    string `yaml:"spec"`
+
+	// FollowWrappers opts THIS client package into wrapper descent (opt-in, default
+	// false). A real fleet ships hand-written wrapper methods over the generated
+	// operation functions and the service calls the wrappers, not the generated
+	// methods directly; without descent every such call lands as an
+	// UnresolvedSpecOperation blind spot. Setting this true does two things: it makes
+	// the package's function bodies part of SSA construction (a separate-module client
+	// is otherwise a bodiless external declaration with nothing to descend into), and
+	// it lets the labeler follow a wrapper's declared-package call tree to the single
+	// generated operation it reaches and name the edge from that. It is a bool, so it
+	// is never invalid (no validate() clause). Default false keeps the feature fully
+	// inert: no SSA widening, no descent, output byte-identical to today.
+	FollowWrappers bool `yaml:"followWrappers,omitempty"`
 }
 
 // EntrypointHints declares the entry points root discovery cannot reach by

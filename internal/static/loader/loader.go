@@ -85,6 +85,51 @@ func Load(dir string) (*Service, error) {
 	return &Service{Dir: dir, Module: moduleOf(unit), Packages: unit}, nil
 }
 
+// ExtraInitialPackages returns the already-loaded *packages.Package for each of
+// paths, found by walking the service's resolved import graph. It is how the
+// openapi wrapper-descent horizon widening reaches a client package's bodies: the
+// loader already type-checked the whole transitive import closure (loadMode carries
+// NeedDeps|NeedSyntax|NeedTypesInfo), but ssautil.Packages builds function bodies
+// only for the INITIAL (service) packages, so a separate-module client package is a
+// bodiless external declaration until it is re-offered to ssabuild.Build as an extra
+// initial package — which is exactly what these results feed.
+//
+// A package already in s.Packages is EXCLUDED: the service's own first-party packages
+// (a same-module declared client) are already initial and already built, so re-listing
+// one would be a redundant — and, as a duplicate initial, harmful — entry. The result
+// is sorted by PkgPath so the downstream initial-package order is deterministic.
+//
+// A path with no loaded package is SILENTLY OMITTED, never an error: a declared client
+// package that is not in the service's import graph can never be called by the service,
+// so widening it would materialize bodies nothing reaches. Downstream the descent then
+// finds nothing and the call stays disclosed — fail-closed degradation, mirroring how a
+// mistyped plain classify hint package silently never matches today. Returning an error
+// would instead fail a run over a stale-but-harmless hint, the wrong direction.
+func (s *Service) ExtraInitialPackages(paths []string) []*packages.Package {
+	if len(paths) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		want[p] = true
+	}
+	inUnit := make(map[string]bool, len(s.Packages))
+	for _, p := range s.Packages {
+		inUnit[p.PkgPath] = true
+	}
+	var out []*packages.Package
+	// packages.Visit walks the roots plus their whole import closure (as collectErrors
+	// does), visiting each package once, so a wanted dependency anywhere below the
+	// service is found regardless of depth.
+	packages.Visit(s.Packages, nil, func(p *packages.Package) {
+		if want[p.PkgPath] && !inUnit[p.PkgPath] {
+			out = append(out, p)
+		}
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].PkgPath < out[j].PkgPath })
+	return out
+}
+
 // collectErrors walks the whole loaded graph and returns a single error
 // summarizing any package or type-check failure. Walking the closure (not just
 // the roots) catches a broken dependency that would otherwise corrupt SSA.

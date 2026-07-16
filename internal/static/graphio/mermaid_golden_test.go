@@ -49,6 +49,14 @@ var callGraphGoldens = []struct {
 	// Default maxTier 2 — the named boundary edges are tier 1, so they show while the
 	// client plumbing collapses. Graphio-local, out of the manifest.
 	{"testdata/oapiclientsvc.openapi.graph.json", 2},
+	// wrapclientsvc built with --reclaim-openapi: the wrapper-DESCENT fixture. Its two
+	// named boundary edges (tier 1) are a wrapper-descended POST tagged
+	// via=openapi-client-wrapper and a direct GET tagged via=openapi-client, so it covers
+	// the wrapper via render path a direct-only fixture cannot; the ambiguous and
+	// zero-found wrapper calls render as UnresolvedSpecOperation disclosure nodes. Default
+	// maxTier 2 — the named edges show while the client plumbing collapses. Graphio-local,
+	// out of the manifest.
+	{"testdata/wrapclientsvc.openapi.graph.json", 2},
 }
 
 func TestCallGraphMermaidGoldens(t *testing.T) {

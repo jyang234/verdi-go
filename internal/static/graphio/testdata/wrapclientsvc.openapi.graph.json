@@ -1,0 +1,84 @@
+{
+  "algo": "rta",
+  "caveats": [
+    "rta from 2 discovered root(s)"
+  ],
+  "nodes": [
+    {
+      "fqn": "example.com/wrapclientsvc.ensure",
+      "sig": "func main.ensure(w http.ResponseWriter, r *http.Request)",
+      "tier": 1,
+      "package": "example.com/wrapclientsvc",
+      "file": "main.go",
+      "line": 34,
+      "end_line": 69
+    },
+    {
+      "fqn": "example.com/wrapclientsvc.main",
+      "sig": "func main.main()",
+      "tier": 1,
+      "package": "example.com/wrapclientsvc",
+      "file": "main.go",
+      "line": 25,
+      "end_line": 29
+    }
+  ],
+  "edges": [
+    {
+      "from": "example.com/wrapclientsvc.ensure",
+      "to": "boundary:event-bus GET /v1/eventTypeTemplates/{templateId}",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client"
+    },
+    {
+      "from": "example.com/wrapclientsvc.ensure",
+      "to": "boundary:event-bus POST /v1/eventTypeTemplates",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client-wrapper"
+    }
+  ],
+  "blind_spots": [
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureDeep in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 9 declared-package function(s) and found 1 operation(s) (event-bus POST /v1/publishers), but the walk is INCOMPLETE so the edge is not named: the descent hit the depth cap of 8, so a deeper wrapper chain is unresolved"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureParticipant in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 2 ambiguous operations (event-bus POST /v1/publishers; event-bus POST /v1/subscribers)"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureViaLegacy in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 1 operation(s) (event-bus POST /v1/eventTypeTemplates), but the walk is INCOMPLETE so the edge is not named: it dead-ended at bodiless function(s) in the declared package(s) example.com/wrapclientlib/legacy, which need followWrappers on their own hint to be descended"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).Warm in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 2 declared-package function(s) and found 0 operations"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to example.com/wrapclientlib/eventbus.NewClientWithResponses in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 0 operations"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to example.com/wrapclientlib/eventbus.NewRegistrar in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 0 operations"
+    }
+  ],
+  "entrypoints": [
+    {
+      "kind": "http",
+      "name": "POST /ensure",
+      "fn": "example.com/wrapclientsvc.ensure"
+    }
+  ],
+  "composition_roots": [
+    "example.com/wrapclientsvc"
+  ]
+}

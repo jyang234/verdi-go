@@ -1,0 +1,27 @@
+service: wrapclientsvc
+
+# The outbound calls to the event-bus peer go through a SEPARATE-MODULE spec-generated
+# client (example.com/wrapclientlib/eventbus) that the service reaches only through
+# hand-written Registrar wrappers — the real-fleet idiom. The generated routes are
+# fmt.Sprintf-assembled, so the constant-fold HTTP labeler cannot name them, and the
+# service calls the wrappers, not the generated methods, so a plain openapi labeler would
+# disclose every call as UnresolvedSpecOperation. followWrappers: true opts this client
+# package into wrapper descent — it (a) widens SSA so the dependency-module client's
+# bodies are built, and (b) lets the labeler follow each wrapper's declared-package call
+# tree to the single generated operation it reaches and name the edge from that (or
+# disclose the descent outcome when a wrapper reaches zero or several). Opt in with
+# `flowmap graph --reclaim-openapi`.
+classify:
+  openapiClients:
+    - package: example.com/wrapclientlib/eventbus
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml
+      followWrappers: true
+    # A SECOND declared client in the same module, sharing the spec but declared WITHOUT
+    # followWrappers: it is a bodiless external declaration (never widened). eventbus's
+    # EnsureViaLegacy calls into it, so the wrapper descent dead-ends at a bodiless hop —
+    # an INCOMPLETE walk the labeler must disclose (naming this package) rather than name.
+    # Two hints may share a spec file; only a duplicate PACKAGE is a load error.
+    - package: example.com/wrapclientlib/legacy
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml

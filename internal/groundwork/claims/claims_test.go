@@ -150,6 +150,12 @@ func TestPerSideEnforcement(t *testing.T) {
 	if r := evalOne(t, Claim{Kind: "edge", From: "scoring.Score", To: `/repo\.Store\).Save$/`}); r.Outcome != Pass {
 		t.Errorf("regex to-side edge = %+v, want Pass", r)
 	}
+	// Mirror direction: the same ambiguous plain endpoint on the `to` side, with the
+	// precise regex now on `from`, is still an ERROR — per-side enforcement applies
+	// to both sides independently, not just to `from`.
+	if r := evalOne(t, Claim{Kind: "edge", From: `/repo\.Store\).Save$/`, To: ".Score"}); r.Outcome != Errored {
+		t.Errorf("ambiguous plain to-side under a regex from-side = %+v, want Errored", r)
+	}
 }
 
 func TestBoundaryEndpointClaimable(t *testing.T) {

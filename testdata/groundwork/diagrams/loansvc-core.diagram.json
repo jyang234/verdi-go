@@ -1,0 +1,26 @@
+{
+  "id": "LOANSVC-CORE",
+  "direction": "LR",
+  "nodes": [
+    {"id": "CR",    "graph": "loansvc", "fn": "handler.App).Create",              "label": "App.Create"},
+    {"id": "EV",    "graph": "loansvc", "fn": "origination.Evaluator).Evaluate",  "label": "Evaluator.Evaluate"},
+    {"id": "CH",    "graph": "loansvc", "fn": "client.Gateway).Charge",           "label": "Gateway.Charge"},
+    {"id": "ST",    "graph": "loansvc", "fn": "handler.App).Status",              "label": "App.Status"},
+    {"id": "SL",    "graph": "loansvc", "fn": "store.Loans).SelectLoan",          "label": "Loans.SelectLoan"},
+    {"id": "DBSEL", "graph": "loansvc", "fn": "boundary:db SELECT loans",         "label": "db SELECT loans"},
+    {"id": "OS",    "graph": "loansvc", "fn": "consumer.Payments).OnSettled",     "label": "Payments.OnSettled"},
+    {"id": "MP",    "graph": "loansvc", "fn": "store.Loans).MarkPaid",            "label": "Loans.MarkPaid"},
+    {"id": "DBUPD", "graph": "loansvc", "fn": "boundary:db UPDATE loans",         "label": "db UPDATE loans"}
+  ],
+  "subgraphs": [
+    {"id": "origination", "title": "origination [computed]", "nodes": ["CR", "EV", "CH", "ST"]}
+  ],
+  "overlays": {
+    "nodes": [
+      {"id": "AUDIT", "label": "audit_ledger (planned)", "shape": "db"}
+    ],
+    "edges": [
+      {"from": "MP", "to": "AUDIT", "label": "FIX: append to audit ledger"}
+    ]
+  }
+}

@@ -44,6 +44,70 @@ func TestLoadFixture(t *testing.T) {
 	}
 }
 
+// TestExtraInitialPackages checks the wrapper-descent horizon-widening helper. A
+// stdlib dependency anywhere in the import closure is returned (so ssabuild can later
+// materialize its bodies); a first-party path already in the unit is EXCLUDED (it is
+// already initial and built); a path with no loaded package is silently OMITTED (a
+// client outside the import graph can never be called, so widening it is meaningless —
+// fail-closed). The result is sorted by import path for a deterministic downstream
+// initial-package order. Loader-only, no SSA.
+func TestExtraInitialPackages(t *testing.T) {
+	svc, err := loader.Load(fixtureDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const (
+		// "errors" is transitive (fmt/context/net/http all import it); "context" is a
+		// direct import. Both are certain to be in loansvc's closure. "context" < "errors"
+		// pins the sort.
+		depTransitive = "errors"
+		depDirect     = "context"
+		firstParty    = "example.com/loansvc/internal/handler" // already in the unit
+		missing       = "example.com/nope/not/loaded"          // no loaded package
+	)
+	// Requested in a deliberately UNSORTED order to prove the helper sorts its output.
+	got := svc.ExtraInitialPackages([]string{firstParty, missing, depTransitive, depDirect})
+
+	var paths []string
+	present := map[string]bool{}
+	for _, p := range got {
+		if p == nil {
+			t.Fatalf("ExtraInitialPackages returned a nil package")
+		}
+		paths = append(paths, p.PkgPath)
+		present[p.PkgPath] = true
+	}
+	// Exactly the two closure dependencies, sorted; first-party and missing omitted.
+	want := []string{depDirect, depTransitive} // "context", "errors"
+	if len(paths) != len(want) {
+		t.Fatalf("ExtraInitialPackages = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("ExtraInitialPackages = %v, want %v (sorted by import path)", paths, want)
+		}
+	}
+	if present[firstParty] {
+		t.Errorf("a first-party path already in the unit must be excluded, got %q", firstParty)
+	}
+	if present[missing] {
+		t.Errorf("a path with no loaded package must be omitted, got %q", missing)
+	}
+
+	// The returned packages carry syntax + type info (loadMode loaded the full closure),
+	// which is what makes them buildable when re-offered as extra initial packages.
+	for _, p := range got {
+		if p.Syntax == nil || p.TypesInfo == nil {
+			t.Errorf("dependency %q missing syntax/type info; cannot materialize bodies", p.PkgPath)
+		}
+	}
+
+	// Empty input is a nil no-op (the feature-inert default path).
+	if out := svc.ExtraInitialPackages(nil); out != nil {
+		t.Errorf("ExtraInitialPackages(nil) = %v, want nil", out)
+	}
+}
+
 func TestLoadMissingDirFails(t *testing.T) {
 	if _, err := loader.Load(filepath.Join(fixtureDir(), "does-not-exist")); err == nil {
 		t.Fatal("Load of a missing directory should fail")
