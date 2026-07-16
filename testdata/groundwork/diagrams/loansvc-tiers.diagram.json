@@ -1,0 +1,10 @@
+{
+  "id": "LOANSVC-TIERS",
+  "direction": "LR",
+  "tiers": true,
+  "nodes": [
+    {"id": "CR",    "graph": "loansvc", "fn": "handler.App).Create",     "label": "App.Create"},
+    {"id": "SL",    "graph": "loansvc", "fn": "store.Loans).SelectLoan", "label": "Loans.SelectLoan"},
+    {"id": "DBSEL", "graph": "loansvc", "fn": "boundary:db SELECT loans", "label": "db SELECT loans"}
+  ]
+}

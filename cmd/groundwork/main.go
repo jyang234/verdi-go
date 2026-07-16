@@ -25,6 +25,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/chains"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/claims"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/contract"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/diagram"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/fitness"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/ground"
@@ -107,6 +108,8 @@ func run(args []string) error {
 		return cmdDiff(args[1:])
 	case "assert":
 		return cmdAssert(args[1:])
+	case "gen-diagram":
+		return cmdGenDiagram(args[1:])
 	case "verify-artifact":
 		return cmdVerifyArtifact(args[1:])
 	case "exceptions":
@@ -178,6 +181,7 @@ usage:
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--corpus <t.json>...] [--capture <grade>] [--json]  pre-flight gate: new violations, scope creep, breaking contract; --corpus adds a behavioral-impeachment gate, --capture asserts its fidelity grade
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
   groundwork assert <graph.json> <claims.json>   verify point-in-time doc claims against a graph (a FAIL exits 1; an errored claim — one whose gate could not run — exits 2)
+  groundwork gen-diagram [--check <file>] <manifest.json> <logical>=<graph.json> [<logical>=<graph.json> ...]  emit a generated-core mermaid diagram (every solid edge read from a graph, judgment overlays dashed); --check gates a committed copy against drift (exit 1)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
   groundwork transcript <calls.jsonl> [--json]   summarize an mcp --log transcript: sessions, tool/service mix, cross-service hops
@@ -981,6 +985,75 @@ func cmdAssert(args []string) error {
 	if rep.Errored() > 0 {
 		return fmt.Errorf("assert: %d claim(s) could not be evaluated", rep.Errored())
 	}
+	return nil
+}
+
+// cmdGenDiagram emits a generated-core mermaid diagram: every solid edge is an
+// induced-subgraph edge read from a graph, every tier annotation is read from a
+// graph, and the manifest's judgment overlays are always dashed. Output is a pure
+// function of (manifest, graphs). Exit codes ride the same verdict/operational
+// split cmdAssert uses (diagram.Verdict → verdictError, exit 1): the overlay
+// guard tripping (the graph now contradicts the manifest's judgment) and a
+// --check drift are verdicts; usage errors, unreadable/undecodable inputs, an
+// unresolved/ambiguous fn, manifest validation, and --check block-selection
+// failures are operational (exit 2). --check compares against a committed copy
+// and prints nothing on a match.
+func cmdGenDiagram(args []string) error {
+	checkPath, hasCheck, args := takeValueFlag(args, "--check", "-check")
+	if len(args) < 2 {
+		return fmt.Errorf("usage: groundwork gen-diagram [--check <file>] <manifest.json> <logical>=<graph.json> [<logical>=<graph.json> ...]")
+	}
+	manifestPath, pairs := args[0], args[1:]
+
+	// Parse the <logical>=<graph.json> pairs (chains-style). A duplicate logical
+	// name is refused — silently keeping the last would resolve some nodes against
+	// a graph the author did not mean.
+	graphs := map[string]*graph.Graph{}
+	for _, pair := range pairs {
+		name, path, ok := strings.Cut(pair, "=")
+		if !ok || name == "" || path == "" {
+			return fmt.Errorf("gen-diagram: want <logical>=<graph.json>, got %q", pair)
+		}
+		if _, dup := graphs[name]; dup {
+			return fmt.Errorf("gen-diagram: duplicate logical graph name %q", name)
+		}
+		g, err := graph.LoadFile(path)
+		if err != nil {
+			return err
+		}
+		graphs[name] = g
+	}
+
+	m, err := diagram.LoadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	out, err := diagram.Generate(m, graphs)
+	if err != nil {
+		// A Verdict (overlay guard) rides the verdict exit code; every other
+		// generation failure is operational.
+		var v diagram.Verdict
+		if errors.As(err, &v) {
+			return verdictf("gen-diagram: %s", v.Error())
+		}
+		return err
+	}
+
+	if hasCheck {
+		content, err := os.ReadFile(checkPath)
+		if err != nil {
+			return err
+		}
+		if err := diagram.Check(content, out, m.ID); err != nil {
+			var v diagram.Verdict
+			if errors.As(err, &v) {
+				return verdictf("gen-diagram: %s", v.Error())
+			}
+			return err
+		}
+		return nil // a clean check prints nothing
+	}
+	fmt.Print(out)
 	return nil
 }
 
