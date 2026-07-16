@@ -20,6 +20,15 @@ import (
 // spec is an AUTHOR DECLARATION, not a fact the analysis proved from code.
 const Via = "openapi-client"
 
+// ViaWrapper tags a boundary edge whose spec label was derived by DESCENDING a
+// hand-written wrapper in a declared client package (followWrappers) — the service
+// calls a wrapper method, the wrapper calls the generated operation, and the descent
+// walked from the former to the latter. It is kept DISTINCT from Via so a label
+// recovered by wrapper descent is never conflated with a direct-call label: descent is a
+// weaker, over-approximated provenance (it followed the call graph, not a direct name
+// match), so a reviewer must be able to audit the two channels separately.
+const ViaWrapper = "openapi-client-wrapper"
+
 // Labeler maps a generated-client call site to its spec-derived boundary label. It is
 // built once from the config's classify.openapiClients plus each declared spec file
 // (NewLabeler) and then queried per call site (Label / InDeclaredPackage). A nil
@@ -40,6 +49,11 @@ type Labeler struct {
 type clientTable struct {
 	peer   string
 	byName map[string]string
+	// followWrappers mirrors the hint's opt-in: when set, a call into this package that
+	// matches no generated-name shape may be RESOLVED by descending its hand-written
+	// wrappers (graphio.descendWrapper) rather than only disclosed. Off by default, so
+	// the feature is inert unless the author declared it.
+	followWrappers bool
 }
 
 // NewLabeler builds the labeler from the declared clients, reading each spec file
@@ -79,7 +93,12 @@ func NewLabeler(clients []config.OpenAPIClientHint, dir string) (*Labeler, error
 		if len(ops) == 0 {
 			return nil, fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec %q declares no operation with an operationId (nothing to label — wrong file?)", i, pkg, spec)
 		}
-		l.byPkg[pkg] = newClientTable(peer, ops)
+		ct := newClientTable(peer, ops)
+		// Thread the opt-in through: the generated-name lookup is independent of it, so
+		// newClientTable's signature (and its unit tests) stay unchanged and the flag is
+		// set on the built table. h.FollowWrappers is a bool — never invalid.
+		ct.followWrappers = h.FollowWrappers
+		l.byPkg[pkg] = ct
 	}
 	return l, nil
 }
@@ -197,4 +216,20 @@ func (l *Labeler) InDeclaredPackage(fn *ssa.Function) bool {
 	}
 	_, ok := l.byPkg[features.EffectivePkgPath(fn)]
 	return ok
+}
+
+// FollowWrappers reports whether fn's declared client package opted into wrapper
+// descent (classify.openapiClients[i].followWrappers). The caller uses it as the gate
+// on the descent path: a callee in a declared package that matches no operation is
+// DESCENDED (its wrappers followed to a generated operation) only when this is true,
+// and otherwise stays a plain UnresolvedSpecOperation disclosure exactly as before.
+// Like Label and InDeclaredPackage it is body-independent — it keys on
+// features.EffectivePkgPath(fn) — and a nil labeler, nil fn, or out-of-scope package
+// all answer false, so the no-opt-in build is byte-identical.
+func (l *Labeler) FollowWrappers(fn *ssa.Function) bool {
+	if l == nil || fn == nil {
+		return false
+	}
+	c := l.byPkg[features.EffectivePkgPath(fn)]
+	return c != nil && c.followWrappers
 }

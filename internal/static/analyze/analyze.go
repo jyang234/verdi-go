@@ -6,7 +6,10 @@
 package analyze
 
 import (
+	"sort"
 	"strings"
+
+	"golang.org/x/tools/go/packages"
 
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/static/callgraph"
@@ -45,7 +48,15 @@ func Analyze(dir string, opts ...callgraph.Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	prog, err := ssabuild.Build(svc)
+	// Wrapper-descent horizon widening (classify.openapiClients[i].followWrappers): a
+	// declared client package that opted in has its function bodies materialized so the
+	// labeler can later follow its hand-written wrappers. Gated on CONFIG ALONE, not the
+	// --reclaim-openapi CLI flag: the labeler is constructed at the CLI layer AFTER
+	// Analyze, and graph output must stay a pure function of (source, config) — so the
+	// followWrappers hint IS the user's declaration that these packages join the SSA
+	// program horizon, resolved deterministically here. No opted-in hint => nil extras =>
+	// this Build call is byte-identical to the un-widened pipeline (zero behavior change).
+	prog, err := ssabuild.Build(svc, followWrapperExtras(cfg, svc)...)
 	if err != nil {
 		return nil, err
 	}
@@ -140,4 +151,38 @@ func splitHint(s string) (pkgPath, name string) {
 		return s[:i], s[i+1:]
 	}
 	return s, ""
+}
+
+// followWrapperExtras returns the extra initial packages for the wrapper-descent
+// widening: the declared openapi-client packages whose hint sets followWrappers, made
+// buildable (bodies materialized) so the labeler can descend their hand-written
+// wrappers. Package names are TRIMMED to match how openapi.NewLabeler keys its tables
+// (a quoted, space-padded package passes config validation but must resolve to the same
+// path the labeler later looks up), then sorted and de-duplicated for a deterministic
+// result. A hint that does not opt in contributes nothing, so a config with no
+// followWrappers yields nil and the ssabuild.Build call is unchanged. A declared package
+// outside the service's import closure is silently omitted by ExtraInitialPackages — it
+// can never be called by the service, so widening it is meaningless (fail-closed).
+func followWrapperExtras(cfg *config.Config, svc *loader.Service) []*packages.Package {
+	if cfg == nil {
+		return nil
+	}
+	var paths []string
+	seen := map[string]bool{}
+	for _, h := range cfg.Classify.OpenAPIClients {
+		if !h.FollowWrappers {
+			continue
+		}
+		p := strings.TrimSpace(h.Package)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
+	return svc.ExtraInitialPackages(paths)
 }

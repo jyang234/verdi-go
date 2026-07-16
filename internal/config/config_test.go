@@ -159,6 +159,27 @@ classify:
 	if h.Package != "gitlab.com/acme/event-bus/clients/admin" || h.Peer != "event-bus" || h.Spec != "api/event-bus.openapi.yaml" {
 		t.Errorf("openapiClients[0] = %+v", h)
 	}
+	// followWrappers is opt-in: absent means false (feature inert).
+	if h.FollowWrappers {
+		t.Errorf("openapiClients[0].FollowWrappers = true, want false when the key is absent")
+	}
+
+	// followWrappers: true is decoded (the opt-in wrapper-descent knob).
+	const yWrap = `
+classify:
+  openapiClients:
+    - package: gitlab.com/acme/event-bus/clients/admin
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml
+      followWrappers: true
+`
+	cw, err := Load([]byte(yWrap))
+	if err != nil {
+		t.Fatalf("an openapiClients entry with followWrappers must load: %v", err)
+	}
+	if len(cw.Classify.OpenAPIClients) != 1 || !cw.Classify.OpenAPIClients[0].FollowWrappers {
+		t.Errorf("openapiClients[0].FollowWrappers = %+v, want true", cw.Classify.OpenAPIClients)
+	}
 
 	for _, tc := range []struct {
 		name string

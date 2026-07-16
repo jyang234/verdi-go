@@ -208,6 +208,39 @@ func TestNewLabelerTrimsFields(t *testing.T) {
 	}
 }
 
+// FollowWrappers threads the per-client opt-in from the hint onto the built table and
+// reads it back package-scoped: a client that set followWrappers is descendable, one
+// that did not (the default) is not. The threaded field is what graphio's descent path
+// gates on. The method's package resolution over a real *ssa.Function is exercised in
+// graphio (integration); here we pin the threading and the nil no-op paths.
+func TestFollowWrappersOptIn(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "s.yaml"), []byte(eventBusSpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewLabeler([]config.OpenAPIClientHint{
+		{Package: "ex.com/on", Peer: "p", Spec: "s.yaml", FollowWrappers: true},
+		{Package: "ex.com/off", Peer: "p", Spec: "s.yaml"}, // FollowWrappers defaults false
+	}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on := l.byPkg["ex.com/on"]; on == nil || !on.followWrappers {
+		t.Errorf("followWrappers must thread true for the opted-in client: %+v", on)
+	}
+	if off := l.byPkg["ex.com/off"]; off == nil || off.followWrappers {
+		t.Errorf("followWrappers must default false for a client that did not opt in: %+v", off)
+	}
+	// A nil labeler and a nil function both answer false (the byte-identical no-op path).
+	var nilLab *Labeler
+	if nilLab.FollowWrappers(nil) {
+		t.Error("nil labeler FollowWrappers must be false")
+	}
+	if l.FollowWrappers(nil) {
+		t.Error("nil function FollowWrappers must be false")
+	}
+}
+
 func TestNewLabelerNoClientsIsNil(t *testing.T) {
 	l, err := NewLabeler(nil, t.TempDir())
 	if err != nil {
