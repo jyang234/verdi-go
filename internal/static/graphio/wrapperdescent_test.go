@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/ssa/ssautil"
+
 	"github.com/jyang234/golang-code-graph/internal/config"
 	"github.com/jyang234/golang-code-graph/internal/static/analyze"
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
@@ -33,8 +35,10 @@ import (
 //
 // It also pins double-run byte-identity of the whole marshalled graph under the flipped
 // config (the prime directive). A full separate-module wrapper→operation descent (a real
-// wrapper naming an edge via=openapi-client-wrapper, and the ambiguous ≥2 append) needs a
-// new fixture and is deferred to the fixture wave — see the report.
+// wrapper naming an edge via=openapi-client-wrapper, and the ambiguous ≥2 append) is covered
+// by TestWrapperDescentNamesOneOpDisclosesAmbiguousAndZeroAcrossModules below; the
+// incomplete-walk guard (depth cap and bodiless hop) by
+// TestWrapperDescentRefusesToNameIncompleteWalks.
 func TestWrapperDescentInertOnDirectCalls(t *testing.T) {
 	dir := oapiClientFixtureDir()
 	res, err := analyze.Analyze(dir)
@@ -136,6 +140,23 @@ const (
 	wrapDirectEdgeTo    = "boundary:event-bus GET /v1/eventTypeTemplates/{templateId}" // GetTemplateWithResponse, direct
 	wrapAmbiguousSuffix = "; descended 1 declared-package function(s) and found 2 ambiguous operations (event-bus POST /v1/publishers; event-bus POST /v1/subscribers)"
 	wrapZeroFoundSuffix = "; descended 2 declared-package function(s) and found 0 operations" // Warm → probe, N=2
+)
+
+// The incomplete-walk detail suffixes: a truncated (depth-cap) walk and a bodiless-hop walk
+// each refuse to name and disclose WHY. Both are deterministic functions of the fixture — the
+// visited counts (EnsureDeep walks itself + deep1..deep8 = 9 before the cap truncates deep9;
+// EnsureViaLegacy walks only itself before the bodiless hop = 1), the found lists (the ONE
+// directly-reached op each), and the fixed reason clauses — so byte-identity holds. Kept in
+// lockstep with graphio.incompleteWalkDetail; a wording change fails these on the exact match.
+const (
+	legacyPkgPath     = "example.com/wrapclientlib/legacy"
+	wrapDeepCapSuffix = "; descended 9 declared-package function(s) and found 1 operation(s) " +
+		"(event-bus POST /v1/publishers), but the walk is INCOMPLETE so the edge is not named: " +
+		"the descent hit the depth cap of 8, so a deeper wrapper chain is unresolved"
+	wrapLegacyBodilessSuffix = "; descended 1 declared-package function(s) and found 1 operation(s) " +
+		"(event-bus POST /v1/eventTypeTemplates), but the walk is INCOMPLETE so the edge is not named: " +
+		"it dead-ended at bodiless function(s) in the declared package(s) " + legacyPkgPath +
+		", which need followWrappers on their own hint to be descended"
 )
 
 // findDisclosure returns the first UnresolvedSpecOperation blind spot whose Detail names
@@ -412,5 +433,108 @@ func TestFollowWrappersOffDisclosesWrappersWithPreDescentDetail(t *testing.T) {
 	}
 	if !bytes.Equal(b1, b2) {
 		t.Fatal("followWrappers-off graph is not byte-identical across two builds")
+	}
+}
+
+// TestWrapperDescentRefusesToNameIncompleteWalks is the regression for the incomplete-walk
+// naming bug: a wrapper descent that could NOT see its whole subtree — because the depth cap
+// truncated a deeper chain (EnsureDeep) or it dead-ended at a bodiless un-widened hop
+// (EnsureViaLegacy) — must NEVER name the edge from the leftover lower-bound label. Both
+// wrappers reach exactly one operation WITHIN the walk, so the pre-fix naming rule (exactly
+// one label => name) would have NAMED each, inventing a boundary edge for a genuinely
+// two-operation wrapper (EnsureDeep) and for a wrapper whose real target is invisible
+// (EnsureViaLegacy). Post-fix each stays UNNAMED and is disclosed with the honest
+// incomplete-walk detail. It also re-pins the ORIGINAL inventory (still exactly the two named
+// edges and the one wrapper edge) so the two incomplete wrappers add NO boundary edge.
+func TestWrapperDescentRefusesToNameIncompleteWalks(t *testing.T) {
+	dir := wrapClientFixtureDir()
+	res, err := analyze.Analyze(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Premise the bodiless case rests on: the legacy package is DECLARED but not widened (no
+	// followWrappers on its hint), so its functions genuinely have nil Blocks — a bodiless hop
+	// the descent cannot enter. If a future build change widened it, the bodiless branch would
+	// never fire and this test would silently stop testing it, so assert the premise.
+	sawLegacy := false
+	for fn := range ssautil.AllFunctions(res.Program.Prog) {
+		if fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Pkg.Pkg.Path() != legacyPkgPath {
+			continue
+		}
+		sawLegacy = true
+		if fn.Blocks != nil {
+			t.Errorf("legacy function %s has a built body; the bodiless-hop premise no longer holds (is followWrappers set on the legacy hint?)", fn.RelString(nil))
+		}
+	}
+	if !sawLegacy {
+		t.Fatal("no legacy-package function found in the program — the bodiless-hop fixture is not wired in")
+	}
+
+	lab, err := openapi.NewLabeler(res.Config.Classify.OpenAPIClients, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	on, err := Build(res, "", WithOpenAPI(lab))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := on.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g Graph
+	if err := json.Unmarshal(b, &g); err != nil {
+		t.Fatalf("decode built graph: %v", err)
+	}
+
+	// (a) The ORIGINAL inventory is intact: still exactly two boundary edges and one
+	// via=openapi-client-wrapper edge — the two incomplete-walk wrappers add NO named edge.
+	boundaryEdges, wrapperEdges := 0, 0
+	for _, e := range g.Edges {
+		if strings.HasPrefix(e.To, "boundary:") {
+			boundaryEdges++
+		}
+		if e.Via == openapi.ViaWrapper {
+			wrapperEdges++
+		}
+	}
+	if boundaryEdges != 2 {
+		t.Errorf("want exactly 2 boundary edges (the incomplete wrappers add none), got %d", boundaryEdges)
+	}
+	if wrapperEdges != 1 {
+		t.Errorf("want exactly 1 via=%s edge, got %d", openapi.ViaWrapper, wrapperEdges)
+	}
+	// Neither incomplete wrapper's would-be operation was named as an edge: the publishers and
+	// subscribers routes appear ONLY in the EnsureParticipant/EnsureDeep disclosure TEXT, never
+	// as a boundary edge From the handler.
+	for _, e := range g.Edges {
+		if strings.Contains(e.To, "/v1/subscribers") || strings.Contains(e.To, "/v1/publishers") {
+			t.Errorf("an incomplete wrapper's operation leaked into a named edge: %+v", e)
+		}
+	}
+
+	// (b) The depth-cap wrapper (EnsureDeep) is disclosed, NOT named, with the exact suffix —
+	// and the directly-reached op (POST /v1/publishers) appears in its found list, proving the
+	// truncation lost only the deep op while the disclosure still surfaces what it did see.
+	deep := findDisclosure(g.BlindSpots, "Registrar).EnsureDeep")
+	if deep == nil {
+		t.Fatal("missing the depth-cap EnsureDeep disclosure")
+	}
+	if !strings.HasSuffix(deep.Detail, wrapDeepCapSuffix) {
+		t.Errorf("depth-cap disclosure detail = %q\nwant it to end with %q", deep.Detail, wrapDeepCapSuffix)
+	}
+
+	// (c) The bodiless-hop wrapper (EnsureViaLegacy) is disclosed, NOT named, with the exact
+	// suffix — and it names the legacy package and the actionable followWrappers hint.
+	legacyDisc := findDisclosure(g.BlindSpots, "Registrar).EnsureViaLegacy")
+	if legacyDisc == nil {
+		t.Fatal("missing the bodiless-hop EnsureViaLegacy disclosure")
+	}
+	if !strings.HasSuffix(legacyDisc.Detail, wrapLegacyBodilessSuffix) {
+		t.Errorf("bodiless-hop disclosure detail = %q\nwant it to end with %q", legacyDisc.Detail, wrapLegacyBodilessSuffix)
+	}
+	if !strings.Contains(legacyDisc.Detail, legacyPkgPath) || !strings.Contains(legacyDisc.Detail, "followWrappers") {
+		t.Errorf("bodiless-hop disclosure must name the legacy package and the followWrappers hint: %q", legacyDisc.Detail)
 	}
 }

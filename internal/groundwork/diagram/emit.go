@@ -1,17 +1,39 @@
 package diagram
 
 import (
+	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // escapeLabel makes a label safe inside mermaid double quotes. The ONE escape is
 // an embedded `"` → `&quot;` (mermaid's entity form): a deterministic total
 // function, so a label is never rejected for its content and never renders an
-// unbalanced quote. No other character is touched — mermaid tolerates `|`, `(`,
-// `[`, etc. inside a quoted label.
+// unbalanced quote. No other PRINTABLE character is touched — mermaid tolerates
+// `|`, `(`, `[`, etc. inside a quoted label (the upstream spec's own field-validated
+// exemplar carries a `|` inside a quoted edge label). Control characters are the one
+// thing mermaid has no in-quote form for — a raw newline/carriage-return/tab breaks
+// the quoted label into broken multi-line output — so they are REFUSED upstream by
+// controlCharErr before emission, never reached here.
 func escapeLabel(s string) string {
 	return strings.ReplaceAll(s, `"`, "&quot;")
+}
+
+// controlCharErr reports the first control character (C0, DEL, or C1 — unicode.IsControl)
+// in a human-text field bound for emission, or nil when the text is emission-safe. Mermaid
+// has no quoted-label escape for a control character, so a newline/carriage-return/tab would
+// emit BROKEN multi-line mermaid — a silently-wrong render against the package's refuse-
+// don't-guess posture (tenet 2). Refuse it instead, naming the field and id so the author can
+// find it. It is operational (exit 2), never a Verdict. Only controls are rejected: every
+// printable character (including `|`) stays legal, so this narrows nothing a valid label can say.
+func controlCharErr(kind, id, field, s string) error {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s %q %s contains a control character (U+%04X) that mermaid cannot render inside a quoted label — remove it", kind, id, field, r)
+		}
+	}
+	return nil
 }
 
 // overlayNodeDecl renders an overlay node's one-and-only bracket declaration per

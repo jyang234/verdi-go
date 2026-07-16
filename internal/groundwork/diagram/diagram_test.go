@@ -433,6 +433,65 @@ func TestLabelEscaping(t *testing.T) {
 	}
 }
 
+// TestControlCharRefused pins the fail-closed control-character guard: a raw newline / CR /
+// tab (or any C0/C1 control) in a human-text field would emit BROKEN multi-line mermaid,
+// which the package refuses rather than render. Each of the four emitted human-text fields
+// is checked, and the error names the offending id/field. A pipe and a non-control unicode
+// rune stay legal — only controls are rejected, so nothing a valid label can say is narrowed.
+func TestControlCharRefused(t *testing.T) {
+	mustRefuse := func(name, wantNamed string, m *Manifest) {
+		t.Helper()
+		_, err := Generate(m, oneGraph(testGraph()))
+		if err == nil {
+			t.Errorf("%s: expected a refusal, got nil", name)
+			return
+		}
+		if !strings.Contains(err.Error(), "control character") || !strings.Contains(err.Error(), wantNamed) {
+			t.Errorf("%s: error must name %q and the cause: %v", name, wantNamed, err)
+		}
+	}
+
+	// (a) newline in a node label → refused, naming the node id.
+	mustRefuse("node label newline", `"A"`, &Manifest{
+		ID: "X", Direction: "LR",
+		Nodes: []ManifestNode{node("A", "handler.App).Create", "line1\nline2")},
+	})
+
+	// (b) tab in a subgraph title → refused, naming the subgraph id.
+	mustRefuse("subgraph title tab", `"SG"`, &Manifest{
+		ID: "X", Direction: "LR",
+		Nodes:     []ManifestNode{node("A", "handler.App).Create", "Create")},
+		Subgraphs: []Subgraph{{ID: "SG", Title: "tab\there", Nodes: []string{"A"}}},
+	})
+
+	// (c) carriage return in an overlay edge label → refused, naming the edge endpoints.
+	mustRefuse("overlay edge label CR", "A -.-> OV", &Manifest{
+		ID: "X", Direction: "LR",
+		Nodes: []ManifestNode{node("A", "handler.App).Create", "Create")},
+		Overlays: Overlays{
+			Nodes: []OverlayNode{{ID: "OV", Label: "concept"}},
+			Edges: []OverlayEdge{{From: "A", To: "OV", Label: "car\rriage"}},
+		},
+	})
+
+	// (d) NUL (a C0 control) in an overlay node label → refused, naming the overlay node id.
+	mustRefuse("overlay node label NUL", `"OV"`, &Manifest{
+		ID: "X", Direction: "LR",
+		Nodes:    []ManifestNode{node("A", "handler.App).Create", "Create")},
+		Overlays: Overlays{Nodes: []OverlayNode{{ID: "OV", Label: "bad\x00null"}}},
+	})
+
+	// A pipe and a non-control unicode rune are PRINTABLE and stay legal (the spec's own
+	// field-validated exemplar carries `|` inside a quoted label): only controls are refused.
+	okM := &Manifest{
+		ID: "X", Direction: "LR",
+		Nodes: []ManifestNode{node("A", "handler.App).Create", "a | b — café ✓")},
+	}
+	if _, err := Generate(okM, oneGraph(testGraph())); err != nil {
+		t.Errorf("a pipe and unicode in a label must stay legal: %v", err)
+	}
+}
+
 // TestStampsLine pins the provenance stamp: the sorted-unique non-empty tool
 // values of the input graphs, and the "unstamped" fallback when none carry one.
 func TestStampsLine(t *testing.T) {

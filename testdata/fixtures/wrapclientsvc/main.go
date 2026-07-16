@@ -10,7 +10,10 @@
 // wrapper (named), a two-operation wrapper (ambiguous — disclosed), a zero-operation
 // wrapper (disclosed), and a DIRECT generated-operation call (plain via=openapi-client,
 // the path descent must leave inert). The two constructor calls are non-operations, each
-// a zero-operation disclosure.
+// a zero-operation disclosure. Two more wrappers exercise the INCOMPLETE-walk guard: one
+// whose second operation sits past the depth cap (a deep helper chain) and one that hands
+// off to a declared-but-not-widened bodiless package — both stay disclosed and are NEVER
+// named, so a truncated walk can never NAME a genuinely-ambiguous wrapper.
 package main
 
 import (
@@ -53,4 +56,14 @@ func ensure(w http.ResponseWriter, r *http.Request) {
 	// /v1/eventTypeTemplates/{templateId}, plain via=openapi-client (descent is gated on
 	// a no-name-match, so a direct hit never enters it).
 	_, _ = client.GetTemplateWithResponse(ctx, "tmpl-1")
+
+	// (e) A wrapper reaching a second operation only past the descent depth cap: the
+	// truncated walk is INCOMPLETE, so it stays disclosed (never named) with the depth-cap
+	// outcome — the guard against a truncation NAMING a genuinely-ambiguous wrapper.
+	_ = reg.EnsureDeep(ctx)
+
+	// (f) A wrapper handing off to a declared-but-not-widened (bodiless) package: the
+	// descent dead-ends at the bodiless hop, an INCOMPLETE walk that stays disclosed with
+	// the bodiless-package outcome naming which package needs followWrappers.
+	_ = reg.EnsureViaLegacy(ctx)
 }

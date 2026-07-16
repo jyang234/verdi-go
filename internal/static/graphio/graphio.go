@@ -1189,13 +1189,15 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 			oapi.InDeclaredPackage(callee) && oapi.FollowWrappers(callee) {
 			// The direct callee is a hand-written wrapper in a declared client package (it
 			// matched no generated-name shape) whose package opted into descent. Descend
-			// the wrapper's declared-package call tree; a SINGLE operation reached names
-			// this edge, tagged via=openapi-client-wrapper (distinct from the direct via so
-			// a descended label stays auditable separately). Zero or multiple leaves
-			// oapiLabel "" — the edge stays unnamed and the disclosure channel
-			// (openapiBlindSpots, running the SAME descendWrapper) handles it. Never guess.
-			if _, labels := descendWrapper(oapi, e.Callee); len(labels) == 1 {
-				oapiLabel = labels[0]
+			// the wrapper's declared-package call tree; a COMPLETE walk that reaches a SINGLE
+			// operation names this edge, tagged via=openapi-client-wrapper (distinct from the
+			// direct via so a descended label stays auditable separately). Zero, multiple, or
+			// an INCOMPLETE walk (depth-cap truncation or a bodiless un-widened hop, whose
+			// label set is only a lower bound) leaves oapiLabel "" — the edge stays unnamed
+			// and the disclosure channel (openapiBlindSpots, running the SAME descendWrapper)
+			// handles it. Never guess, and never name a walk that could not finish.
+			if r := descendWrapper(oapi, e.Callee); r.complete() && len(r.labels) == 1 {
+				oapiLabel = r.labels[0]
 				oapiVia = openapi.ViaWrapper
 			}
 		}

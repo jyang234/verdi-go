@@ -12,6 +12,8 @@ package eventbus
 import (
 	"context"
 	"net/http"
+
+	"example.com/wrapclientlib/legacy"
 )
 
 // Registrar is a hand-written wrapper over the generated ClientWithResponses. It holds
@@ -78,4 +80,49 @@ func (r *Registrar) probe(ctx context.Context) error {
 		return err
 	}
 	return resp.Body.Close()
+}
+
+// EnsureDeep reaches TWO genuine operations but only ONE within the descent's depth cap:
+// CreatePublisher DIRECTLY (BFS depth 1) and CreateSubscriber only through a chain of nine
+// unexported helper hops (deep1..deep9), one hop past the cap of 8. RTA records the whole
+// chain, so CreateSubscriber is truly reachable and an honest labeler must treat EnsureDeep
+// as AMBIGUOUS (2 ops). The wrapper descent, however, TRUNCATES at the cap: it sees only
+// CreatePublisher, so — before the incomplete-walk guard — the single leftover label would
+// be NAMED, a confidently-wrong silent edge. With the guard the truncated walk is INCOMPLETE,
+// so the edge is NOT named and the call stays disclosed with the depth-cap outcome appended.
+func (r *Registrar) EnsureDeep(ctx context.Context) error {
+	if _, err := r.client.CreatePublisherWithResponse(ctx); err != nil {
+		return err
+	}
+	return r.deep1(ctx)
+}
+
+// deep1..deep9 are the unexported helper hops between EnsureDeep and the second operation.
+// The descent enqueues one per BFS depth; deep9 (which would sit at depth 9) is one past
+// the cap of 8, so CreateSubscriber behind it is never reached by the walk.
+func (r *Registrar) deep1(ctx context.Context) error { return r.deep2(ctx) }
+func (r *Registrar) deep2(ctx context.Context) error { return r.deep3(ctx) }
+func (r *Registrar) deep3(ctx context.Context) error { return r.deep4(ctx) }
+func (r *Registrar) deep4(ctx context.Context) error { return r.deep5(ctx) }
+func (r *Registrar) deep5(ctx context.Context) error { return r.deep6(ctx) }
+func (r *Registrar) deep6(ctx context.Context) error { return r.deep7(ctx) }
+func (r *Registrar) deep7(ctx context.Context) error { return r.deep8(ctx) }
+func (r *Registrar) deep8(ctx context.Context) error { return r.deep9(ctx) }
+func (r *Registrar) deep9(ctx context.Context) error {
+	_, err := r.client.CreateSubscriberWithResponse(ctx)
+	return err
+}
+
+// EnsureViaLegacy reaches ONE operation DIRECTLY (CreateTemplate) and then hands off to a
+// wrapper in the separate legacy package — declared as an OpenAPI client but WITHOUT
+// followWrappers, so its bodies are never widened. legacy.Prime is therefore a bodiless
+// declared-package hop the descent cannot enter: an operation could hide behind it, so the
+// walk is INCOMPLETE. As with EnsureDeep, the single leftover label (CreateTemplate) must
+// NOT be named; the call stays disclosed, the detail naming the legacy package as the one to
+// opt into followWrappers.
+func (r *Registrar) EnsureViaLegacy(ctx context.Context) error {
+	if _, err := r.client.CreateTemplateWithResponse(ctx); err != nil {
+		return err
+	}
+	return legacy.Prime(ctx, r.client.Server)
 }

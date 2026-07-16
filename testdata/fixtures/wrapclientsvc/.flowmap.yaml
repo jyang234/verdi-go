@@ -17,3 +17,11 @@ classify:
       peer: event-bus
       spec: api/event-bus.openapi.yaml
       followWrappers: true
+    # A SECOND declared client in the same module, sharing the spec but declared WITHOUT
+    # followWrappers: it is a bodiless external declaration (never widened). eventbus's
+    # EnsureViaLegacy calls into it, so the wrapper descent dead-ends at a bodiless hop —
+    # an INCOMPLETE walk the labeler must disclose (naming this package) rather than name.
+    # Two hints may share a spec file; only a duplicate PACKAGE is a load error.
+    - package: example.com/wrapclientlib/legacy
+      peer: event-bus
+      spec: api/event-bus.openapi.yaml

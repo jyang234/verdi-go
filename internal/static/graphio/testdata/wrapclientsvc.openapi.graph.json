@@ -10,8 +10,8 @@
       "tier": 1,
       "package": "example.com/wrapclientsvc",
       "file": "main.go",
-      "line": 31,
-      "end_line": 56
+      "line": 34,
+      "end_line": 69
     },
     {
       "fqn": "example.com/wrapclientsvc.main",
@@ -19,8 +19,8 @@
       "tier": 1,
       "package": "example.com/wrapclientsvc",
       "file": "main.go",
-      "line": 22,
-      "end_line": 26
+      "line": 25,
+      "end_line": 29
     }
   ],
   "edges": [
@@ -43,7 +43,17 @@
     {
       "kind": "UnresolvedSpecOperation",
       "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureDeep in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 9 declared-package function(s) and found 1 operation(s) (event-bus POST /v1/publishers), but the walk is INCOMPLETE so the edge is not named: the descent hit the depth cap of 8, so a deeper wrapper chain is unresolved"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
       "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureParticipant in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 2 ambiguous operations (event-bus POST /v1/publishers; event-bus POST /v1/subscribers)"
+    },
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/wrapclientsvc.ensure",
+      "detail": "call to (*example.com/wrapclientlib/eventbus.Registrar).EnsureViaLegacy in declared openapi-client package example.com/wrapclientlib/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation); descended 1 declared-package function(s) and found 1 operation(s) (event-bus POST /v1/eventTypeTemplates), but the walk is INCOMPLETE so the edge is not named: it dead-ended at bodiless function(s) in the declared package(s) example.com/wrapclientlib/legacy, which need followWrappers on their own hint to be descended"
     },
     {
       "kind": "UnresolvedSpecOperation",

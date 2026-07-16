@@ -77,7 +77,9 @@
 // guessed: an unknown manifest key (DisallowUnknownFields), trailing data after
 // the JSON value, an unresolved/ambiguous/regex `fn`, an id that is not a mermaid
 // identifier, a duplicate id, a dangling subgraph/overlay reference, an unknown or
-// unreferenced logical graph, an empty direction — all are errors. Only two error
+// unreferenced logical graph, an empty direction, a control character in any
+// human-text field (node/overlay label, subgraph title, overlay edge label —
+// mermaid cannot render one inside a quoted label) — all are errors. Only two error
 // classes are VERDICTS (Verdict, mapped to groundwork's exit 1): the overlay guard
 // tripping and a `--check` drift. Everything else is operational (exit 2).
 package diagram
@@ -243,6 +245,9 @@ func Generate(m *Manifest, graphs map[string]*graph.Graph) (string, error) {
 		if n.Label == "" {
 			return "", fmt.Errorf("manifest node %q requires a non-empty label", n.ID)
 		}
+		if err := controlCharErr("manifest node", n.ID, "label", n.Label); err != nil {
+			return "", err
+		}
 		gm, ok := models[n.Graph]
 		if !ok {
 			return "", fmt.Errorf("manifest node %q binds unknown logical graph %q (name a graph on the CLI as %s=<graph.json>)", n.ID, n.Graph, n.Graph)
@@ -285,6 +290,9 @@ func Generate(m *Manifest, graphs map[string]*graph.Graph) (string, error) {
 		if err := ids.add(on.ID, "overlay node"); err != nil {
 			return "", err
 		}
+		if err := controlCharErr("overlay node", on.ID, "label", on.Label); err != nil {
+			return "", err
+		}
 		d, err := overlayNodeDecl(on)
 		if err != nil {
 			return "", err
@@ -297,6 +305,9 @@ func Generate(m *Manifest, graphs map[string]*graph.Graph) (string, error) {
 	sgOf := make([]string, len(m.Nodes)) // subgraph id per node index, "" if none
 	for _, sg := range m.Subgraphs {
 		if err := ids.add(sg.ID, "subgraph"); err != nil {
+			return "", err
+		}
+		if err := controlCharErr("subgraph", sg.ID, "title", sg.Title); err != nil {
 			return "", err
 		}
 		for _, member := range sg.Nodes {
@@ -322,6 +333,9 @@ func Generate(m *Manifest, graphs map[string]*graph.Graph) (string, error) {
 		}
 		if _, ok := decl[oe.To]; !ok {
 			return "", fmt.Errorf("overlay edge endpoint %q (to) is not a manifest node or overlay node id", oe.To)
+		}
+		if err := controlCharErr("overlay edge", oe.From+" -.-> "+oe.To, "label", oe.Label); err != nil {
+			return "", err
 		}
 	}
 

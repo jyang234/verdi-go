@@ -365,25 +365,43 @@ still stays a pure function of `(source, config)`:
    bodiless external declaration with nothing to descend into. This alone can
    already shift RTA-resolved blind-spot counts (see the caveat below); the
    package's functions are still not first-party, so they never render as nodes
-   in the graph.
+   in the graph. The widened horizon is shared by **every** analyze consumer —
+   taint, coverage, boundary, frontier, not just the labeler — so enabling
+   `followWrappers` can shift those outputs too; the shifts are sound (they trace
+   the client's real bodies now in scope) but worth expecting.
 2. **Descends at the labeling seam** — this half only runs when the build also
    passes `--reclaim-openapi`. A first-party call to a declared-package callee
    matching no generated-operation shape is walked breadth-first through
    declared-package functions only, capped at depth 8 (real wrapper layering is
    one or two hops, never eight), deterministically (sorted out-edges, FIFO
-   queue). Exactly one distinct spec operation reached names the edge
-   `boundary:<peer> <METHOD> <template>`, tagged `via=openapi-client-wrapper` —
-   distinct from `openapi-client`, so a descended label stays separately
-   auditable. Zero or multiple candidates leave the call an
+   queue). A **complete** walk that reaches exactly one distinct spec operation
+   names the edge `boundary:<peer> <METHOD> <template>`, tagged
+   `via=openapi-client-wrapper` — distinct from `openapi-client`, so a descended
+   label stays separately auditable. Zero or multiple candidates leave the call an
    `UnresolvedSpecOperation` blind spot — **never a guess** — with the outcome
    appended to `Detail`: `"; descended N declared-package function(s) and found 0
    operations"` or `"; descended N declared-package function(s) and found K
    ambiguous operations (op1; op2)"`.
 
+   An **incomplete** walk — one the depth cap truncated, or that dead-ended at a
+   bodiless un-widened hop (a separate-module package in the chain without its own
+   `followWrappers`) — **never names**, even at exactly one operation: its label set
+   is only a lower bound (an operation may hide past the cut), so naming it would be
+   a confidently-wrong silent edge. It stays an `UnresolvedSpecOperation`, always
+   disclosed, with the honest incomplete detail: `"; descended N declared-package
+   function(s) and found K operation(s) (op1; op2), but the walk is INCOMPLETE so the
+   edge is not named: <reason>"` — the reason naming the depth cap (with its value)
+   and/or the bodiless package(s) that need `followWrappers` on their own hint.
+
 Client-internal calls are never relabeled — only a call from *outside* the
 declared package is a descent candidate. Descent never crosses into an undeclared
-package; if a wrapper chain spans two packages, declare both.
-`testdata/fixtures/wrapclientsvc` is a complete working example
+package; if a wrapper chain spans two packages, declare both. For a separate-**module**
+chain a bare declaration is not enough: it only lets descent recover an operation the
+built wrapper calls **directly** — every separate-module package *in the chain* also
+needs `followWrappers` on its **own** hint, or its bodies stay un-widened and the walk
+dead-ends at its bodiless functions. That dead-end is fail-closed: the incomplete walk
+refuses to name the edge, and the `UnresolvedSpecOperation` detail names which package
+to opt in. `testdata/fixtures/wrapclientsvc` is a complete working example
 (`testdata/fixtures/oapiclientsvc` is the direct-call case, with `followWrappers`
 unset).
 

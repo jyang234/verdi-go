@@ -9,12 +9,16 @@ flowchart LR
     blind_UnresolvedSpecOperation1(["⊥ UnresolvedSpecOperation<br/>blind spot"]):::blind
     blind_UnresolvedSpecOperation2(["⊥ UnresolvedSpecOperation<br/>blind spot"]):::blind
     blind_UnresolvedSpecOperation3(["⊥ UnresolvedSpecOperation<br/>blind spot"]):::blind
+    blind_UnresolvedSpecOperation4(["⊥ UnresolvedSpecOperation<br/>blind spot"]):::blind
+    blind_UnresolvedSpecOperation5(["⊥ UnresolvedSpecOperation<br/>blind spot"]):::blind
     wrapclientsvc_ensure -->|via openapi-client| external_event_bus_GET__v1_eventTypeTemplates__templateId_
     wrapclientsvc_ensure -->|via openapi-client-wrapper| external_event_bus_POST__v1_eventTypeTemplates
     wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation
     wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation1
     wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation2
     wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation3
+    wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation4
+    wrapclientsvc_ensure -. blind .-> blind_UnresolvedSpecOperation5
     classDef fallible stroke:#c44,stroke-width:2px
     classDef db fill:#eef,stroke:#66a
     classDef bus fill:#efe,stroke:#5a5
