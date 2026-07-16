@@ -177,7 +177,10 @@ func Extract(res *analyze.Result) *Contract {
 	// Only the boundary subset gates; the graph-completeness disclosures (reflect,
 	// fan-out, unsafe/cgo/linkname) ride the non-gated graph view, so an internal
 	// refactor never churns the contract (static-extractor §7).
-	c.BlindSpots = blindspots.Boundary(blindspots.Detect(res, hints))
+	// nil openapi predicate: the openapi labeler is opt-in and non-gated, so the gated
+	// boundary contract never suppresses an ExternalBoundaryCall for it (and the gated
+	// subset excludes EBC anyway — Boundary filters to NonConstantBoundaryArg/UnresolvedDispatch).
+	c.BlindSpots = blindspots.Boundary(blindspots.Detect(res, hints, nil))
 	c.normalize()
 	return c
 }

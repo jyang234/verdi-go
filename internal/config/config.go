@@ -383,6 +383,35 @@ type ClassifyHints struct {
 	ObjectStore []string `yaml:"objectStore"`
 	Cache       []string `yaml:"cache"`
 	RPC         []string `yaml:"rpc"`
+
+	// OpenAPIClients declares outbound calls made through spec-generated clients
+	// (oapi-codegen and comparable generators), which the constant-fold HTTP labeler
+	// cannot name because the route is assembled dynamically (fmt.Sprintf over path
+	// params, no compile-time-constant argument). Each entry names a generated-client
+	// import path, the peer token to label its boundary edges with, and the OpenAPI
+	// document (path RELATIVE to this config file) that determines each operationId's
+	// method and path template. It is opt-in behind --reclaim-openapi and is ASSERTED
+	// provenance (like entrypoints.callbacks): the resulting boundary edges carry
+	// via=openapi-client so a spec-derived label is never laundered into a discovered
+	// constant. See internal/static/openapi.
+	OpenAPIClients []OpenAPIClientHint `yaml:"openapiClients,omitempty"`
+}
+
+// OpenAPIClientHint declares one spec-generated outbound client for the opt-in
+// OpenAPI labeler (--reclaim-openapi). Package is the generated-client import path
+// whose operation functions (oapi-codegen's <OperationId>[WithResponse],
+// <OperationId>WithBody[WithResponse], New<OperationId>Request[WithBody]) name the
+// call sites to label; Peer is the peer token stamped into the boundary label
+// (boundary:<peer> <METHOD> <template>); Spec is the OpenAPI document path, resolved
+// RELATIVE to the .flowmap.yaml directory, whose operationId → (method, path
+// template) table supplies the label. All three are required (validated at load); the
+// spec file's existence and parseability are checked when the labeler is built, so a
+// missing/unparseable spec fails the run there with the config entry named, never a
+// silent skip.
+type OpenAPIClientHint struct {
+	Package string `yaml:"package"`
+	Peer    string `yaml:"peer"`
+	Spec    string `yaml:"spec"`
 }
 
 // EntrypointHints declares the entry points root discovery cannot reach by
@@ -632,6 +661,23 @@ func (c *Config) validate() error {
 		}
 		if strings.TrimSpace(a.Note) == "" {
 			return fmt.Errorf("flowmap config: static.annotations[%d] (%s): note is required (the context)", i, a.Site)
+		}
+	}
+	// An OpenAPI client hint must name all three fields: the generated-client package
+	// to label, the peer token to label its edges with, and the spec that supplies the
+	// operation table. A blank field is a silently-disabled hint (the author meant to
+	// label SOME package's calls), so fail closed at load. The spec file's existence
+	// and parseability are NOT checked here (config has no directory context) — that is
+	// the labeler-build check (--reclaim-openapi), which names this same entry.
+	for i, h := range c.Classify.OpenAPIClients {
+		if strings.TrimSpace(h.Package) == "" {
+			return fmt.Errorf("flowmap config: classify.openapiClients[%d]: package is required (the generated-client import path)", i)
+		}
+		if strings.TrimSpace(h.Peer) == "" {
+			return fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): peer is required (the boundary-label peer token)", i, h.Package)
+		}
+		if strings.TrimSpace(h.Spec) == "" {
+			return fmt.Errorf("flowmap config: classify.openapiClients[%d] (%s): spec is required (the OpenAPI document path, relative to the config file)", i, h.Package)
 		}
 	}
 	// A declared entrypoint anchors on a specific function, so — like an obligation

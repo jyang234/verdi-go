@@ -19,7 +19,7 @@ func TestDetectNonConstantPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 
 	var nonConst int
 	for _, b := range bs {
@@ -43,8 +43,8 @@ func TestDetectDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	hints := features.NewHintSet(res.Config)
-	a := blindspots.Detect(res, hints)
-	b := blindspots.Detect(res, hints)
+	a := blindspots.Detect(res, hints, nil)
+	b := blindspots.Detect(res, hints, nil)
 	if !reflect.DeepEqual(a, b) {
 		t.Errorf("blind-spot detection not deterministic:\n%+v\n%+v", a, b)
 	}
@@ -68,7 +68,7 @@ func TestDetectEmitsNoDeclaredKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := blindspots.Detect(res, features.NewHintSet(res.Config))
+	got := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 	if len(got) == 0 {
 		t.Fatal("Detect produced no blind spots over the fixture; the disjointness check would pass vacuously")
 	}
@@ -81,7 +81,7 @@ func TestDetectEmitsNoDeclaredKind(t *testing.T) {
 
 func TestKindBoundaryClassification(t *testing.T) {
 	gated := []blindspots.Kind{blindspots.NonConstantBoundaryArg, blindspots.UnresolvedDispatch}
-	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall, blindspots.ConcurrentDispatch, blindspots.ExternalBoundaryCall}
+	nonGated := []blindspots.Kind{blindspots.Reflect, blindspots.HighFanOut, blindspots.Unsafe, blindspots.Cgo, blindspots.Linkname, blindspots.UnresolvedCall, blindspots.ConcurrentDispatch, blindspots.ExternalBoundaryCall, blindspots.UnresolvedSpecOperation}
 	for _, k := range gated {
 		if !k.Boundary() {
 			t.Errorf("%q should be a gated boundary blind spot", k)
@@ -90,6 +90,22 @@ func TestKindBoundaryClassification(t *testing.T) {
 	for _, k := range nonGated {
 		if k.Boundary() {
 			t.Errorf("%q is a graph-completeness disclosure and must not gate", k)
+		}
+	}
+}
+
+// TestDisclosureOnlyFrontierClassification pins the disclosure-only partition: a kind
+// that names a callee still present in the graph (ExternalBoundaryCall's known external
+// leaf; UnresolvedSpecOperation's un-named-but-resolved client call) must NOT act as a
+// reachability/severance frontier, so a must_not_reach proof over it stays unchanged.
+func TestDisclosureOnlyFrontierClassification(t *testing.T) {
+	disclosureOnly := map[blindspots.Kind]bool{
+		blindspots.ExternalBoundaryCall:    true,
+		blindspots.UnresolvedSpecOperation: true,
+	}
+	for _, k := range blindspots.Kinds() {
+		if got, want := k.IsDisclosureOnlyFrontier(), disclosureOnly[k]; got != want {
+			t.Errorf("IsDisclosureOnlyFrontier(%q) = %v, want %v", k, got, want)
 		}
 	}
 }
@@ -127,7 +143,7 @@ func TestDetectGraphCompletenessDisclosures(t *testing.T) {
 		"main.go":          highFanOutMain(10),
 		"danger/danger.go": "package danger\n\nimport _ \"unsafe\"\n\n//go:linkname helper\nfunc helper() {}\n",
 	})
-	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 
 	count := map[blindspots.Kind]int{}
 	for _, b := range bs {
@@ -181,7 +197,7 @@ func main() {
 		"go.mod":  "module example.com/m\n\ngo 1.24\n",
 		"main.go": src,
 	})
-	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 
 	var sites []string
 	for _, b := range bs {
@@ -238,7 +254,7 @@ func main() {
 		"go.mod":  "module example.com/m\n\ngo 1.24\n",
 		"main.go": src,
 	})
-	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 
 	var cancelSpot, genuineSpot *blindspots.BlindSpot
 	for i := range bs {
@@ -299,7 +315,7 @@ func main() {
 	})
 	hints := features.NewHintSet(res.Config)
 
-	first := blindspots.Detect(res, hints)
+	first := blindspots.Detect(res, hints, nil)
 	var unresolved int
 	for _, b := range first {
 		if b.Kind == blindspots.UnresolvedCall {
@@ -311,7 +327,7 @@ func main() {
 	}
 	// Repeat: the manifest must be identical every run (order and content).
 	for i := 0; i < 8; i++ {
-		if got := blindspots.Detect(res, hints); !reflect.DeepEqual(first, got) {
+		if got := blindspots.Detect(res, hints, nil); !reflect.DeepEqual(first, got) {
 			t.Fatalf("UnresolvedCall detection not deterministic on run %d:\n%+v\n%+v", i, first, got)
 		}
 	}
@@ -344,7 +360,7 @@ func main() {
 		"main.go": src,
 	})
 	hints := features.NewHintSet(res.Config)
-	bs := blindspots.Detect(res, hints)
+	bs := blindspots.Detect(res, hints, nil)
 
 	var concurrent, unresolved []string
 	for _, b := range bs {
@@ -372,7 +388,7 @@ func main() {
 	}
 	// Byte-stable across runs.
 	for i := 0; i < 8; i++ {
-		if got := blindspots.Detect(res, hints); !reflect.DeepEqual(bs, got) {
+		if got := blindspots.Detect(res, hints, nil); !reflect.DeepEqual(bs, got) {
 			t.Fatalf("ConcurrentDispatch detection not deterministic on run %d", i)
 		}
 	}
@@ -391,7 +407,7 @@ func TestDetectExternalBoundaryCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bs := blindspots.Detect(res, features.NewHintSet(res.Config))
+	bs := blindspots.Detect(res, features.NewHintSet(res.Config), nil)
 
 	var sawErrgroup, sawOTel bool
 	for _, b := range bs {
@@ -436,7 +452,7 @@ func TestExternalBoundaryExemptSuppresses(t *testing.T) {
 	}
 
 	count := func(hints *features.HintSet) (ebc int, other int) {
-		for _, b := range blindspots.Detect(res, hints) {
+		for _, b := range blindspots.Detect(res, hints, nil) {
 			if b.Kind == blindspots.ExternalBoundaryCall {
 				ebc++
 			} else {
@@ -464,7 +480,7 @@ func TestExternalBoundaryExemptSuppresses(t *testing.T) {
 	if exOther != baseOther {
 		t.Errorf("exempt list must not change non-EBC disclosures: base=%d exempt=%d", baseOther, exOther)
 	}
-	for _, b := range blindspots.Detect(res, features.NewHintSet(&cfg)) {
+	for _, b := range blindspots.Detect(res, features.NewHintSet(&cfg), nil) {
 		if b.Kind == blindspots.ExternalBoundaryCall && strings.Contains(b.Detail, "golang.org/x/sync") {
 			t.Errorf("golang.org/x/sync EBC should be suppressed, still present: %+v", b)
 		}
@@ -486,7 +502,7 @@ func TestExternalBoundaryCallSeverityTier(t *testing.T) {
 
 	ebcs := func(hints *features.HintSet) []blindspots.BlindSpot {
 		var out []blindspots.BlindSpot
-		for _, b := range blindspots.Detect(res, hints) {
+		for _, b := range blindspots.Detect(res, hints, nil) {
 			if b.Kind == blindspots.ExternalBoundaryCall {
 				out = append(out, b)
 			}
@@ -540,7 +556,7 @@ func TestExternalPackageStructured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, b := range blindspots.Detect(res, features.NewHintSet(res.Config)) {
+	for _, b := range blindspots.Detect(res, features.NewHintSet(res.Config), nil) {
 		if b.Kind != blindspots.ExternalBoundaryCall {
 			if b.Package != "" {
 				t.Errorf("%s blind spot must carry no Package, got %q", b.Kind, b.Package)
@@ -601,7 +617,7 @@ func TestHighFanOutThresholdConfigurable(t *testing.T) {
 		".flowmap.yaml": "static:\n  highFanOutThreshold: 20\n",
 		"main.go":       highFanOutMain(10), // 10 callees < 20 threshold
 	})
-	for _, b := range blindspots.Detect(res, features.NewHintSet(res.Config)) {
+	for _, b := range blindspots.Detect(res, features.NewHintSet(res.Config), nil) {
 		if b.Kind == blindspots.HighFanOut {
 			t.Errorf("fan-out of 10 should be under the configured threshold of 20, got %+v", b)
 		}

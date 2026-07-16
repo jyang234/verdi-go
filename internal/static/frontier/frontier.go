@@ -488,15 +488,16 @@ func blindSpotBin(kind string) (Bin, bool) {
 		string(blindspots.Cgo), string(blindspots.Linkname),
 		string(blindspots.UnresolvedDispatch), string(blindspots.NonConstantBoundaryArg),
 		string(blindspots.ImpeachmentSeam), string(blindspots.UnresolvedCall),
-		string(blindspots.ConcurrentDispatch), string(blindspots.ExternalBoundaryCall):
+		string(blindspots.ConcurrentDispatch), string(blindspots.ExternalBoundaryCall),
+		string(blindspots.UnresolvedSpecOperation):
 		// UnresolvedCall and its goroutine sibling ConcurrentDispatch land in A
 		// whenever the marker loop emits them (a func-value call at a site no
 		// structural marker covers — irreducible to static, like reflect; a `go`
 		// dispatch is irreducible AND async); at a site a structural seam already
 		// covers, the loop dedups them instead, so this bin applies only to the
-		// standalone case. ExternalBoundaryCall is mapped here ONLY to satisfy the
-		// exhaustiveness guard — the marker loop skips every Kind.IsDisclosureOnlyFrontier
-		// kind, so this branch is never reached for it.
+		// standalone case. ExternalBoundaryCall and UnresolvedSpecOperation are mapped
+		// here ONLY to satisfy the exhaustiveness guard — the marker loop skips every
+		// Kind.IsDisclosureOnlyFrontier kind, so this branch is never reached for either.
 		return BinA, true // runtime/irreducible frontier (a ratified seam is irreducible to static)
 	default:
 		return BinA, false // unrecognized — disclosed as A, but the guard test flags it

@@ -34,6 +34,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/callgraph"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 	"github.com/jyang234/golang-code-graph/internal/static/graphio"
+	"github.com/jyang234/golang-code-graph/internal/static/openapi"
 	"github.com/jyang234/golang-code-graph/internal/static/schemadrift"
 	"github.com/jyang234/golang-code-graph/internal/static/taint"
 	"github.com/jyang234/golang-code-graph/internal/syscontext"
@@ -150,6 +151,7 @@ func cmdGraph(args []string) error {
 	reclaimMiddlewareFlag := fs.Bool("reclaim-middleware", false, "apply the middleware-chain reclaimer (opt-in; resolves the oapi-codegen/chi middleware-application loop to its concrete funcs, tagging them via=middleware-chain, and clears the UnresolvedCall seam when the middleware set is provably empty)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer (opt-in; recovers verbs from constant-fragment SQL builders, tagging them via=sql-constfold)")
 	reclaimTopicFlag := fs.Bool("reclaim-topic", false, "apply the bus const-topic label reclaimer (opt-in; recovers PUBLISH/CONSUME targets from constant-set topics, tagging them via=topic-constfold)")
+	reclaimOpenAPIFlag := fs.Bool("reclaim-openapi", false, "apply the OpenAPI-client labeler (opt-in; names outbound calls through spec-generated clients declared in classify.openapiClients as boundary:<peer> <METHOD> <template>, tagging them via=openapi-client, and discloses a declared-package callee that matches no operation as an UnresolvedSpecOperation blind spot)")
 	rebindFlag := fs.Bool("rebind", false, "EXPERIMENTAL: de-union shared higher-order runners — rebind each command to its OWN confined closure (adds via=rebind edges) and REMOVE the runner→closure union edges. The only pass that removes edges; opt-in, not for default gating")
 	asMermaid := fs.Bool("mermaid", false, "render the graph as a human-readable Mermaid flowchart instead of JSON (a view, never gated); scope with --entry")
 	showPlumbing := fs.Bool("show-plumbing", false, "with --mermaid, include low-salience plumbing nodes (tier 3: telemetry, compute-only closures) instead of collapsing them")
@@ -235,7 +237,19 @@ func cmdGraph(args []string) error {
 	if err != nil {
 		return err
 	}
-	g, err := graphio.Build(res, *entry, reclaimOpts(*reclaimSQLFlag, *reclaimTopicFlag)...)
+	opts := reclaimOpts(*reclaimSQLFlag, *reclaimTopicFlag)
+	// The OpenAPI labeler reads the declared spec files (relative to dir), so a
+	// missing/unparseable spec fails the run HERE — before any graph is built or
+	// written — with the config entry named (no partial output). Build stays pure: the
+	// labeler is passed in as an input, exactly like the fold flags.
+	oapiOpt, err := openapiBuildOption(res, dir, *reclaimOpenAPIFlag)
+	if err != nil {
+		return err
+	}
+	if oapiOpt != nil {
+		opts = append(opts, oapiOpt)
+	}
+	g, err := graphio.Build(res, *entry, opts...)
 	if err != nil {
 		return err
 	}
@@ -424,6 +438,7 @@ func cmdFrontier(args []string) error {
 	reclaimMiddlewareFlag := fs.Bool("reclaim-middleware", false, "apply the middleware-chain reclaimer before classifying (resolves the oapi-codegen/chi middleware-application loop and clears the seam when the middleware set is provably empty)")
 	reclaimSQLFlag := fs.Bool("reclaim-sql", false, "apply the SQL const-accumulation label reclaimer before classifying (recovers verbs from constant-fragment SQL builders, shrinking the B2 opaque-SQL frontier)")
 	reclaimTopicFlag := fs.Bool("reclaim-topic", false, "apply the bus const-topic label reclaimer before classifying (recovers PUBLISH/CONSUME targets from constant-set topics, shrinking the dynamic-bus frontier)")
+	reclaimOpenAPIFlag := fs.Bool("reclaim-openapi", false, "apply the OpenAPI-client labeler before classifying (names outbound calls through spec-generated clients from classify.openapiClients; the resulting boundary edges and UnresolvedSpecOperation disclosures are read-only, so the frontier is unchanged except for the named edges)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -440,7 +455,15 @@ func cmdFrontier(args []string) error {
 	if err != nil {
 		return err
 	}
-	g, err := graphio.Build(res, "", reclaimOpts(*reclaimSQLFlag, *reclaimTopicFlag)...)
+	opts := reclaimOpts(*reclaimSQLFlag, *reclaimTopicFlag)
+	oapiOpt, err := openapiBuildOption(res, dir, *reclaimOpenAPIFlag)
+	if err != nil {
+		return err
+	}
+	if oapiOpt != nil {
+		opts = append(opts, oapiOpt)
+	}
+	g, err := graphio.Build(res, "", opts...)
 	if err != nil {
 		return err
 	}
@@ -726,6 +749,28 @@ func reclaimOpts(reclaimSQL, reclaimTopic bool) []graphio.BuildOption {
 		opts = append(opts, graphio.WithTopicFold())
 	}
 	return opts
+}
+
+// openapiBuildOption maps --reclaim-openapi to a graphio build option, building the
+// OpenAPI-client labeler from the service's classify.openapiClients plus each declared
+// spec (read relative to dir). It returns (nil, nil) when the flag is off OR no clients
+// are declared — the strictly-opt-in, byte-identical-when-off contract. A missing or
+// unparseable spec is a HARD ERROR here (NewLabeler names the config entry), so the run
+// fails before any output rather than emitting a partial graph. Kept separate from
+// reclaimOpts because it is fallible and needs the analyzed result and service dir,
+// which the pure fold flags do not.
+func openapiBuildOption(res *analyze.Result, dir string, enabled bool) (graphio.BuildOption, error) {
+	if !enabled {
+		return nil, nil
+	}
+	lab, err := openapi.NewLabeler(res.Config.Classify.OpenAPIClients, dir)
+	if err != nil {
+		return nil, err
+	}
+	if lab == nil {
+		return nil, nil // no clients configured → a no-op, output unchanged
+	}
+	return graphio.WithOpenAPI(lab), nil
 }
 
 // warnSkippedAnnotations writes, to w (stderr at the CLI boundary), one warning per

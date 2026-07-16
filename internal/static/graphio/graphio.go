@@ -26,6 +26,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 	"github.com/jyang234/golang-code-graph/internal/static/obligations"
+	"github.com/jyang234/golang-code-graph/internal/static/openapi"
 	"github.com/jyang234/golang-code-graph/internal/static/rebind"
 	"github.com/jyang234/golang-code-graph/internal/static/reclaim"
 	"github.com/jyang234/golang-code-graph/internal/static/roots"
@@ -527,6 +528,7 @@ type BuildOption func(*buildOptions)
 type buildOptions struct {
 	foldSQL bool
 	foldBus bool
+	openapi *openapi.Labeler
 }
 
 // WithSQLFold enables the SQL const-accumulation label reclaimer (--reclaim-sql):
@@ -543,6 +545,17 @@ func WithSQLFold() BuildOption { return func(o *buildOptions) { o.foldSQL = true
 // targets; off by default, sound-or-abstain, and verdict-neutral (the topic is only a
 // target name).
 func WithTopicFold() BuildOption { return func(o *buildOptions) { o.foldBus = true } }
+
+// WithOpenAPI enables the OpenAPI-client labeler (--reclaim-openapi): a call whose
+// callee is a generated operation function in a declared classify.openapiClients
+// package is NAMED boundary:<peer> <METHOD> <template> (via=openapi-client) from the
+// spec, and a declared-package callee matching no operation is disclosed as an
+// UnresolvedSpecOperation blind spot. A nil labeler (no clients configured) is a no-op,
+// so the default build — and every committed golden — is byte-identical. The labeler is
+// built by the CLI (it reads the spec files, failing the run on a missing/unparseable
+// spec), so Build stays a pure function of its inputs. Monotonic: it only names edges
+// the graph already resolved, adding no reachability (R2 holds trivially).
+func WithOpenAPI(l *openapi.Labeler) BuildOption { return func(o *buildOptions) { o.openapi = l } }
 
 func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, error) {
 	var o buildOptions
@@ -579,8 +592,28 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		Nodes:      []Node{}, Edges: []Edge{}, BlindSpots: []blindspots.BlindSpot{},
 		foldSQL: o.foldSQL,
 	}
-	if gs := blindspots.Graph(blindspots.Detect(res, hints)); len(gs) > 0 {
+	// Under --reclaim-openapi, a call into a declared client package is disclosed by the
+	// openapi channel (a named boundary edge, or an UnresolvedSpecOperation below), so it
+	// must not ALSO surface as a generic ExternalBoundaryCall — pass the labeler's
+	// package predicate so Detect exempts it (nil when the labeler is off, byte-identical).
+	var inOpenAPIClient func(*ssa.Function) bool
+	if o.openapi != nil {
+		inOpenAPIClient = o.openapi.InDeclaredPackage
+	}
+	if gs := blindspots.Graph(blindspots.Detect(res, hints, inOpenAPIClient)); len(gs) > 0 {
 		g.BlindSpots = gs
+	}
+	// OpenAPI-client disclosures (--reclaim-openapi): a call from first-party code into
+	// a declared client package whose callee matched no spec operation is disclosed as
+	// an UnresolvedSpecOperation, so a missed/renamed operation is a tracked fact rather
+	// than a silently-unnamed edge. Added BEFORE the declared-seam merge and annotation
+	// binding below, so an author can annotate one and it sorts into the manifest with
+	// every other disclosure. Off (nil labeler) leaves g.BlindSpots byte-identical.
+	if o.openapi != nil {
+		if bs := openapiBlindSpots(res, o.openapi); len(bs) > 0 {
+			g.BlindSpots = append(g.BlindSpots, bs...)
+			blindspots.SortBlindSpots(g.BlindSpots)
+		}
 	}
 	// Merge human-ratified seams declared in config (the behavioral-impeachment
 	// loop's enactment, §8): sites where static must abstain because behavior proved
@@ -667,7 +700,7 @@ func Build(res *analyze.Result, entry string, opts ...BuildOption) (*Graph, erro
 		// label and the ssa call site coexist (IT-3 scoping note).
 		var nodeEdges []Edge
 		for _, e := range n.Out {
-			edges := edgeOf(ext, hints, e, scope, o.foldSQL, o.foldBus, callers, 0, nil)
+			edges := edgeOf(ext, hints, e, scope, o.foldSQL, o.foldBus, o.openapi, callers, 0, nil)
 			nodeEdges = append(nodeEdges, edges...)
 			// Record a committed effect only when the site yields exactly ONE — the
 			// unambiguous case. A fold-resolved finite-table write fans the site out
@@ -1131,12 +1164,23 @@ const spliceDepthCap = 16
 // both cuts CHA wrapper cycles and bounds diamond re-expansion — every level
 // re-attributes to the same originating caller, so one expansion per wrapper per
 // top-level edge emits the complete edge set.
-func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL, foldBus bool, callers map[*ssa.Function][]ssa.CallInstruction, depth int, spliced map[*ssa.Function]bool) []Edge {
+func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope map[*ssa.Function]bool, foldSQL, foldBus bool, oapi *openapi.Labeler, callers map[*ssa.Function][]ssa.CallInstruction, depth int, spliced map[*ssa.Function]bool) []Edge {
 	from := e.Caller.Func.RelString(nil)
 	callee := e.Callee.Func
 	f := ext.Edge(e.Caller.Func, callee, e.Site)
 	tier, _ := ext.Classify(f)
 	concurrent := f.Concurrent
+
+	// OpenAPI-client labeling (--reclaim-openapi). Resolved once, up front, so the
+	// switch case is a plain string test. It is suppressed when the CALLER is itself
+	// inside a declared client package: the client's own internal plumbing
+	// (New<Op>Request calling fmt.Sprintf/http.NewRequest) is not the SERVICE's
+	// outbound edge, so labeling it would double-name the operation. Left "" when the
+	// labeler is off, the caller is a client, or the callee matches no operation.
+	var oapiLabel string
+	if oapi != nil && !oapi.InDeclaredPackage(e.Caller.Func) {
+		oapiLabel, _ = oapi.Label(callee)
+	}
 
 	switch {
 	case isSplicedWrapper(callee):
@@ -1172,7 +1216,7 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		var out []Edge
 		for _, oe := range e.Callee.Out {
 			se := &cg.Edge{Caller: e.Caller, Callee: oe.Callee, Site: oe.Site}
-			out = append(out, edgeOf(ext, hints, se, scope, foldSQL, foldBus, callers, depth+1, spliced)...)
+			out = append(out, edgeOf(ext, hints, se, scope, foldSQL, foldBus, oapi, callers, depth+1, spliced)...)
 		}
 		if concurrent {
 			for i := range out {
@@ -1227,6 +1271,20 @@ func edgeOf(ext *features.Extractor, hints *features.HintSet, e *cg.Edge, scope 
 		// "boundary:blob PutObject", "boundary:cache Get", "boundary:rpc Charge".
 		kind := methodNamedOutboundKind(hints, callee)
 		return []Edge{{From: from, To: "boundary:" + kind + " " + sinkMethodName(e.Site), Tier: tier, Boundary: string(f.Boundary), Concurrent: concurrent}}
+	case oapiLabel != "":
+		// A generated-client operation call (oapi-codegen et al.): the constant-fold
+		// labeler cannot name it (the route is fmt.Sprintf-assembled from path params),
+		// but the declared spec can. Emit the spec-derived outbound-sync boundary edge,
+		// tagged via=openapi.Via so a spec-ASSERTED label is never mistaken for a
+		// discovered constant. It is classified through ext.External (not the outer f):
+		// the callee is a generated function, not a classify hint, so ext.Edge reads it
+		// as compute/tier-3 — External tiers it as the peer call it is (tier 1). This
+		// REPLACES the internal edge, exactly as an IsHTTP hint replaces the seam edge
+		// with its boundary edge; the client function stays a node with its own
+		// (mostly stdlib, invisible) body edges.
+		fx := ext.External(oapiLabel)
+		t, _ := ext.Classify(fx)
+		return []Edge{{From: from, To: "boundary:" + oapiLabel, Tier: t, Boundary: string(fx.Boundary), Via: openapi.Via, Concurrent: concurrent}}
 	case scope[callee]:
 		return []Edge{{From: from, To: callee.RelString(nil), Tier: tier, Concurrent: concurrent}}
 	default:

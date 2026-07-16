@@ -94,6 +94,18 @@ const (
 	// gated, each carrying the impeachment witness as its reason. flowmap merges it
 	// so the next run abstains at the seam (NEVER → CANT-PROVE) — the safe direction.
 	ImpeachmentSeam Kind = "ImpeachmentSeam"
+	// UnresolvedSpecOperation is a call from first-party code into a DECLARED
+	// OpenAPI-client package (classify.openapiClients) whose callee matched NO spec
+	// operation under the opt-in --reclaim-openapi labeler — a client helper/transport
+	// (a constructor, an editor, a middleware applier) or generator DRIFT that dropped
+	// an operation the code still calls. The labeler names the operation call sites it
+	// CAN resolve (boundary:<peer> <METHOD> <template>, via=openapi-client) and
+	// discloses the ones it cannot HERE, with the callee FQN, rather than guessing a
+	// label or silently leaving the edge unnamed (CLAUDE.md tenet 3). It is
+	// DISCLOSURE-ONLY (Kind.IsDisclosureOnlyFrontier): the callee edge is still in the
+	// graph — labeling failed, not reachability — so it severs nothing and blinds no
+	// proof. Emitted only under --reclaim-openapi, so a default build is byte-identical.
+	UnresolvedSpecOperation Kind = "UnresolvedSpecOperation"
 )
 
 // Kinds returns every blind-spot category. It exists so exhaustiveness guards —
@@ -102,7 +114,7 @@ const (
 // above (a new const belongs here).
 func Kinds() []Kind {
 	return []Kind{
-		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, ExternalBoundaryCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam,
+		NonConstantBoundaryArg, UnresolvedDispatch, UnresolvedCall, ConcurrentDispatch, ExternalBoundaryCall, Reflect, HighFanOut, Unsafe, Cgo, Linkname, ImpeachmentSeam, UnresolvedSpecOperation,
 	}
 }
 
@@ -205,11 +217,14 @@ func (k Kind) Boundary() bool {
 // proof (fitness.firstReachBlinding skips it) nor enters the frontier marker set /
 // ReclaimableShare (frontier.Classify skips it): the effect it names is the same
 // leaf the call graph already terminates at, hiding no in-scope path and severing
-// nothing. ExternalBoundaryCall is the one such kind today. Centralized here so the
-// two skip sites read one predicate instead of each re-deciding by literal Kind —
-// a future disclosure-only kind flips this and both honor it.
+// nothing. ExternalBoundaryCall and UnresolvedSpecOperation are the such kinds today.
+// Centralized here so the two skip sites read one predicate instead of each
+// re-deciding by literal Kind — a future disclosure-only kind flips this and both
+// honor it. UnresolvedSpecOperation qualifies because the openapi labeler failing to
+// NAME a declared-client callee leaves that callee's edge in the graph untouched: the
+// reachability the frontier reasons over is unchanged, only the label is absent.
 func (k Kind) IsDisclosureOnlyFrontier() bool {
-	return k == ExternalBoundaryCall
+	return k == ExternalBoundaryCall || k == UnresolvedSpecOperation
 }
 
 // Severity is the signal/noise TIER a blind spot carries. It exists so a bare
@@ -285,7 +300,16 @@ func filter(bs []BlindSpot, keep func(Kind) bool) []BlindSpot {
 // gated boundary subset and the non-gated graph-completeness disclosures —
 // sorted and de-duplicated for deterministic output. Callers split it with
 // Boundary / Graph.
-func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
+//
+// inOpenAPIClient, when non-nil, reports whether a callee is defined in a declared
+// OpenAPI-client package (--reclaim-openapi). Such a call is NOT an ExternalBoundaryCall:
+// the openapi channel already owns that package's disclosure — a named boundary edge for
+// a resolved operation, or an UnresolvedSpecOperation for a helper — so a generic EBC on
+// the same call would double-count exactly the surface the labeler classified, the same
+// way isExternalBoundary already exempts a callee a DB/HTTP/bus hint classifies. Nil (the
+// gated boundary contract, and every un-reclaimed build) restores the prior behavior, so
+// those artifacts are byte-identical.
+func Detect(res *analyze.Result, hints *features.HintSet, inOpenAPIClient func(*ssa.Function) bool) []BlindSpot {
 	var out []BlindSpot
 	cfg := res.Config
 	if cfg == nil {
@@ -348,7 +372,7 @@ func Detect(res *analyze.Result, hints *features.HintSet) []BlindSpot {
 					Site:   site,
 					Detail: "reflective call; downstream edges are invisible to the static call graph",
 				})
-			case isExternalBoundary(res.Program, hints, callee):
+			case isExternalBoundary(res.Program, hints, inOpenAPIClient, callee):
 				// A handoff into a third-party package we do not analyze and have not
 				// classified as a typed boundary effect. Detail names the package, not
 				// the symbol, so multiple callees in one package at this site dedup to a
@@ -523,7 +547,7 @@ func FuncValueTypeName(t types.Type) string {
 // telemetry/publish/consume/DB/HTTP is disclosed as a typed boundary effect, so
 // re-flagging it here would double-count. What remains — an unclassified
 // third-party dependency — is the surface this discloses.
-func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee *ssa.Function) bool {
+func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, inOpenAPIClient func(*ssa.Function) bool, callee *ssa.Function) bool {
 	path := features.PkgPath(callee)
 	if path == "" || prog.IsFirstPartyPath(path) || features.IsStdlib(path) {
 		return false
@@ -536,6 +560,13 @@ func isExternalBoundary(prog *ssabuild.Program, hints *features.HintSet, callee 
 	}
 	if _, ok := hints.MethodNamedOutboundKind(callee); ok {
 		return false // a typed method-named outbound effect (blob/cache/rpc), disclosed there
+	}
+	if inOpenAPIClient != nil && inOpenAPIClient(callee) {
+		// A declared OpenAPI-client package (--reclaim-openapi): the openapi channel owns
+		// its disclosure (a named boundary edge for a resolved operation, an
+		// UnresolvedSpecOperation for a helper), so a generic EBC here would double-count
+		// the exact call the labeler classified — parallel to the hint exemptions above.
+		return false
 	}
 	return !hints.IsTelemetry(callee) && !hints.IsPublish(callee) && !hints.IsConsume(callee) &&
 		!hints.IsDB(callee) && !hints.IsHTTP(callee)

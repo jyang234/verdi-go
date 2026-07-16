@@ -42,6 +42,13 @@ var callGraphGoldens = []struct {
 	// reclaimed edge — onto a tier-3 closure — is visible, golden-covering the via
 	// render path. Graphio-local (not a groundwork golden, so out of the manifest).
 	{"testdata/reclaimsvc.reclaimed.graph.json", 0},
+	// oapiclientsvc built with --reclaim-openapi: the outbound calls through a
+	// spec-generated client, NAMED boundary:event-bus <METHOD> <template> and tagged
+	// via=openapi-client. Covers the via render path on a BOUNDARY edge (reclaimsvc
+	// covers it on an internal edge) plus the UnresolvedSpecOperation disclosure node.
+	// Default maxTier 2 — the named boundary edges are tier 1, so they show while the
+	// client plumbing collapses. Graphio-local, out of the manifest.
+	{"testdata/oapiclientsvc.openapi.graph.json", 2},
 }
 
 func TestCallGraphMermaidGoldens(t *testing.T) {

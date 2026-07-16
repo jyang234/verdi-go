@@ -1,0 +1,195 @@
+{
+  "algo": "rta",
+  "caveats": [
+    "rta from 2 discovered root(s)"
+  ],
+  "nodes": [
+    {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEvent",
+      "sig": "func (*eventbus.ClientWithResponses).CreateEvent(ctx context.Context, publisherID string, eventType string, version string, eventID string) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 63,
+      "end_line": 69
+    },
+    {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEventWithBodyWithResponse",
+      "sig": "func (*eventbus.ClientWithResponses).CreateEventWithBodyWithResponse(ctx context.Context, publisherID string, eventType string, version string, eventID string, contentType string, body io.Reader) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 82,
+      "end_line": 88
+    },
+    {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEventWithResponse",
+      "sig": "func (*eventbus.ClientWithResponses).CreateEventWithResponse(ctx context.Context, publisherID string, eventType string, version string, eventID string) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 72,
+      "end_line": 78
+    },
+    {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventStatusWithResponse",
+      "sig": "func (*eventbus.ClientWithResponses).GetEventStatusWithResponse(ctx context.Context, eventID string) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 117,
+      "end_line": 123
+    },
+    {
+      "fqn": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventWithResponse",
+      "sig": "func (*eventbus.ClientWithResponses).GetEventWithResponse(ctx context.Context, eventID string) (*http.Response, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 99,
+      "end_line": 105
+    },
+    {
+      "fqn": "example.com/oapiclientsvc.main",
+      "sig": "func main.main()",
+      "tier": 1,
+      "package": "example.com/oapiclientsvc",
+      "file": "main.go",
+      "line": 16,
+      "end_line": 20
+    },
+    {
+      "fqn": "example.com/oapiclientsvc.publish",
+      "sig": "func main.publish(w http.ResponseWriter, r *http.Request)",
+      "tier": 1,
+      "package": "example.com/oapiclientsvc",
+      "file": "main.go",
+      "line": 24,
+      "end_line": 53
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewClientWithResponses",
+      "sig": "func eventbus.NewClientWithResponses(server string) *eventbus.ClientWithResponses",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "file": "clients/eventbus/client.gen.go",
+      "line": 37,
+      "end_line": 39
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewCreateEventRequest",
+      "sig": "func eventbus.NewCreateEventRequest(server string, publisherID string, eventType string, version string, eventID string) (*http.Request, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 46,
+      "end_line": 49
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewCreateEventRequestWithBody",
+      "sig": "func eventbus.NewCreateEventRequestWithBody(server string, publisherID string, eventType string, version string, eventID string, contentType string, body io.Reader) (*http.Request, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 52,
+      "end_line": 60
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewGetEventRequest",
+      "sig": "func eventbus.NewGetEventRequest(server string, eventID string) (*http.Request, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 93,
+      "end_line": 96
+    },
+    {
+      "fqn": "example.com/oapiclientsvc/clients/eventbus.NewGetEventStatusRequest",
+      "sig": "func eventbus.NewGetEventStatusRequest(server string, eventID string) (*http.Request, error)",
+      "tier": 3,
+      "package": "example.com/oapiclientsvc/clients/eventbus",
+      "fallible": true,
+      "file": "clients/eventbus/client.gen.go",
+      "line": 111,
+      "end_line": 114
+    }
+  ],
+  "edges": [
+    {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEvent",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewCreateEventRequest",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEventWithBodyWithResponse",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewCreateEventRequestWithBody",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).CreateEventWithResponse",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewCreateEventRequest",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventStatusWithResponse",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewGetEventStatusRequest",
+      "tier": 3
+    },
+    {
+      "from": "(*example.com/oapiclientsvc/clients/eventbus.ClientWithResponses).GetEventWithResponse",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewGetEventRequest",
+      "tier": 3
+    },
+    {
+      "from": "example.com/oapiclientsvc.publish",
+      "to": "boundary:event-bus GET /v1/events/{eventId}",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client"
+    },
+    {
+      "from": "example.com/oapiclientsvc.publish",
+      "to": "boundary:event-bus GET /v1/events/{eventId}/status",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client"
+    },
+    {
+      "from": "example.com/oapiclientsvc.publish",
+      "to": "boundary:event-bus POST /v1/publishers/{publisherId}/eventTypes/{eventType}/versions/{version}/events/{eventId}",
+      "tier": 1,
+      "boundary": "outbound-sync",
+      "via": "openapi-client"
+    },
+    {
+      "from": "example.com/oapiclientsvc.publish",
+      "to": "example.com/oapiclientsvc/clients/eventbus.NewClientWithResponses",
+      "tier": 3
+    }
+  ],
+  "blind_spots": [
+    {
+      "kind": "UnresolvedSpecOperation",
+      "site": "example.com/oapiclientsvc.publish",
+      "detail": "call to example.com/oapiclientsvc/clients/eventbus.NewClientWithResponses in declared openapi-client package example.com/oapiclientsvc/clients/eventbus matched no spec operation; the outbound call cannot be named from the spec (a client helper/transport, or generator drift that dropped an operation)"
+    }
+  ],
+  "entrypoints": [
+    {
+      "kind": "http",
+      "name": "POST /publish",
+      "fn": "example.com/oapiclientsvc.publish"
+    }
+  ],
+  "composition_roots": [
+    "example.com/oapiclientsvc"
+  ]
+}
