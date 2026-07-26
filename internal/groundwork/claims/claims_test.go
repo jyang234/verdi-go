@@ -343,12 +343,12 @@ func TestLoadFileStrict(t *testing.T) {
 func TestIDLabelEcho(t *testing.T) {
 	// With id: the label is the id verbatim.
 	r := evalOne(t, Claim{ID: "my-check", Kind: "edge", From: "repo.Store).Save", To: "App).Create"})
-	if r.Outcome != Fail || r.Label != "my-check" {
-		t.Errorf("id-labelled claim = %+v, want Fail with Label \"my-check\"", r)
+	if r.Outcome != Fail || r.ID != "my-check" || r.Label != "my-check" {
+		t.Errorf("id-labelled claim = %+v, want Fail with ID and Label \"my-check\"", r)
 	}
 	// Without id: the endpoint-derived label.
-	if r := evalOne(t, Claim{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}); r.Label != "repo.Store).Save -> App).Create" {
-		t.Errorf("id-less label = %q, want the endpoint-derived label", r.Label)
+	if r := evalOne(t, Claim{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}); r.ID != "" || r.Label != "repo.Store).Save -> App).Create" {
+		t.Errorf("id-less result = %+v, want empty ID and endpoint-derived Label", r)
 	}
 }
 

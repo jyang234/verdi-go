@@ -8,6 +8,247 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 )
 
+func TestStructuralMachineBindings(t *testing.T) {
+	const (
+		create = "(*svc/handler.App).Create"
+		save   = "(*svc/repo.Store).Save"
+	)
+	delimitedName := "GET /x\x005:weird"
+	g := testGraph()
+	g.Entrypoints = append(g.Entrypoints, graph.Entrypoint{
+		Kind: "http",
+		Name: delimitedName,
+		Fn:   create,
+	})
+
+	tests := []struct {
+		name  string
+		g     *graph.Graph
+		claim Claim
+		want  Bindings
+	}{
+		{
+			name:  "edge",
+			claim: Claim{ID: "edge-id", Kind: "edge", From: "App).Create", To: "repo.Store).Save"},
+			want:  Bindings{From: []string{create}, To: []string{save}},
+		},
+		{
+			name:  "no_edge",
+			claim: Claim{ID: "no-edge-id", Kind: "no_edge", From: "repo.Store).Save", To: "App).Create"},
+			want:  Bindings{From: []string{save}, To: []string{create}},
+		},
+		{
+			name:  "edge_count",
+			claim: Claim{ID: "edge-count-id", Kind: "edge_count", From: "App).Create", To: "repo.Store).Save", Eq: intp(1)},
+			want:  Bindings{From: []string{create}, To: []string{save}},
+		},
+		{
+			name:  "node",
+			claim: Claim{ID: "node-id", Kind: "node", FQN: "App).Create"},
+			want:  Bindings{FQN: []string{create}},
+		},
+		{
+			name:  "no_node_zero_match",
+			claim: Claim{ID: "no-node-id", Kind: "no_node", FQN: "svc/handler.deletedThing"},
+			want:  Bindings{},
+		},
+		{
+			name:  "in_degree",
+			claim: Claim{ID: "in-degree-id", Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},
+			want:  Bindings{Of: []string{save}},
+		},
+		{
+			name:  "out_degree",
+			claim: Claim{ID: "out-degree-id", Kind: "out_degree", Of: "App).Create", Eq: intp(2)},
+			want:  Bindings{Of: []string{create}},
+		},
+		{
+			name: "entrypoint",
+			g:    g,
+			claim: Claim{
+				ID: "entrypoint-id", Kind: "entrypoint", EntryKind: "http",
+				Name: delimitedName, Fn: "App).Create",
+			},
+			want: Bindings{
+				Fn: []string{create},
+				Entrypoint: []string{
+					"entrypoint/v1\x004:http\x0014:GET /x\x005:weird\x0025:(*svc/handler.App).Create",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := tt.g
+			if g == nil {
+				g = testGraph()
+			}
+			got := evalOneG(t, g, tt.claim)
+			if got.Outcome != Pass {
+				t.Fatalf("Outcome = %v, want Pass; result = %+v", got.Outcome, got)
+			}
+			if got.ID != tt.claim.ID {
+				t.Errorf("ID = %q, want input claim ID %q", got.ID, tt.claim.ID)
+			}
+			if !reflect.DeepEqual(got.Bindings, tt.want) {
+				t.Errorf("Bindings = %#v, want %#v", got.Bindings, tt.want)
+			}
+		})
+	}
+}
+
+func TestStructuralReasonCodes(t *testing.T) {
+	const (
+		create = "(*svc/handler.App).Create"
+		save   = "(*svc/repo.Store).Save"
+	)
+	duplicateTierGraph := &graph.Graph{
+		Nodes: []graph.Node{
+			{FQN: "svc/gen.F[int]", Tier: 1},
+			{FQN: "svc/gen.F[int]", Tier: 3},
+		},
+	}
+	noEntrypointsGraph := &graph.Graph{
+		Nodes: []graph.Node{{FQN: create, Tier: 1}},
+	}
+
+	tests := []struct {
+		name  string
+		g     *graph.Graph
+		claim Claim
+		want  Reason
+		bind  Bindings
+	}{
+		{
+			name:  "missing_required_field",
+			claim: Claim{ID: "missing", Kind: "node"},
+			want:  ReasonMalformedClaim,
+		},
+		{
+			name:  "wrong_kind_field",
+			claim: Claim{ID: "wrong-kind", Kind: "edge", From: "App).Create", To: "repo.Store).Save", Eq: intp(1)},
+			want:  ReasonMalformedClaim,
+		},
+		{
+			name:  "unknown_kind",
+			claim: Claim{ID: "unknown", Kind: "bogus"},
+			want:  ReasonMalformedClaim,
+		},
+		{
+			name:  "malformed_regex",
+			claim: Claim{ID: "bad-regex", Kind: "node", FQN: `/[/`},
+			want:  ReasonMalformedClaim,
+		},
+		{
+			name:  "zero_required_matches_carries_established_from",
+			claim: Claim{ID: "unresolved", Kind: "edge", From: "App).Create", To: "does.Not.Exist"},
+			want:  ReasonUnresolved,
+			bind:  Bindings{From: []string{create}},
+		},
+		{
+			name:  "non_unique_plain_match",
+			claim: Claim{ID: "ambiguous-plain", Kind: "node", FQN: ".Score"},
+			want:  ReasonAmbiguous,
+		},
+		{
+			name:  "one_required_regex_match",
+			claim: Claim{ID: "ambiguous-one", Kind: "in_degree", Of: `/\.Score$/`, Eq: intp(0)},
+			want:  ReasonAmbiguous,
+		},
+		{
+			name:  "duplicate_fqn_tier_carries_fqn",
+			g:     duplicateTierGraph,
+			claim: Claim{ID: "ambiguous-tier", Kind: "node", FQN: "gen.F[int]", Tier: intp(1)},
+			want:  ReasonAmbiguous,
+			bind:  Bindings{FQN: []string{"svc/gen.F[int]"}},
+		},
+		{
+			name:  "absent_entrypoint_join",
+			g:     noEntrypointsGraph,
+			claim: Claim{ID: "missing-join", Kind: "entrypoint", Name: "POST /loan", Fn: "App).Create"},
+			want:  ReasonMissingGraphData,
+		},
+		{
+			name:  "disagreeing_entrypoint_joins_carry_candidates",
+			claim: Claim{ID: "ambiguous-join", Kind: "entrypoint", Name: "GET /widget/7", Fn: "App).Create"},
+			want:  ReasonAmbiguous,
+			bind: Bindings{
+				Fn: []string{create},
+				Entrypoint: []string{
+					"entrypoint/v1\x004:http\x0016:GET /widget/{id}\x0025:(*svc/handler.App).Create",
+					"entrypoint/v1\x004:http\x0018:GET /widget/{name}\x0022:(*svc/repo.Store).Save",
+				},
+			},
+		},
+		{
+			name:  "malformed_counterpart_regex_carries_of",
+			claim: Claim{ID: "bad-counterpart", Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(0), CounterpartMatching: `/[/`},
+			want:  ReasonMalformedClaim,
+			bind:  Bindings{Of: []string{save}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := tt.g
+			if g == nil {
+				g = testGraph()
+			}
+			got := evalOneG(t, g, tt.claim)
+			if got.Outcome != Errored {
+				t.Fatalf("Outcome = %v, want Errored; result = %+v", got.Outcome, got)
+			}
+			if got.ID != tt.claim.ID {
+				t.Errorf("ID = %q, want input claim ID %q", got.ID, tt.claim.ID)
+			}
+			if got.Reason != tt.want {
+				t.Errorf("Reason = %q, want %q; detail = %q", got.Reason, tt.want, got.Detail)
+			}
+			if !reflect.DeepEqual(got.Bindings, tt.bind) {
+				t.Errorf("Bindings = %#v, want %#v", got.Bindings, tt.bind)
+			}
+		})
+	}
+}
+
+func TestStructuralNoNodePolarity(t *testing.T) {
+	const create = "(*svc/handler.App).Create"
+	tests := []struct {
+		name    string
+		claim   Claim
+		outcome Outcome
+		bind    Bindings
+	}{
+		{
+			name:    "existing_node_fails_with_binding",
+			claim:   Claim{ID: "exists", Kind: "no_node", FQN: "App).Create"},
+			outcome: Fail,
+			bind:    Bindings{FQN: []string{create}},
+		},
+		{
+			name:    "missing_node_passes_without_fabricated_binding",
+			claim:   Claim{ID: "absent", Kind: "no_node", FQN: "svc/handler.deletedThing"},
+			outcome: Pass,
+			bind:    Bindings{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evalOne(t, tt.claim)
+			if got.Outcome != tt.outcome {
+				t.Fatalf("Outcome = %v, want %v; result = %+v", got.Outcome, tt.outcome, got)
+			}
+			if got.ID != tt.claim.ID {
+				t.Errorf("ID = %q, want input claim ID %q", got.ID, tt.claim.ID)
+			}
+			if !reflect.DeepEqual(got.Bindings, tt.bind) {
+				t.Errorf("Bindings = %#v, want %#v", got.Bindings, tt.bind)
+			}
+		})
+	}
+}
+
 func TestMarshalMachineContract(t *testing.T) {
 	g := &graph.Graph{
 		Stamp: "789abc",

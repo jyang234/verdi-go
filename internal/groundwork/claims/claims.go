@@ -233,6 +233,11 @@ const (
 	ReasonUnmatched        Reason = "UNMATCHED"
 )
 
+type evaluationError struct {
+	Reason Reason
+	Detail string
+}
+
 // Bindings identifies the canonical graph values a claim resolved against.
 type Bindings struct {
 	From       []string
@@ -430,10 +435,10 @@ var allowedFields = map[string][]string{
 func (m *model) eval(c Claim) Result {
 	allowed, ok := allowedFields[c.Kind]
 	if !ok {
-		return errored(c, "unknown claim kind "+strconv.Quote(c.Kind))
+		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
 	if f := unexpectedField(c, allowed); f != "" {
-		return errored(c, c.Kind+" does not accept field "+strconv.Quote(f))
+		return errored(c, ReasonMalformedClaim, c.Kind+" does not accept field "+strconv.Quote(f))
 	}
 	switch c.Kind {
 	case "edge":
@@ -453,7 +458,7 @@ func (m *model) eval(c Claim) Result {
 	case "entrypoint":
 		return m.evalEntrypoint(c)
 	default:
-		return errored(c, "unknown claim kind "+strconv.Quote(c.Kind))
+		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
 }
 
@@ -505,76 +510,80 @@ func unexpectedField(c Claim, allowed []string) string {
 // fail-closed rule (each side plain-unique-or-die / regex-any, ERROR on either
 // failing). It is the ONE place the three edge kinds' resolution contract
 // lives, so a future change to it cannot silently reach only some of them
-// (CLAUDE.md, one source of truth). On failure it returns a non-nil *Result
-// (the ERROR) and the caller returns it verbatim.
-func (m *model) resolveEndpoints(c Claim) (froms, tos []string, bad *Result) {
+// (CLAUDE.md, one source of truth). On failure it returns a typed evaluation
+// error plus whichever earlier side resolved successfully.
+func (m *model) resolveEndpoints(c Claim) (froms, tos []string, bad *evaluationError) {
 	if c.From == "" || c.To == "" {
-		r := errored(c, c.Kind+" requires 'from' and 'to'")
-		return nil, nil, &r
+		return nil, nil, &evaluationError{
+			Reason: ReasonMalformedClaim,
+			Detail: c.Kind + " requires 'from' and 'to'",
+		}
 	}
-	froms, det := m.resolveMany(c.From)
-	if det != "" {
-		r := errored(c, det)
-		return nil, nil, &r
+	froms, bad = m.resolveMany(c.From)
+	if bad != nil {
+		return nil, nil, bad
 	}
-	tos, det = m.resolveMany(c.To)
-	if det != "" {
-		r := errored(c, det)
-		return nil, nil, &r
+	tos, bad = m.resolveMany(c.To)
+	if bad != nil {
+		return froms, nil, bad
 	}
 	return froms, tos, nil
 }
 
 func (m *model) evalEdge(c Claim) Result {
 	froms, tos, bad := m.resolveEndpoints(c)
+	bindings := Bindings{From: froms, To: tos}
 	if bad != nil {
-		return *bad
+		return withBindings(errored(c, bad.Reason, bad.Detail), bindings)
 	}
 	if m.anyPair(froms, tos) {
-		return pass(c)
+		return withBindings(pass(c), bindings)
 	}
-	return fail(c, "0 edge(s)")
+	return withBindings(fail(c, "0 edge(s)"), bindings)
 }
 
 func (m *model) evalNoEdge(c Claim) Result {
 	froms, tos, bad := m.resolveEndpoints(c)
+	bindings := Bindings{From: froms, To: tos}
 	if bad != nil {
-		return *bad
+		return withBindings(errored(c, bad.Reason, bad.Detail), bindings)
 	}
 	present := m.presentPairs(froms, tos)
 	if len(present) == 0 {
-		return pass(c)
+		return withBindings(pass(c), bindings)
 	}
-	return fail(c, fmt.Sprintf("%d edge(s) present: %s", len(present), fqnres.CapList(present, maxOffenders)))
+	return withBindings(fail(c, fmt.Sprintf("%d edge(s) present: %s", len(present), fqnres.CapList(present, maxOffenders))), bindings)
 }
 
 func (m *model) evalEdgeCount(c Claim) Result {
 	if c.Eq == nil {
-		return errored(c, "edge_count requires 'eq'")
+		return errored(c, ReasonMalformedClaim, "edge_count requires 'eq'")
 	}
 	froms, tos, bad := m.resolveEndpoints(c)
+	bindings := Bindings{From: froms, To: tos}
 	if bad != nil {
-		return *bad
+		return withBindings(errored(c, bad.Reason, bad.Detail), bindings)
 	}
 	n := m.countPresentPairs(froms, tos)
 	if n == *c.Eq {
-		return pass(c)
+		return withBindings(pass(c), bindings)
 	}
-	return fail(c, fmt.Sprintf("count %d, want %d", n, *c.Eq))
+	return withBindings(fail(c, fmt.Sprintf("count %d, want %d", n, *c.Eq)), bindings)
 }
 
 func (m *model) evalNode(c Claim) Result {
 	q, adet := nodeAnchor(c)
 	if adet != "" {
-		return errored(c, adet)
+		return errored(c, ReasonMalformedClaim, adet)
 	}
 	if q == "" {
-		return errored(c, "node requires 'fqn'")
+		return errored(c, ReasonMalformedClaim, "node requires 'fqn'")
 	}
-	matches, det := m.resolve(q, m.nodeUniverse, "node")
-	if det != "" {
-		return errored(c, det)
+	matches, bad := m.resolve(q, m.nodeUniverse, "node")
+	if bad != nil {
+		return errored(c, bad.Reason, bad.Detail)
 	}
+	bindings := Bindings{FQN: matches}
 	if c.Tier != nil {
 		var bad []string
 		for _, fqn := range matches {
@@ -583,37 +592,41 @@ func (m *model) evalNode(c Claim) Result {
 				// The graph carries this FQN at more than one tier (a non-unique
 				// display FQN): the claim is unanswerable, so abstain rather than
 				// grade against an arbitrary record.
-				return errored(c, fmt.Sprintf("ambiguous tier for %s: graph carries tiers %v", fqn, tiers))
+				return withBindings(errored(c, ReasonAmbiguous,
+					fmt.Sprintf("ambiguous tier for %s: graph carries tiers %v", fqn, tiers)), bindings)
 			}
 			if tiers[0] != *c.Tier {
 				bad = append(bad, fmt.Sprintf("%s tier %d", fqn, tiers[0]))
 			}
 		}
 		if len(bad) > 0 {
-			return fail(c, fmt.Sprintf("want tier %d; %s", *c.Tier, fqnres.CapList(bad, maxMatches)))
+			return withBindings(fail(c,
+				fmt.Sprintf("want tier %d; %s", *c.Tier, fqnres.CapList(bad, maxMatches))), bindings)
 		}
 	}
-	return pass(c)
+	return withBindings(pass(c), bindings)
 }
 
 func (m *model) evalNoNode(c Claim) Result {
 	q, adet := nodeAnchor(c)
 	if adet != "" {
-		return errored(c, adet)
+		return errored(c, ReasonMalformedClaim, adet)
 	}
 	if q == "" {
-		return errored(c, "no_node requires 'fqn'")
+		return errored(c, ReasonMalformedClaim, "no_node requires 'fqn'")
 	}
 	// no_node NEVER errors on a resolution OUTCOME: zero matches is the pass,
 	// ≥1 is the fail. A malformed regex is still a claim-authoring ERROR.
 	res, err := fqnres.Resolve(q, m.nodeUniverse)
 	if err != nil {
-		return errored(c, err.Error())
+		return errored(c, ReasonMalformedClaim, err.Error())
 	}
+	bindings := Bindings{FQN: res.Matches}
 	if len(res.Matches) == 0 {
-		return pass(c)
+		return withBindings(pass(c), bindings)
 	}
-	return fail(c, fmt.Sprintf("%d matching node(s): %s", len(res.Matches), fqnres.CapList(res.Matches, maxMatches)))
+	return withBindings(fail(c,
+		fmt.Sprintf("%d matching node(s): %s", len(res.Matches), fqnres.CapList(res.Matches, maxMatches))), bindings)
 }
 
 func (m *model) evalDegree(c Claim, in bool) Result {
@@ -623,22 +636,23 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 	}
 	anchor, adet := degreeAnchor(c)
 	if adet != "" {
-		return errored(c, adet)
+		return errored(c, ReasonMalformedClaim, adet)
 	}
 	if anchor == "" {
-		return errored(c, kind+" requires 'of'")
+		return errored(c, ReasonMalformedClaim, kind+" requires 'of'")
 	}
 	if c.Eq == nil {
-		return errored(c, kind+" requires 'eq'")
+		return errored(c, ReasonMalformedClaim, kind+" requires 'eq'")
 	}
 	if c.CounterpartMatching != "" && c.ToMatching != "" {
-		return errored(c, "counterpart_matching and to_matching are mutually exclusive")
+		return errored(c, ReasonMalformedClaim, "counterpart_matching and to_matching are mutually exclusive")
 	}
 	cp := counterpartQuery(c)
-	of, det := m.resolveOne(anchor, m.endpointUniverse, "node/endpoint")
-	if det != "" {
-		return errored(c, det)
+	of, bad := m.resolveOne(anchor, m.endpointUniverse, "node/endpoint")
+	if bad != nil {
+		return errored(c, bad.Reason, bad.Detail)
 	}
+	bindings := Bindings{Of: []string{of}}
 	var counterparts []string
 	if in {
 		counterparts = m.callers[of]
@@ -657,13 +671,14 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 		// count how many of this node's counterparts fall in that matched set.
 		filter, err := fqnres.Resolve(cp, m.endpointUniverse)
 		if err != nil {
-			return errored(c, err.Error())
+			return withBindings(errored(c, ReasonMalformedClaim, err.Error()), bindings)
 		}
 		if len(filter.Matches) == 0 {
 			// Same UNRESOLVED shape every other resolution failure uses (fqnres.
 			// UnresolvedDetail), so a counterpart-filter miss reads like any other
 			// unresolved name; the noun names what it failed to match.
-			return errored(c, fqnres.UnresolvedDetail(cp, "node/endpoint (counterpart filter)"))
+			return withBindings(errored(c, ReasonUnresolved,
+				fqnres.UnresolvedDetail(cp, "node/endpoint (counterpart filter)")), bindings)
 		}
 		allowed := setutil.StringSet(filter.Matches)
 		n = 0
@@ -674,9 +689,9 @@ func (m *model) evalDegree(c Claim, in bool) Result {
 		}
 	}
 	if n == *c.Eq {
-		return pass(c)
+		return withBindings(pass(c), bindings)
 	}
-	return fail(c, fmt.Sprintf("degree %d, want %d", n, *c.Eq))
+	return withBindings(fail(c, fmt.Sprintf("degree %d, want %d", n, *c.Eq)), bindings)
 }
 
 // evalEntrypoint grades an entrypoint claim: the route/topic/symbol Name must join
@@ -705,16 +720,16 @@ func (m *model) evalEntrypoint(c Claim) Result {
 	if strings.TrimSpace(c.Name) == "" {
 		// A whitespace-only Name passes a bare != "" check but grades against the
 		// bare-"/" root route — a fabricated match. Require real content (tenet 2).
-		return errored(c, "entrypoint requires 'name'")
+		return errored(c, ReasonMalformedClaim, "entrypoint requires 'name'")
 	}
 	if c.Fn == "" {
-		return errored(c, "entrypoint requires 'fn'")
+		return errored(c, ReasonMalformedClaim, "entrypoint requires 'fn'")
 	}
 	if c.EntryKind != "" && !graph.KnownEntrypointKind(c.EntryKind) {
 		// Fail closed on an authoring typo: an unknown filter value must ERROR, not
 		// silently exclude every record and read like a real zero-match FAIL verdict.
 		// The known set is graph.EntrypointKinds (sorted → deterministic detail).
-		return errored(c, fmt.Sprintf("unknown entry_kind %s (known kinds: %s)",
+		return errored(c, ReasonMalformedClaim, fmt.Sprintf("unknown entry_kind %s (known kinds: %s)",
 			strconv.Quote(c.EntryKind), quotedKinds(graph.EntrypointKinds)))
 	}
 	if len(m.entrypoints) == 0 {
@@ -726,12 +741,13 @@ func (m *model) evalEntrypoint(c Claim) Result {
 		// (tenet 2: abstain over a fabricated pole). Distinct from the per-name
 		// zero-match FAIL below, which is only meaningful over a NON-empty join — an
 		// entry_kind filter matching zero records over a non-empty universe stays a FAIL.
-		return errored(c, "graph carries no entrypoints[] records: the route/topic -> handler join is absent (routers outside root discovery's coverage, or a pre-join producer)")
+		return errored(c, ReasonMissingGraphData, "graph carries no entrypoints[] records: the route/topic -> handler join is absent (routers outside root discovery's coverage, or a pre-join producer)")
 	}
-	resolved, det := m.resolve(c.Fn, m.nodeUniverse, "node")
-	if det != "" {
-		return errored(c, det)
+	resolved, bad := m.resolve(c.Fn, m.nodeUniverse, "node")
+	if bad != nil {
+		return errored(c, bad.Reason, bad.Detail)
 	}
+	bindings := Bindings{Fn: resolved}
 	var matched []graph.Entrypoint
 	for _, ep := range m.entrypoints {
 		if c.EntryKind != "" && ep.Kind != c.EntryKind {
@@ -761,7 +777,7 @@ func (m *model) evalEntrypoint(c Claim) Result {
 		matched = append(matched, ep)
 	}
 	if len(matched) == 0 {
-		return fail(c, "no entrypoint matches "+fqnres.QuoteSingle(c.Name))
+		return withBindings(fail(c, "no entrypoint matches "+fqnres.QuoteSingle(c.Name)), bindings)
 	}
 	// Exact-name tiebreak: for the idiomatic literal-vs-template overlap (registrations
 	// "GET /users/me" and "GET /users/{id}"), EVERY claim spelling matches both records
@@ -773,6 +789,9 @@ func (m *model) evalEntrypoint(c Claim) Result {
 	// still reach the disagree ERROR below.
 	if exact := exactNameMatches(matched, c.Name); len(exact) > 0 {
 		matched = exact
+	}
+	for _, ep := range matched {
+		bindings.Entrypoint = append(bindings.Entrypoint, entrypointBinding(ep))
 	}
 	// Track the single agreed handler without materializing the join list; only when
 	// the set DISAGREES do we build the (sorted, deduped, QuoteSingle'd, capped) join
@@ -792,18 +811,26 @@ func (m *model) evalEntrypoint(c Claim) Result {
 			joinSet[fqnres.QuoteSingle(ep.Name)+" -> "+ep.Fn] = true
 		}
 		joins := setutil.SortedKeys(joinSet)
-		return errored(c, fmt.Sprintf("ambiguous entrypoint: %s matches %d joins with differing handlers: %s",
-			fqnres.QuoteSingle(c.Name), len(joins), fqnres.CapList(joins, maxMatches)))
+		return withBindings(errored(c, ReasonAmbiguous,
+			fmt.Sprintf("ambiguous entrypoint: %s matches %d joins with differing handlers: %s",
+				fqnres.QuoteSingle(c.Name), len(joins), fqnres.CapList(joins, maxMatches))), bindings)
 	}
 	// The matched records agree on exactly one handler H — PASS iff H is in the
 	// resolved-fn set (a plain fn resolved to exactly one; a /regex/ fn may have
 	// resolved to several — membership is the test).
 	for _, r := range resolved {
 		if r == h {
-			return pass(c)
+			return withBindings(pass(c), bindings)
 		}
 	}
-	return fail(c, "handled by "+h)
+	return withBindings(fail(c, "handled by "+h), bindings)
+}
+
+// entrypointBinding encodes the complete record identity with byte lengths,
+// rather than a human delimiter that graph-provided strings could contain.
+func entrypointBinding(ep graph.Entrypoint) string {
+	return fmt.Sprintf("entrypoint/v1\x00%d:%s\x00%d:%s\x00%d:%s",
+		len(ep.Kind), ep.Kind, len(ep.Name), ep.Name, len(ep.Fn), ep.Fn)
 }
 
 // quotedKinds renders a sorted kind vocabulary as a comma-separated quoted list for a
@@ -865,8 +892,8 @@ func degreeAnchor(c Claim) (query, detail string) { return anchor(c.Of, c.Fn, "o
 
 // resolveMany resolves an edge endpoint: a plain form must be unique (0 →
 // unresolved, ≥2 → ambiguous, both ERROR), a regex may match many (≥1). It
-// returns the matches, or an ERROR detail string (matches nil).
-func (m *model) resolveMany(query string) (matches []string, detail string) {
+// returns the matches, or a typed evaluation error (matches nil).
+func (m *model) resolveMany(query string) (matches []string, bad *evaluationError) {
 	return m.resolve(query, m.endpointUniverse, "node/endpoint")
 }
 
@@ -874,31 +901,40 @@ func (m *model) resolveMany(query string) (matches []string, detail string) {
 // names the universe in an UNRESOLVED detail ("node/endpoint" for the endpoint
 // universe, "node" for the node universe) so the message matches the universe
 // the claim was resolved against.
-func (m *model) resolve(query string, universe []string, noun string) (matches []string, detail string) {
+func (m *model) resolve(query string, universe []string, noun string) (matches []string, bad *evaluationError) {
 	res, err := fqnres.Resolve(query, universe)
 	if err != nil {
-		return nil, err.Error()
+		return nil, &evaluationError{Reason: ReasonMalformedClaim, Detail: err.Error()}
 	}
 	if len(res.Matches) == 0 {
-		return nil, fqnres.UnresolvedDetail(query, noun)
+		return nil, &evaluationError{
+			Reason: ReasonUnresolved,
+			Detail: fqnres.UnresolvedDetail(query, noun),
+		}
 	}
 	if !res.IsRegex && res.Ambiguous {
-		return nil, fqnres.AmbiguousDetail(query, res.Matches)
+		return nil, &evaluationError{
+			Reason: ReasonAmbiguous,
+			Detail: fqnres.AmbiguousDetail(query, res.Matches),
+		}
 	}
-	return res.Matches, ""
+	return res.Matches, nil
 }
 
 // resolveOne resolves to EXACTLY one endpoint (the anchor of a degree claim):
 // a regex that matches more than one is ambiguous here, an ERROR.
-func (m *model) resolveOne(query string, universe []string, noun string) (fqn string, detail string) {
-	matches, det := m.resolve(query, universe, noun)
-	if det != "" {
-		return "", det
+func (m *model) resolveOne(query string, universe []string, noun string) (fqn string, bad *evaluationError) {
+	matches, bad := m.resolve(query, universe, noun)
+	if bad != nil {
+		return "", bad
 	}
 	if len(matches) > 1 {
-		return "", fqnres.AmbiguousDetail(query, matches)
+		return "", &evaluationError{
+			Reason: ReasonAmbiguous,
+			Detail: fqnres.AmbiguousDetail(query, matches),
+		}
 	}
-	return matches[0], ""
+	return matches[0], nil
 }
 
 func (m *model) anyPair(froms, tos []string) bool {
@@ -983,12 +1019,22 @@ func label(c Claim) string {
 	}
 }
 
-func pass(c Claim) Result { return Result{Kind: c.Kind, Label: label(c), Outcome: Pass} }
-func fail(c Claim, d string) Result {
-	return Result{Kind: c.Kind, Label: label(c), Outcome: Fail, Detail: d}
+func pass(c Claim) Result {
+	return Result{ID: c.ID, Kind: c.Kind, Label: label(c), Outcome: Pass}
 }
-func errored(c Claim, d string) Result {
-	return Result{Kind: c.Kind, Label: label(c), Outcome: Errored, Detail: d}
+func fail(c Claim, d string) Result {
+	return Result{ID: c.ID, Kind: c.Kind, Label: label(c), Outcome: Fail, Detail: d}
+}
+func errored(c Claim, reason Reason, detail string) Result {
+	return Result{
+		ID: c.ID, Kind: c.Kind, Label: label(c),
+		Outcome: Errored, Reason: reason, Detail: detail,
+	}
+}
+
+func withBindings(result Result, bindings Bindings) Result {
+	result.Bindings = bindings
+	return result
 }
 
 func addSet(m map[string]map[string]bool, k, v string) {
