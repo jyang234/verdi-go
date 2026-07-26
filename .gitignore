@@ -19,3 +19,6 @@ coverage.html
 
 # local Codex feature worktrees
 /.worktrees/
+
+# durable subagent execution ledger and handoff artifacts
+/.superpowers/
