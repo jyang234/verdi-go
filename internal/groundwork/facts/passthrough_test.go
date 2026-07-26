@@ -83,6 +83,11 @@ func TestEvaluatePassThroughStatesAndIndependentBindings(t *testing.T) {
 					To:   target,
 					Path: []string{source, mid, target},
 				}},
+				BypassOccurrences: []PathWitness{{
+					From: source,
+					To:   target,
+					Path: []string{source, mid, target},
+				}},
 				UnboundThrough: []string{missingA, missingZ},
 			},
 		},
@@ -214,6 +219,23 @@ func TestEvaluatePassThroughCollectsCanonicalBypassesAndAllowsExactPairs(t *test
 		To:      []string{health, users, usersLog, otherSink, target},
 		Through: []string{guard},
 		Bypasses: []PathWitness{
+			{
+				From: sourceA,
+				To:   usersLog,
+				Path: []string{sourceA, usersLog},
+			},
+			{
+				From: sourceA,
+				To:   target,
+				Path: []string{sourceA, left, target},
+			},
+		},
+		BypassOccurrences: []PathWitness{
+			{
+				From: sourceA,
+				To:   usersLog,
+				Path: []string{sourceA, usersLog},
+			},
 			{
 				From: sourceA,
 				To:   usersLog,
@@ -443,6 +465,23 @@ func TestEvaluatePassThroughCanonicalAcrossShuffledDuplicateInput(t *testing.T) 
 			To:   target,
 			Path: []string{source, left, target},
 		}},
+		BypassOccurrences: []PathWitness{
+			{
+				From: source,
+				To:   target,
+				Path: []string{source, left, target},
+			},
+			{
+				From: source,
+				To:   target,
+				Path: []string{source, left, target},
+			},
+			{
+				From: source,
+				To:   target,
+				Path: []string{source, right, target},
+			},
+		},
 	}
 	if !reflect.DeepEqual(firstResult, want) {
 		t.Fatalf("canonical result mismatch\nwant: %#v\ngot:  %#v", want, firstResult)

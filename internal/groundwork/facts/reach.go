@@ -360,25 +360,7 @@ func canonicalBoundaryEdges(ix *graph.Index) []graph.Edge {
 			edges = append(edges, edge)
 		}
 	}
-	sort.Slice(edges, func(i, j int) bool {
-		left, right := edges[i], edges[j]
-		if left.To != right.To {
-			return left.To < right.To
-		}
-		if left.From != right.From {
-			return left.From < right.From
-		}
-		if left.Boundary != right.Boundary {
-			return left.Boundary < right.Boundary
-		}
-		if left.Tier != right.Tier {
-			return left.Tier < right.Tier
-		}
-		if left.Concurrent != right.Concurrent {
-			return !left.Concurrent
-		}
-		return left.Via < right.Via
-	})
+	sortBoundaryEdges(edges)
 	if len(edges) == 0 {
 		return edges
 	}
@@ -391,6 +373,28 @@ func canonicalBoundaryEdges(ix *graph.Index) []graph.Edge {
 		n++
 	}
 	return edges[:n]
+}
+
+func sortBoundaryEdges(edges []graph.Edge) {
+	sort.SliceStable(edges, func(i, j int) bool {
+		left, right := edges[i], edges[j]
+		if left.From != right.From {
+			return left.From < right.From
+		}
+		if left.To != right.To {
+			return left.To < right.To
+		}
+		if left.Boundary != right.Boundary {
+			return left.Boundary < right.Boundary
+		}
+		if left.Tier != right.Tier {
+			return left.Tier < right.Tier
+		}
+		if left.Concurrent != right.Concurrent {
+			return !left.Concurrent
+		}
+		return left.Via < right.Via
+	})
 }
 
 func canonicalBoundaryEffectValues(edges []graph.Edge) []boundaryEffect {

@@ -259,6 +259,23 @@ func TestPassThroughCharacterization(t *testing.T) {
 			},
 		},
 		{
+			name: "multiple boundary paths preserve finding multiplicity",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, "svc.Left", "svc.Right", guard),
+				Edges: []graph.Edge{
+					{From: sourceA, To: "svc.Right"},
+					{From: "svc.Right", To: users, Boundary: "outbound-sync"},
+					{From: sourceA, To: "svc.Left"},
+					{From: "svc.Left", To: users, Boundary: "outbound-sync"},
+				},
+			},
+			rule: pass([]string{sourceA}, []string{users}, []string{guard}),
+			want: []Finding{
+				violation(sourceA, users, guard, sourceA+" → svc.Left → "+users),
+				violation(sourceA, users, guard, sourceA+" → svc.Right → "+users),
+			},
+		},
+		{
 			name: "allow suppresses only its boundary pair",
 			g: &graph.Graph{
 				Nodes: nodes(sourceA, guard),
@@ -336,6 +353,24 @@ func TestPassThroughCharacterization(t *testing.T) {
 				Severity: Violation,
 				Summary:  ruleName + ": no bypass found, but the frontier is blind (reflect at " + blind + ") — require_proof is set and guarding cannot be proven",
 				From:     sourceA,
+			}},
+		},
+		{
+			name: "blind witness preserves sorted cone precedence",
+			g: &graph.Graph{
+				Nodes: nodes(sourceZ, blind, target, guard),
+				Edges: []graph.Edge{{From: sourceZ, To: blind}},
+				BlindSpots: []graph.BlindSpot{
+					{Kind: "unsafe", Site: sourceZ, Detail: "source blind"},
+					{Kind: "reflect", Site: blind, Detail: "reachable blind"},
+				},
+			},
+			rule: pass([]string{sourceZ}, []string{target}, []string{guard}),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Caution,
+				Summary:  ruleName + ": no bypass found, but the frontier is blind (reflect at " + blind + ") — cannot prove every path is guarded",
+				From:     sourceZ,
 			}},
 		},
 		{

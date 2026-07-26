@@ -41,7 +41,7 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			continue
 		}
 
-		for _, bypass := range fact.Bypasses {
+		for _, bypass := range fact.BypassOccurrences {
 			r.add(Finding{
 				Rule:     "must_pass_through",
 				Severity: Violation,

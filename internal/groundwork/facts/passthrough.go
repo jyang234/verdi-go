@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
 
 // EvaluatePassThrough proves whether every visible source-to-target path enters
@@ -49,6 +50,7 @@ func EvaluatePassThrough(ix *graph.Index, in PassThroughInput) PassThroughResult
 	}
 
 	bypassByPair := make(map[[2]string]PathWitness)
+	var occurrences []PathWitness
 	var firstBlind *BlindWitness
 	for _, source := range result.From {
 		if through[source] {
@@ -61,15 +63,17 @@ func EvaluatePassThrough(ix *graph.Index, in PassThroughInput) PassThroughResult
 			if fn == source || !targets[fn] || allowedPair(in.Allow, source, fn) {
 				continue
 			}
-			recordBypass(bypassByPair, PathWitness{
+			witness := PathWitness{
 				From: source,
 				To:   fn,
 				Path: reconstructPath(parent, source, fn),
-			})
+			}
+			occurrences = append(occurrences, witness)
+			recordBypass(bypassByPair, witness)
 		}
 
 		var coneEffects []graph.Edge
-		for _, edge := range canonicalBoundaryEdges(ix) {
+		for _, edge := range boundaryEdgeOccurrences(ix) {
 			if !coneSet[edge.From] {
 				continue
 			}
@@ -79,19 +83,29 @@ func EvaluatePassThrough(ix *graph.Index, in PassThroughInput) PassThroughResult
 			}
 			path := reconstructPath(parent, source, edge.From)
 			path = append(path, edge.To)
-			recordBypass(bypassByPair, PathWitness{
+			witness := PathWitness{
 				From: source,
 				To:   edge.To,
 				Path: path,
-			})
+			}
+			occurrences = append(occurrences, witness)
+			recordBypass(bypassByPair, witness)
 		}
 		if firstBlind == nil {
-			firstBlind = BlindFrontier(ix, source, cone, coneEffects)
+			// Legacy pass-through passed its sorted cone to the compatibility
+			// helper, which selected cone[0] rather than moving the actual source
+			// ahead of lexicographically earlier nodes. Preserve that evidence
+			// precedence, then restore the true source in the typed witness.
+			firstBlind = BlindFrontier(ix, "", cone, coneEffects)
+			if firstBlind != nil {
+				firstBlind.From = source
+			}
 		}
 	}
 
 	result.Bypasses = sortedBypasses(bypassByPair)
-	if len(result.Bypasses) > 0 {
+	result.BypassOccurrences = sortedBypassOccurrences(occurrences)
+	if len(result.BypassOccurrences) > 0 {
 		result.State = PassThroughBypassed
 		return result
 	}
@@ -133,9 +147,8 @@ func GuardedWalk(ix *graph.Index, from string, through []string) (cone []string,
 
 func allowedPair(allow []AllowPair, from, to string) bool {
 	for _, pair := range allow {
-		fromMatches := pair.From == "" || matchesAny(from, []string{pair.From})
-		toMatches := pair.To == "" || matchesAny(to, []string{pair.To})
-		if fromMatches && toMatches {
+		if policy.MatchExceptionSide(from, pair.From) &&
+			policy.MatchExceptionSide(to, pair.To) {
 			return true
 		}
 	}
@@ -177,4 +190,32 @@ func sortedBypasses(byPair map[[2]string]PathWitness) []PathWitness {
 		return nil
 	}
 	return result
+}
+
+func sortedBypassOccurrences(values []PathWitness) []PathWitness {
+	sort.SliceStable(values, func(i, j int) bool {
+		left, right := values[i], values[j]
+		if left.From != right.From {
+			return left.From < right.From
+		}
+		if left.To != right.To {
+			return left.To < right.To
+		}
+		return pathLess(left.Path, right.Path)
+	})
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+func boundaryEdgeOccurrences(ix *graph.Index) []graph.Edge {
+	var edges []graph.Edge
+	for _, edge := range ix.Edges() {
+		if edge.IsBoundary() {
+			edges = append(edges, edge)
+		}
+	}
+	sortBoundaryEdges(edges)
+	return edges
 }

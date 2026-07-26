@@ -96,13 +96,18 @@ const (
 // PassThroughResult carries complete bindings and deterministic evidence.
 // Unbound selector values are copied exactly, sorted, and de-duplicated.
 type PassThroughResult struct {
-	State          PassThroughState
-	From           []string
-	To             []string
-	Through        []string
-	Bypasses       []PathWitness
-	Blind          *BlindWitness
-	UnboundFrom    []string
-	UnboundTo      []string
-	UnboundThrough []string
+	State    PassThroughState
+	From     []string
+	To       []string
+	Through  []string
+	Bypasses []PathWitness
+	// BypassOccurrences retains one canonical witness per legacy traversal
+	// occurrence. Bypasses is the pair-deduplicated claim evidence; standing
+	// fitness consumes this field to preserve its existing per-boundary-edge
+	// finding multiplicity without owning a second traversal.
+	BypassOccurrences []PathWitness
+	Blind             *BlindWitness
+	UnboundFrom       []string
+	UnboundTo         []string
+	UnboundThrough    []string
 }
