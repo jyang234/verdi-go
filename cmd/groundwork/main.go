@@ -180,7 +180,7 @@ usage:
   groundwork review-triage <base.json> <branch.json> [--json|--mermaid|--summary] [--policy <p.json>] [--scope-fqns <file|->] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage; --summary is an MR-comment digest; --policy adds per-route write movement; --scope-fqns marks the author-edited functions
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <stamp>] [--corpus <t.json>...] [--capture <grade>] [--json]  pre-flight gate: new violations, scope creep, breaking contract; --corpus adds a behavioral-impeachment gate, --capture asserts its fidelity grade
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
-  groundwork assert <graph.json> <claims.json> [--expect <stamp>] [--json]   verify point-in-time doc claims against a graph (a FAIL exits 1; an errored claim — one whose gate could not run — exits 2)
+  groundwork assert <graph.json> <claims.json> [--expect <stamp>] [--json]   verify caller-supplied point-in-time claims against a graph (a FAIL exits 1; an errored claim — one whose gate could not run — exits 2)
   groundwork gen-diagram [--check <file>] <manifest.json> <logical>=<graph.json> [<logical>=<graph.json> ...]  emit a generated-core mermaid diagram (every solid edge read from a graph, judgment overlays dashed); --check gates a committed copy against drift (exit 1)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <stamp>]  prove an artifact is authentic (not tampered/stale)
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones

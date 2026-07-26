@@ -1277,13 +1277,28 @@ Producer and judge deploy in lockstep — that is a feature.
 
 ### Claims files — `groundwork assert <graph.json> <claims.json>`
 
-`assert` is the point-in-time complement to `fitness`. Where `fitness` gates
-ongoing invariants over a policy, `assert` answers a narrower question: **does
-this graph, right now, match what a design doc says about it?** It is the
-mechanical version of the manual audit that catches consumer-side transcription
-drift — a hand-drawn edge that the graph never had, a tier typed from memory.
-Every claim is fail-loud: a claim that cannot be evaluated ERRORs rather than
-passing vacuously.
+`assert` is the point-in-time complement to `fitness`. It is caller-supplied,
+ephemeral evidence: **does this graph, right now, match these stated facts?**
+`fitness`, by contrast, evaluates CODEOWNERS-gated standing policy: **does this
+graph obey the approved architecture?** An `assert` PASS proves the supplied
+predicate against this graph; it does not approve the predicate as policy. It is
+the mechanical version of the manual audit that catches consumer-side
+transcription drift — a hand-drawn edge that the graph never had, a tier typed
+from memory. Every claim is fail-loud: a claim that cannot be evaluated ERRORs
+rather than passing vacuously.
+
+The independently releasable machine milestone supports the existing structural
+claim kinds below; it does not yet accept rich reachability, waypoint,
+concurrency, or obligation kinds. Its command contract is:
+
+```console
+groundwork assert <graph.json> <claims.json> [--expect <stamp>] [--json]
+```
+
+`--expect` binds the report to the graph's `stamp`: a missing or mismatched
+stamp is an operational error. In CI, `GROUNDWORK_REQUIRE_STAMP=1` also makes a
+missing `--expect` an operational error, so `assert` has no identity-binding
+loophole. Local use remains opt-in when the environment variable is unset.
 
 A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 
@@ -1301,9 +1316,12 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 **Claim metadata — `id`.** Any claim may carry a free-form `"id"`, echoed as the
 report-line label so a run's output points back at the exact claim (a suite
 identifies its claims by id). It is allowed on **every** kind — it is metadata,
-not a kind field — and never trips the wrong-kind field check. Uniqueness per
-file is *recommended* but not enforced. A claim with no `id` falls back to an
-endpoint-derived label.
+not a kind field — and never trips the wrong-kind field check. Text mode is
+fully compatible with older id-less files: IDs remain optional and a missing ID
+falls back to an endpoint-derived label. JSON mode requires every ID to contain
+at least one non-whitespace character and requires IDs to be unique by exact
+UTF-8 byte equality. The complete list is validated in claims-file order before
+evaluation; the first missing or duplicate ID rejects the whole machine run.
 
 **The `fn` alias.** `fn` is a documented alias for a claim's anchor field: on
 `node`/`no_node` it aliases `fqn`; on `in_degree`/`out_degree` it aliases `of`.
@@ -1458,9 +1476,41 @@ by `cmd/groundwork`'s acceptance tests, so these blocks mirror enforced output.
 
 Exit codes ride groundwork's existing split: **≥1 FAIL exits 1** (a computed
 verdict failed — takes precedence over errors), **zero FAILs but ≥1 errored
-claim exits 2** (a claim's gate could not run), and all-pass exits 0. The output
-is deterministic (a pure function of graph + claims), so a `--check`-style CI
-comparison against a committed expected report is byte-stable.
+claim exits 2** (a claim's gate could not run), and all-pass exits 0. In either
+text or JSON mode, the complete report is written before that computed exit is
+returned. Usage, graph/claims decode, stamp, and JSON machine-ID errors instead
+produce **no report** and exit 2. The output is deterministic (a pure function
+of graph + claims), so a `--check`-style CI comparison against a committed
+expected report is byte-stable.
+
+### Machine report — `--json`
+
+`--json` emits one canonical `groundwork.assert/v1` report. Its top-level fields
+are `schema_version`, `fixture`, `results`, and `summary`. `fixture` always
+contains the graph's `stamp`, `producer_tool`, `algo`, and `caveats`; unrecorded
+scalar provenance is `""`, and caveats are sorted and deduplicated evaluator
+substrate disclosures. `results` has one item per input claim in claims-file
+order. Each result carries `id`, `kind`, and `outcome` (`PASS`, `FAIL`, or
+`ERROR`), with optional human `detail`, canonical resolved `bindings`, and
+deterministic `witnesses`. `reason` appears only on `ERROR`; consumers must use
+it rather than parsing `detail`. `summary` contains `passed`, `failed`,
+`errored`, `nodes`, and `unique_edges`.
+
+The closed v1 `reason` vocabulary is:
+
+- `UNRESOLVED`
+- `AMBIGUOUS`
+- `UNBOUND_SELECTOR`
+- `BLIND_FRONTIER`
+- `MALFORMED_CLAIM`
+- `UNKNOWN_STATUS`
+- `MISSING_GRAPH_DATA`
+- `CANT_PROVE`
+- `UNMATCHED`
+
+JSON mode first validates every machine ID. A decode, stamp, or machine-ID
+failure emits no partial JSON; consumers can therefore treat a received report
+as complete for its claims file.
 
 Claims files outlive the pins they were written against by design. `assert`
 loads the graph through the same strict decoder as every other groundwork

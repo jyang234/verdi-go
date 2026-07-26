@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/canonjson"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/claims"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 )
 
 const assertAllPassJSON = `{
@@ -252,6 +256,111 @@ func TestAssertJSONCommandContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAssertJSONCanonicalAcrossWholeGraphPermutations pins the command boundary:
+// independently reordered graph collections, including duplicate edge and caveat
+// records, must produce the same machine report bytes for the same claims order.
+func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
+	dir := t.TempDir()
+	claimsPath := filepath.Join(dir, "claims.json")
+	if err := os.WriteFile(claimsPath, []byte(`{"claims":[{"id":"edge","kind":"edge","from":"pkg.A","to":"pkg.B"},{"id":"node","kind":"node","fqn":"pkg.C"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := graph.Graph{
+		Stamp:   "sha-test",
+		Tool:    "flowmap-test",
+		Algo:    "vta",
+		Caveats: []string{"zeta", "alpha", "alpha"},
+		Nodes: []graph.Node{
+			{FQN: "pkg.A", Sig: "func()", Tier: 1},
+			{FQN: "pkg.B", Sig: "func()", Tier: 2},
+			{FQN: "pkg.C", Sig: "func()", Tier: 3},
+		},
+		Edges: []graph.Edge{
+			{From: "pkg.A", To: "pkg.B", Tier: 2},
+			{From: "pkg.A", To: "pkg.B", Tier: 2},
+			{From: "pkg.B", To: "pkg.C", Tier: 3},
+		},
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "reflect", Site: "pkg.A", Detail: "a"},
+			{Kind: "unsafe", Site: "pkg.B", Detail: "b"},
+			{Kind: "cgo", Site: "pkg.C", Detail: "c"},
+		},
+		Obligations: []graph.Obligation{
+			{Rule: "r1", Kind: "must_pass_through", Fn: "pkg.A", Site: "a", Status: "SATISFIED"},
+			{Rule: "r2", Kind: "must_not_reach", Fn: "pkg.B", Site: "b", Status: "VIOLATED"},
+			{Rule: "r3", Kind: "must_not_reach", Fn: "pkg.C", Site: "c", Status: "CANT-PROVE"},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "GET /a", Fn: "pkg.A"},
+			{Kind: "consumer", Name: "events.b", Fn: "pkg.B"},
+			{Kind: "worker", Name: "worker-c", Fn: "pkg.C"},
+		},
+	}
+
+	var want []byte
+	for permutation := 0; permutation < 6; permutation++ {
+		graphPath := writeAssertGraph(t, dir, permutation, permutedAssertGraph(base, permutation))
+		var out bytes.Buffer
+		if err := cmdAssertTo([]string{graphPath, claimsPath, "--json"}, &out); err != nil {
+			t.Fatalf("permutation %d: cmdAssertTo: %v", permutation, err)
+		}
+		if permutation == 0 {
+			want = append([]byte(nil), out.Bytes()...)
+			continue
+		}
+		if got := out.Bytes(); !bytes.Equal(got, want) {
+			t.Fatalf("permutation %d changed JSON report:\n%s\nwant:\n%s", permutation, got, want)
+		}
+	}
+
+	var report claims.JSONReport
+	if err := json.Unmarshal(want, &report); err != nil {
+		t.Fatalf("decode canonical report: %v", err)
+	}
+	if got, want := report.Fixture.Caveats, []string{"alpha", "zeta"}; !slices.Equal(got, want) {
+		t.Fatalf("fixture caveats = %q, want %q", got, want)
+	}
+	if report.Summary.UniqueEdges != 2 {
+		t.Fatalf("unique edges = %d, want 2 after duplicate-edge deduplication", report.Summary.UniqueEdges)
+	}
+}
+
+func permutedAssertGraph(base graph.Graph, permutation int) graph.Graph {
+	g := base
+	g.Nodes = permuteAssertSlice(base.Nodes, permutation, permutation%2 == 1)
+	g.Edges = permuteAssertSlice(base.Edges, permutation*2, permutation%3 == 1)
+	g.BlindSpots = permuteAssertSlice(base.BlindSpots, permutation*2, permutation%2 == 0)
+	g.Obligations = permuteAssertSlice(base.Obligations, permutation, permutation%3 == 2)
+	g.Entrypoints = permuteAssertSlice(base.Entrypoints, permutation*2, permutation%2 == 1)
+	g.Caveats = permuteAssertSlice(base.Caveats, permutation, permutation%3 == 0)
+	return g
+}
+
+func permuteAssertSlice[T any](values []T, offset int, reverse bool) []T {
+	out := make([]T, len(values))
+	for i := range values {
+		j := (i + offset) % len(values)
+		if reverse {
+			j = len(values) - 1 - j
+		}
+		out[i] = values[j]
+	}
+	return out
+}
+
+func writeAssertGraph(t *testing.T, dir string, permutation int, g graph.Graph) string {
+	t.Helper()
+	b, err := canonjson.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("graph-%d.json", permutation))
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // TestAssertMachineIDValidation rejects an incomplete machine identity set
