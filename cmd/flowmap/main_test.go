@@ -175,6 +175,49 @@ func fixtureDir() string {
 	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "fixtures", "loansvc")
 }
 
+func localTypeArgFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(file),
+		"..", "..", "testdata", "fixtures", "localtypeargsvc",
+	)
+}
+
+func TestGraphFunctionLocalGenericTypesDeterministic(t *testing.T) {
+	dir := localTypeArgFixtureDir()
+	// The fixture is a standalone service module, not a repository workspace member.
+	t.Setenv("GOWORK", "off")
+	var want string
+	for i := 0; i < 20; i++ {
+		got := captureStdout(t, func() {
+			if err := run([]string{"graph", dir}); err != nil {
+				t.Fatalf("run %d: %v", i, err)
+			}
+		})
+		if i == 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("run %d changed graph bytes", i)
+		}
+	}
+
+	var g graphio.Graph
+	if err := json.Unmarshal([]byte(want), &g); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	var instances int
+	for _, n := range g.Nodes {
+		if strings.Contains(n.FQN, "report[") {
+			instances++
+		}
+	}
+	if instances < 2 {
+		t.Fatalf("graph kept %d report instances; want at least 2", instances)
+	}
+}
+
 // TestTaintRendersPerSourceDecomposition pins the B1 CLI surface: `flowmap taint`
 // emits the additive "by source" block alongside the aggregate, so an aggregate FLOW
 // no longer masks the other declared sources. taintsvc declares a FLOW source, an
