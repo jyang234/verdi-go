@@ -186,6 +186,8 @@ func TestEvaluateReachDeterministicCandidatePrecedence(t *testing.T) {
 		left        = "svc.Left"
 		right       = "svc.Right"
 		fnTarget    = "svc.Target"
+		fnTargetA   = "svc.targets.ATarget"
+		fnTargetZ   = "svc.targets.ZTarget"
 		effectA     = "boundary:db UPDATE alpha"
 		effectB     = "boundary:db UPDATE beta"
 	)
@@ -215,17 +217,39 @@ func TestEvaluateReachDeterministicCandidatePrecedence(t *testing.T) {
 			want: PathWitness{From: source, To: fnTarget, Path: []string{source, left, fnTarget}},
 		},
 		{
-			name: "function target precedes boundary target at the same level",
+			name: "function target precedes a nearer boundary target",
 			g: &graph.Graph{
-				Nodes: []graph.Node{{FQN: source}, {FQN: fnTarget}},
+				Nodes: []graph.Node{{FQN: source}, {FQN: left}, {FQN: fnTarget}},
 				Edges: []graph.Edge{
 					{From: source, To: effectA, Boundary: "outbound-sync"},
-					{From: source, To: fnTarget},
+					{From: source, To: left},
+					{From: left, To: fnTarget},
 				},
 			},
 			from: []string{source},
 			to:   []string{effectA, fnTarget},
-			want: PathWitness{From: source, To: fnTarget, Path: []string{source, fnTarget}},
+			want: PathWitness{From: source, To: fnTarget, Path: []string{source, left, fnTarget}},
+		},
+		{
+			name: "lexicographic target precedes BFS discovery order",
+			g: &graph.Graph{
+				Nodes: []graph.Node{
+					{FQN: source},
+					{FQN: left},
+					{FQN: right},
+					{FQN: fnTargetA},
+					{FQN: fnTargetZ},
+				},
+				Edges: []graph.Edge{
+					{From: source, To: left},
+					{From: left, To: fnTargetZ},
+					{From: source, To: right},
+					{From: right, To: fnTargetA},
+				},
+			},
+			from: []string{source},
+			to:   []string{"svc.targets"},
+			want: PathWitness{From: source, To: fnTargetA, Path: []string{source, right, fnTargetA}},
 		},
 		{
 			name: "boundary label precedes owner for equal length effects",
@@ -399,7 +423,90 @@ func TestEvaluateReachBlindClassification(t *testing.T) {
 	}
 }
 
-func TestEvaluateReachCanonicalBlindTie(t *testing.T) {
+func TestEvaluateReachLegacyBlindPrecedence(t *testing.T) {
+	const (
+		source = "example.com/svc/handler.Source"
+		near   = "example.com/svc/unsafe.ZNear"
+		deep   = "example.com/svc/unsafe.ADeep"
+		other  = "example.com/svc/handler.Other"
+		target = "boundary:db UPDATE users"
+		dyn    = "boundary:bus PUBLISH <dynamic>"
+	)
+
+	tests := []struct {
+		name string
+		g    *graph.Graph
+		want *BlindWitness
+	}{
+		{
+			name: "lexicographic cone function precedes BFS distance",
+			g: &graph.Graph{
+				Nodes: []graph.Node{{FQN: source}, {FQN: near}, {FQN: deep}, {FQN: other}},
+				Edges: []graph.Edge{
+					{From: source, To: near},
+					{From: near, To: deep},
+					{From: other, To: target, Boundary: "outbound-sync"},
+				},
+				BlindSpots: []graph.BlindSpot{
+					{Kind: "unsafe", Site: near, Detail: "near"},
+					{Kind: "reflect", Site: deep, Detail: "deep"},
+				},
+			},
+			want: &BlindWitness{
+				From: source, Site: deep, Kind: "reflect", Detail: "deep", Location: BlindAtFunction,
+			},
+		},
+		{
+			name: "function site precedes its package site",
+			g: &graph.Graph{
+				Nodes: []graph.Node{{FQN: source}, {FQN: near}, {FQN: other}},
+				Edges: []graph.Edge{
+					{From: source, To: near},
+					{From: other, To: target, Boundary: "outbound-sync"},
+				},
+				BlindSpots: []graph.BlindSpot{
+					{Kind: "reflect", Site: "example.com/svc/unsafe", Detail: "package"},
+					{Kind: "unsafe", Site: near, Detail: "function"},
+				},
+			},
+			want: &BlindWitness{
+				From: source, Site: near, Kind: "unsafe", Detail: "function", Location: BlindAtFunction,
+			},
+		},
+		{
+			name: "function and package sites precede dynamic effects",
+			g: &graph.Graph{
+				Nodes: []graph.Node{{FQN: source}, {FQN: deep}, {FQN: other}},
+				Edges: []graph.Edge{
+					{From: source, To: dyn, Boundary: "outbound-async"},
+					{From: source, To: deep},
+					{From: other, To: target, Boundary: "outbound-sync"},
+				},
+				BlindSpots: []graph.BlindSpot{
+					{Kind: "reflect", Site: deep, Detail: "deep"},
+				},
+			},
+			want: &BlindWitness{
+				From: source, Site: deep, Kind: "reflect", Detail: "deep", Location: BlindAtFunction,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvaluateReach(
+				graph.NewIndex(tt.g),
+				[]string{source},
+				[]string{"boundary:db UPDATE"},
+			)
+			if got.State != ReachBlind || !reflect.DeepEqual(got.Blind, tt.want) {
+				t.Fatalf("blind precedence mismatch\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestEvaluateReachCanonicalBlindWithinFirstSite(t *testing.T) {
 	const (
 		source = "svc.Source"
 		left   = "svc.Left"
@@ -422,15 +529,19 @@ func TestEvaluateReachCanonicalBlindTie(t *testing.T) {
 	}
 	first := []graph.BlindSpot{
 		{Kind: "unsafe", Site: left, Detail: "z"},
+		{Kind: "unsafe", Site: left, Detail: "a"},
+		{Kind: "unsafe", Site: left, Detail: "a"},
 		{Kind: "reflect", Site: right, Detail: "z"},
 		{Kind: "reflect", Site: right, Detail: "a"},
 		{Kind: "reflect", Site: right, Detail: "a"},
 	}
 	second := []graph.BlindSpot{
 		{Kind: "reflect", Site: right, Detail: "a"},
+		{Kind: "unsafe", Site: left, Detail: "a"},
 		{Kind: "reflect", Site: right, Detail: "z"},
 		{Kind: "unsafe", Site: left, Detail: "z"},
 		{Kind: "reflect", Site: right, Detail: "a"},
+		{Kind: "unsafe", Site: left, Detail: "a"},
 	}
 
 	evaluate := func(spots []graph.BlindSpot) ReachResult {
@@ -449,11 +560,11 @@ func TestEvaluateReachCanonicalBlindTie(t *testing.T) {
 		From:  []string{source},
 		To:    []string{target},
 		Blind: &BlindWitness{
-			From: source, Site: right, Kind: "reflect", Detail: "a", Location: BlindAtFunction,
+			From: source, Site: left, Kind: "unsafe", Detail: "a", Location: BlindAtFunction,
 		},
 	}
 	if !reflect.DeepEqual(gotFirst, want) {
-		t.Fatalf("blind tie mismatch\nwant: %#v\ngot:  %#v", want, gotFirst)
+		t.Fatalf("blind structural/canonical order mismatch\nwant: %#v\ngot:  %#v", want, gotFirst)
 	}
 }
 

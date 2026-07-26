@@ -104,9 +104,11 @@ type sourceSearch struct {
 	blind *BlindWitness
 }
 
-// searchFrom walks one source by BFS distance. At each terminal distance it
-// considers function targets before boundary targets; sorted adjacency fixes
-// parent selection for competing shortest paths.
+// searchFrom walks one source exactly once. It preserves legacy evidence
+// precedence by considering every reachable function in canonical FQN order
+// before boundary targets; the BFS parent map still reconstructs a deterministic
+// shortest path to the selected function. With no function hit, boundary
+// targets retain distance order and their canonical label/owner tie-break.
 func searchFrom(
 	ix *graph.Index,
 	source string,
@@ -119,16 +121,24 @@ func searchFrom(
 
 	for len(current) > 0 {
 		next := nextLevel(ix, current, parent)
-		for _, fn := range next {
-			if targets[fn] {
-				return sourceSearch{path: &PathWitness{
-					From: source,
-					To:   fn,
-					Path: reconstructPath(parent, source, fn),
-				}}
-			}
+		if len(next) > 0 {
+			levels = append(levels, next)
 		}
-		if effect, ok := firstMatchingEffect(current, targets, effects); ok {
+		current = next
+	}
+
+	cone := canonicalCone(source, parent)
+	for _, fn := range cone[1:] {
+		if targets[fn] {
+			return sourceSearch{path: &PathWitness{
+				From: source,
+				To:   fn,
+				Path: reconstructPath(parent, source, fn),
+			}}
+		}
+	}
+	for _, owners := range levels {
+		if effect, ok := firstMatchingEffect(owners, targets, effects); ok {
 			path := reconstructPath(parent, source, effect.From)
 			path = append(path, effect.To)
 			return sourceSearch{path: &PathWitness{
@@ -137,13 +147,9 @@ func searchFrom(
 				Path: path,
 			}}
 		}
-		if len(next) > 0 {
-			levels = append(levels, next)
-		}
-		current = next
 	}
 
-	return sourceSearch{blind: blindForLevels(ix, source, levels, effects)}
+	return sourceSearch{blind: blindForCone(ix, source, cone, effects)}
 }
 
 func nextLevel(ix *graph.Index, current []string, parent map[string]string) []string {
@@ -158,6 +164,17 @@ func nextLevel(ix *graph.Index, current []string, parent map[string]string) []st
 		}
 	}
 	return next
+}
+
+func canonicalCone(source string, parent map[string]string) []string {
+	reachable := make([]string, 0, len(parent)-1)
+	for fn := range parent {
+		if fn != source {
+			reachable = append(reachable, fn)
+		}
+	}
+	sort.Strings(reachable)
+	return append([]string{source}, reachable...)
 }
 
 func firstMatchingEffect(
@@ -207,15 +224,15 @@ func BlindFrontier(
 	if ix == nil {
 		return nil
 	}
-	canonicalCone := canonicalStrings(cone)
-	if len(canonicalCone) > 0 && from != "" {
-		for i, fn := range canonicalCone {
+	coneValues := canonicalStrings(cone)
+	if len(coneValues) > 0 && from != "" {
+		for i, fn := range coneValues {
 			if fn == from {
-				reordered := make([]string, 0, len(canonicalCone))
+				reordered := make([]string, 0, len(coneValues))
 				reordered = append(reordered, fn)
-				reordered = append(reordered, canonicalCone[:i]...)
-				reordered = append(reordered, canonicalCone[i+1:]...)
-				canonicalCone = reordered
+				reordered = append(reordered, coneValues[:i]...)
+				reordered = append(reordered, coneValues[i+1:]...)
+				coneValues = reordered
 				break
 			}
 		}
@@ -225,41 +242,69 @@ func BlindFrontier(
 	for _, effect := range canonicalEffects {
 		byOwner[effect.From] = append(byOwner[effect.From], effect)
 	}
-	return blindForLevels(ix, from, [][]string{canonicalCone}, byOwner)
+	return blindForCone(ix, from, coneValues, byOwner)
 }
 
-func blindForLevels(
+// blindForCone preserves the legacy structural precedence: source then
+// lexicographic reachable functions, function-site evidence before package-site
+// evidence at each function, and dynamic effects only after every function and
+// package site is visible.
+func blindForCone(
 	ix *graph.Index,
 	from string,
-	levels [][]string,
+	cone []string,
 	effects map[string][]boundaryEffect,
 ) *BlindWitness {
-	for _, level := range levels {
-		var candidates []BlindWitness
-		for _, fn := range level {
-			candidates = append(candidates, blindSpotsAt(ix, from, fn, BlindAtFunction)...)
-			if pkg := PackageOf(fn); pkg != "" {
-				candidates = append(candidates, blindSpotsAt(ix, from, pkg, BlindInPackage)...)
-			}
-			for _, effect := range effects[fn] {
-				if effect.Dynamic {
-					candidates = append(candidates, BlindWitness{
-						From:     from,
-						Site:     fn,
-						Kind:     dynamicEffectKind,
-						Detail:   effect.To,
-						Location: BlindAtDynamicEffect,
-					})
-				}
-			}
-		}
-		sortBlindWitnesses(candidates)
-		if len(candidates) > 0 {
+	for _, fn := range cone {
+		if candidates := blindSpotsAt(ix, from, fn, BlindAtFunction); len(candidates) > 0 {
 			witness := candidates[0]
 			return &witness
 		}
+		if pkg := PackageOf(fn); pkg != "" {
+			candidates := blindSpotsAt(ix, from, pkg, BlindInPackage)
+			if len(candidates) > 0 {
+				witness := candidates[0]
+				return &witness
+			}
+		}
+	}
+
+	var dynamic []BlindWitness
+	for _, fn := range cone {
+		for _, effect := range effects[fn] {
+			if effect.Dynamic {
+				dynamic = append(dynamic, BlindWitness{
+					From:     from,
+					Site:     fn,
+					Kind:     dynamicEffectKind,
+					Detail:   effect.To,
+					Location: BlindAtDynamicEffect,
+				})
+			}
+		}
+	}
+	dynamic = canonicalBlindWitnesses(dynamic)
+	if len(dynamic) > 0 {
+		witness := dynamic[0]
+		return &witness
 	}
 	return nil
+}
+
+func canonicalBlindWitnesses(witnesses []BlindWitness) []BlindWitness {
+	sortBlindWitnesses(witnesses)
+	if len(witnesses) == 0 {
+		return witnesses
+	}
+	n := 1
+	for _, witness := range witnesses[1:] {
+		if witness == witnesses[n-1] {
+			continue
+		}
+		witnesses[n] = witness
+		n++
+	}
+	return witnesses[:n]
 }
 
 func blindSpotsAt(
@@ -281,7 +326,7 @@ func blindSpotsAt(
 			Location: location,
 		})
 	}
-	return result
+	return canonicalBlindWitnesses(result)
 }
 
 func sortBlindWitnesses(witnesses []BlindWitness) {

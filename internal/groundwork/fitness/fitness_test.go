@@ -224,6 +224,69 @@ func TestReachCharacterization(t *testing.T) {
 			}},
 		},
 		{
+			name: "function target precedes a nearer boundary target",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: mid},
+						{FQN: "svc.Target"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: target, Boundary: "outbound-sync"},
+						{From: source, To: mid},
+						{From: mid, To: "svc.Target"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"boundary:db UPDATE", "svc.Target"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches svc.Target",
+				From:     source,
+				To:       "svc.Target",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "lexicographic reachable target precedes BFS discovery order",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: "svc.AParent"},
+						{FQN: "svc.ZParent"},
+						{FQN: "svc.targets.ATarget"},
+						{FQN: "svc.targets.ZTarget"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.AParent"},
+						{From: "svc.AParent", To: "svc.targets.ZTarget"},
+						{From: source, To: "svc.ZParent"},
+						{From: "svc.ZParent", To: "svc.targets.ATarget"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"svc.targets"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches svc.targets.ATarget",
+				From:     source,
+				To:       "svc.targets.ATarget",
+				Detail:   "",
+			}},
+		},
+		{
 			name: "proven absence",
 			g:    baseGraph,
 			rule: rule,
@@ -243,6 +306,37 @@ func TestReachCharacterization(t *testing.T) {
 				Rule:     "must_not_reach",
 				Severity: Caution,
 				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "lexicographic cone function chooses blind evidence before BFS distance",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: "svc.ZNear"},
+						{FQN: "svc.ADeep"},
+						{FQN: other},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.ZNear"},
+						{From: "svc.ZNear", To: "svc.ADeep"},
+						{From: other, To: target, Boundary: "outbound-sync"},
+					},
+					BlindSpots: []graph.BlindSpot{
+						{Kind: "unsafe", Site: "svc.ZNear", Detail: "near"},
+						{Kind: "reflect", Site: "svc.ADeep", Detail: "deep"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.ADeep) — cannot prove absence",
 				From:     source,
 				To:       "",
 				Detail:   "",
