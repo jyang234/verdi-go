@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,39 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/claims"
 )
+
+const assertAllPassJSON = `{
+  "schema_version": "groundwork.assert/v1",
+  "fixture": {
+    "stamp": "",
+    "producer_tool": "groundwork test",
+    "algo": "rta",
+    "caveats": []
+  },
+  "results": [
+    {
+      "id": "pass",
+      "kind": "edge",
+      "outcome": "PASS",
+      "bindings": {
+        "from": [
+          "pkg.A"
+        ],
+        "to": [
+          "pkg.B"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "errored": 0,
+    "nodes": 2,
+    "unique_edges": 1
+  }
+}
+`
 
 // TestAssertLoansvcAcceptance runs the committed seven-claim file over the
 // pinned loansvc graph, exercising all four outcome classes at once — PASS,
@@ -147,38 +182,6 @@ func TestAssertJSONCommandContract(t *testing.T) {
 	graphPath, writeClaims := assertMachineFiles(t)
 
 	allPassClaims := `{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`
-	const wantAllPass = `{
-  "schema_version": "groundwork.assert/v1",
-  "fixture": {
-    "stamp": "",
-    "producer_tool": "groundwork test",
-    "algo": "rta",
-    "caveats": []
-  },
-  "results": [
-    {
-      "id": "pass",
-      "kind": "edge",
-      "outcome": "PASS",
-      "bindings": {
-        "from": [
-          "pkg.A"
-        ],
-        "to": [
-          "pkg.B"
-        ]
-      }
-    }
-  ],
-  "summary": {
-    "passed": 1,
-    "failed": 0,
-    "errored": 0,
-    "nodes": 2,
-    "unique_edges": 1
-  }
-}
-`
 
 	tests := []struct {
 		name          string
@@ -192,7 +195,7 @@ func TestAssertJSONCommandContract(t *testing.T) {
 			name:          "all pass",
 			claims:        allPassClaims,
 			wantOutcomes:  []string{"PASS"},
-			wantExactJSON: wantAllPass + "\n",
+			wantExactJSON: assertAllPassJSON,
 		},
 		{
 			name:         "with FAIL",
@@ -328,6 +331,125 @@ func TestAssertStampCommandContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAssertReportWriteErrors uses an injected writer rather than replacing
+// process-wide os.Stdout, so it remains isolated from tests that may run in
+// parallel. Report delivery failures are operational even when evaluation
+// itself passes.
+func TestAssertReportWriteErrors(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+	textClaims := writeClaims(`{"claims":[{"kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+	jsonClaims := writeClaims(`{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+	writeErr := errors.New("stdout unavailable")
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		out  io.Writer
+	}{
+		{
+			name: "text write error",
+			args: []string{graphPath, textClaims},
+			out:  errorWriter{err: writeErr},
+		},
+		{
+			name: "JSON write error",
+			args: []string{graphPath, jsonClaims, "--json"},
+			out:  errorWriter{err: writeErr},
+		},
+		{
+			name: "short write",
+			args: []string{graphPath, textClaims},
+			out:  shortWriter{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := cmdAssertTo(tt.args, tt.out)
+			if err == nil {
+				t.Fatal("cmdAssertTo error = nil, want operational write error")
+			}
+			var verdict verdictError
+			if errors.As(err, &verdict) {
+				t.Fatalf("cmdAssertTo error = %v, want operational error", err)
+			}
+			if !strings.Contains(err.Error(), "write report") {
+				t.Fatalf("cmdAssertTo error = %v, want write-report context", err)
+			}
+			if tt.name == "short write" && !errors.Is(err, io.ErrShortWrite) {
+				t.Fatalf("cmdAssertTo error = %v, want io.ErrShortWrite", err)
+			}
+		})
+	}
+}
+
+// TestAssertDoubleDashCompatibility preserves the flag-package-era invocation
+// while proving the new flags remain movable on either side of the delimiter.
+func TestAssertDoubleDashCompatibility(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+	textClaims := writeClaims(`{"claims":[{"kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+	jsonClaims := writeClaims(`{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+	stamped := stampedGraphFile(t, graphPath, "sha-good")
+
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		wantOut string
+	}{
+		{
+			name:    "text delimiter",
+			args:    []string{"--", graphPath, textClaims},
+			wantOut: "assert: 1 passed, 0 failed, 0 errored (graph: 2 nodes, 1 unique edges)\n",
+		},
+		{
+			name:    "JSON flag after positionals",
+			args:    []string{"--", graphPath, jsonClaims, "--json"},
+			wantOut: assertAllPassJSON,
+		},
+		{
+			name:    "expect flag before delimiter",
+			args:    []string{"--expect", "sha-good", "--", stamped, textClaims},
+			wantOut: "assert: 1 passed, 0 failed, 0 errored (graph: 2 nodes, 1 unique edges)\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := cmdAssertTo(tt.args, &out); err != nil {
+				t.Fatalf("cmdAssertTo: %v", err)
+			}
+			if got := out.String(); got != tt.wantOut {
+				t.Fatalf("report bytes:\n got: %q\nwant: %q", got, tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestGateHelpUsesStampTerminology(t *testing.T) {
+	if strings.Contains(usageBody, "--expect <sha>") {
+		t.Fatal("usageBody contains --expect <sha>; all gate help must use --expect <stamp>")
+	}
+	for _, command := range []string{"fitness", "review", "verify", "assert", "verify-artifact"} {
+		err := run([]string{command})
+		if err == nil {
+			t.Fatalf("%s wrong-arity invocation returned nil", command)
+		}
+		if !strings.Contains(err.Error(), "--expect <stamp>") {
+			t.Errorf("%s usage error = %q, want --expect <stamp>", command, err)
+		}
+	}
+}
+
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
 }
 
 func assertMachineFiles(t *testing.T) (string, func(string) string) {
