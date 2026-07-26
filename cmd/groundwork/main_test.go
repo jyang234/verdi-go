@@ -168,6 +168,8 @@ func TestVerdictVsOperationalErrors(t *testing.T) {
 			"../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"},
 		{"diff", "../../testdata/groundwork/goldens/layeredsvc.contract.json",
 			"../../testdata/groundwork/goldens/layeredsvc.branch.contract.json"},
+		{"assert", "../../testdata/groundwork/goldens/loansvc.graph.json",
+			"../../testdata/groundwork/claims/loansvc-spec-acceptance.claims.json"},
 	}
 	for _, args := range verdicts {
 		err := run(args)
@@ -187,6 +189,34 @@ func TestVerdictVsOperationalErrors(t *testing.T) {
 		if err == nil || errors.As(err, &v) {
 			t.Errorf("run(%v) = %v (%T), want a non-verdict error", args, err, err)
 		}
+	}
+}
+
+// TestAssertTextCompatibility protects the existing text invocation from the
+// machine-mode wiring: no new flags must preserve the report bytes exactly.
+func TestAssertTextCompatibility(t *testing.T) {
+	const want = "assert: 1 passed, 0 failed, 0 errored (graph: 2 nodes, 1 unique edges)\n"
+	dir := t.TempDir()
+	graphPath := filepath.Join(dir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{
+  "algo":"rta",
+  "nodes":[{"fqn":"pkg.A","sig":"func()","tier":1},{"fqn":"pkg.B","sig":"func()","tier":2}],
+  "edges":[{"from":"pkg.A","to":"pkg.B","tier":2}],
+  "blind_spots":[]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claimsPath := filepath.Join(dir, "claims.json")
+	if err := os.WriteFile(claimsPath, []byte(`{"claims":[{"kind":"edge","from":"pkg.A","to":"pkg.B"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	got := captureStdout(t, func() { runErr = run([]string{"assert", graphPath, claimsPath}) })
+	if runErr != nil {
+		t.Fatalf("text assert: %v", runErr)
+	}
+	if got != want {
+		t.Fatalf("text report:\n got: %q\nwant: %q", got, want)
 	}
 }
 

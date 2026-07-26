@@ -54,7 +54,7 @@ func TestVerifyGateStampRequireEnv(t *testing.T) {
 // TestGateCommandsBindStamp proves --expect is actually wired into the
 // verdict-bearing gate commands: a mismatched stamp fails operationally (not as a
 // verdict, and before any verdict is computed) on each of fitness/review/verify/
-// verify-artifact, and a matching stamp does not trip the stamp check.
+// assert/verify-artifact, and a matching stamp does not trip the stamp check.
 func TestGateCommandsBindStamp(t *testing.T) {
 	const (
 		policy   = "../../testdata/groundwork/policies/layeredsvc.json"
@@ -63,11 +63,16 @@ func TestGateCommandsBindStamp(t *testing.T) {
 		golden   = "../../testdata/groundwork/goldens/layeredsvc.branch-skip.graph.json"
 	)
 	branch := stampedGraphFile(t, golden, "sha-good")
+	assertClaims := filepath.Join(t.TempDir(), "assert.claims.json")
+	if err := os.WriteFile(assertClaims, []byte(`{"claims":[{"id":"known-edge","kind":"edge","from":"example.com/layeredsvc/internal/handler.Server.UpdateUser","to":"example.com/layeredsvc/internal/app.Service.UpdateUser"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	mismatch := map[string][]string{
 		"fitness":         {"fitness", policy, branch, "--expect", "sha-bad"},
 		"review":          {"review", policy, base, branch, "--expect", "sha-bad"},
 		"verify":          {"verify", policy, base, branch, "--expect", "sha-bad"},
+		"assert":          {"assert", branch, assertClaims, "--expect", "sha-bad"},
 		"verify-artifact": {"verify-artifact", artifact, policy, base, branch, "--expect", "sha-bad"},
 	}
 	for name, args := range mismatch {
@@ -85,5 +90,12 @@ func TestGateCommandsBindStamp(t *testing.T) {
 	// still BLOCK — that is a different, expected outcome).
 	if err := run([]string{"fitness", policy, branch, "--expect", "sha-good"}); err != nil && strings.Contains(err.Error(), "does not match") {
 		t.Errorf("matching stamp wrongly rejected: %v", err)
+	}
+	var assertErr error
+	captureStdout(t, func() {
+		assertErr = run([]string{"assert", branch, assertClaims, "--expect", "sha-good"})
+	})
+	if assertErr != nil && strings.Contains(assertErr.Error(), "does not match") {
+		t.Errorf("matching assert stamp wrongly rejected: %v", assertErr)
 	}
 }

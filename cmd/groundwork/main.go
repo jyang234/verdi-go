@@ -180,7 +180,7 @@ usage:
   groundwork review-triage <base.json> <branch.json> [--json|--mermaid|--summary] [--policy <p.json>] [--scope-fqns <file|->] [--full] [--max-nodes N]   PROTOTYPE: 3-zone reviewer triage; --summary is an MR-comment digest; --policy adds per-route write movement; --scope-fqns marks the author-edited functions
   groundwork verify <policy> <base> <branch> [--scope p,q] [--expect <sha>] [--corpus <t.json>...] [--capture <grade>] [--json]  pre-flight gate: new violations, scope creep, breaking contract; --corpus adds a behavioral-impeachment gate, --capture asserts its fidelity grade
   groundwork diff <base-contract.json> <branch-contract.json>     boundary-contract diff (breaking change exits non-zero)
-  groundwork assert <graph.json> <claims.json>   verify point-in-time doc claims against a graph (a FAIL exits 1; an errored claim — one whose gate could not run — exits 2)
+  groundwork assert <graph.json> <claims.json> [--expect <sha>] [--json]   verify point-in-time doc claims against a graph (a FAIL exits 1; an errored claim — one whose gate could not run — exits 2)
   groundwork gen-diagram [--check <file>] <manifest.json> <logical>=<graph.json> [<logical>=<graph.json> ...]  emit a generated-core mermaid diagram (every solid edge read from a graph, judgment overlays dashed); --check gates a committed copy against drift (exit 1)
   groundwork verify-artifact <artifact> <policy> <base> <branch> [--expect <sha>]  prove an artifact is authentic (not tampered/stale)
   groundwork exceptions <policy.json> <graph.json> [--json]      audit every allow-list entry; flag dead ones
@@ -189,7 +189,7 @@ usage:
   groundwork policy-check <policy.json>        load and validate a policy
   groundwork version
 
-The gate commands (fitness/review/verify/verify-artifact) take --expect <sha> to
+The gate commands (fitness/review/verify/assert/verify-artifact) take --expect <sha> to
 bind the verdict to the code under review: it must equal the stamp the graph was
 produced with (flowmap graph --stamp <sha>), so a stale graph can't gate the
 wrong code. Set GROUNDWORK_REQUIRE_STAMP=1 in CI to make --expect mandatory.
@@ -354,7 +354,7 @@ func stampRequired() bool {
 }
 
 // verifyGateStamp is verifyStamp for the verdict-bearing gate commands
-// (fitness/review/verify/verify-artifact). It is identical to verifyStamp —
+// (fitness/review/verify/assert/verify-artifact). It is identical to verifyStamp —
 // opt-in, silent when not asked — except that when requireStampEnv is set, an
 // absent --expect is itself an error. That closes the gap where a gate could run
 // (and PASS) against a graph whose identity to the code under review was never
@@ -959,26 +959,41 @@ func cmdDiff(args []string) error {
 // (TestVerdictVsOperationalErrors): a computed FAIL is a verdictError (exit 1,
 // taking precedence over errors); zero FAILs but ≥1 claim that could not be
 // evaluated (unresolved/ambiguous/malformed) is a plain operational error
-// (exit 2 — "this claim's gate could not run"); all pass → nil. The report
-// prints to stdout in claims-file order before the error return.
+// (exit 2 — "this claim's gate could not run"); all pass → nil. The report is
+// printed before the error return: JSON results stay in claims-file order, while
+// text action lines preserve that order within their FAIL and ERROR groups.
 func cmdAssert(args []string) error {
-	fs := flag.NewFlagSet("assert", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
-		return err
+	expect, hasExpect, args := takeValueFlag(args, "--expect", "-expect")
+	asJSON, args := takeFlag(args, "--json", "-json")
+	if len(args) != 2 {
+		return fmt.Errorf("usage: groundwork assert <graph.json> <claims.json> [--expect <stamp>] [--json]")
 	}
-	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: groundwork assert <graph.json> <claims.json>")
-	}
-	g, err := graph.LoadFile(fs.Arg(0))
+	g, err := graph.LoadFile(args[0])
 	if err != nil {
 		return err
 	}
-	cf, err := claims.LoadFile(fs.Arg(1))
+	if err := verifyGateStamp(g, expect, hasExpect); err != nil {
+		return err
+	}
+	cf, err := claims.LoadFile(args[1])
 	if err != nil {
 		return err
+	}
+	if asJSON {
+		if err := claims.ValidateMachineIDs(cf); err != nil {
+			return fmt.Errorf("assert: invalid machine ids: %w", err)
+		}
 	}
 	rep := claims.Evaluate(g, cf)
-	fmt.Print(rep.String())
+	if asJSON {
+		out, err := claims.MarshalMachine(g, rep)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+	} else {
+		fmt.Print(rep.String())
+	}
 	if rep.Failed() > 0 {
 		return verdictf("assert: %d claim(s) failed", rep.Failed())
 	}

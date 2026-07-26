@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/jyang234/golang-code-graph/internal/groundwork/claims"
 )
 
 // TestAssertLoansvcAcceptance runs the committed seven-claim file over the
@@ -132,5 +136,218 @@ func TestAssertExitClasses(t *testing.T) {
 	err = run([]string{"assert", graphPath, write(`{"claims":[{"kind":"node","fqn":"pkg.Missing"}]}`)})
 	if err == nil || errors.As(err, &v) {
 		t.Errorf("errored-only run = %v (%T), want a non-verdict error", err, err)
+	}
+}
+
+// TestAssertJSONCommandContract pins JSON mode at the CLI boundary: it emits a
+// complete machine report before returning the exit-classifying error. The
+// all-pass report is byte-pinned; the remaining cases decode only to inspect
+// their distinct exit classifications and reported outcomes.
+func TestAssertJSONCommandContract(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+
+	allPassClaims := `{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`
+	const wantAllPass = `{
+  "schema_version": "groundwork.assert/v1",
+  "fixture": {
+    "stamp": "",
+    "producer_tool": "groundwork test",
+    "algo": "rta",
+    "caveats": []
+  },
+  "results": [
+    {
+      "id": "pass",
+      "kind": "edge",
+      "outcome": "PASS",
+      "bindings": {
+        "from": [
+          "pkg.A"
+        ],
+        "to": [
+          "pkg.B"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "errored": 0,
+    "nodes": 2,
+    "unique_edges": 1
+  }
+}
+`
+
+	tests := []struct {
+		name          string
+		claims        string
+		wantError     bool
+		wantVerdict   bool
+		wantOutcomes  []string
+		wantExactJSON string
+	}{
+		{
+			name:          "all pass",
+			claims:        allPassClaims,
+			wantOutcomes:  []string{"PASS"},
+			wantExactJSON: wantAllPass + "\n",
+		},
+		{
+			name:         "with FAIL",
+			claims:       `{"claims":[{"id":"fail","kind":"edge","from":"pkg.B","to":"pkg.A"}]}`,
+			wantError:    true,
+			wantVerdict:  true,
+			wantOutcomes: []string{"FAIL"},
+		},
+		{
+			name:         "with ERROR only",
+			claims:       `{"claims":[{"id":"error","kind":"node","fqn":"pkg.Missing"}]}`,
+			wantError:    true,
+			wantOutcomes: []string{"ERROR"},
+		},
+		{
+			name:         "with FAIL and ERROR",
+			claims:       `{"claims":[{"id":"fail","kind":"edge","from":"pkg.B","to":"pkg.A"},{"id":"error","kind":"node","fqn":"pkg.Missing"}]}`,
+			wantError:    true,
+			wantVerdict:  true,
+			wantOutcomes: []string{"FAIL", "ERROR"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var runErr error
+			got := captureStdout(t, func() {
+				runErr = run([]string{"assert", graphPath, writeClaims(tt.claims), "--json"})
+			})
+			var verdict verdictError
+			if gotVerdict := errors.As(runErr, &verdict); gotVerdict != tt.wantVerdict {
+				t.Fatalf("run error verdict class = %t (%v), want %t", gotVerdict, runErr, tt.wantVerdict)
+			}
+			if gotError := runErr != nil; gotError != tt.wantError {
+				t.Fatalf("run error = %v, want error=%t", runErr, tt.wantError)
+			}
+			if tt.wantExactJSON != "" {
+				if got != tt.wantExactJSON {
+					t.Fatalf("JSON output:\n got:\n%s\nwant:\n%s", got, tt.wantExactJSON)
+				}
+				return
+			}
+
+			var report claims.JSONReport
+			if err := json.Unmarshal([]byte(got), &report); err != nil {
+				t.Fatalf("decode JSON report: %v\n%s", err, got)
+			}
+			if len(report.Results) != len(tt.wantOutcomes) {
+				t.Fatalf("reported %d results, want %d", len(report.Results), len(tt.wantOutcomes))
+			}
+			for i, want := range tt.wantOutcomes {
+				if report.Results[i].Outcome != want {
+					t.Errorf("result %d outcome = %q, want %q", i, report.Results[i].Outcome, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAssertMachineIDValidation rejects an incomplete machine identity set
+// before evaluation, so consumers never receive a partial report they could
+// mistake for a complete assertion suite.
+func TestAssertMachineIDValidation(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+	tests := []struct {
+		name   string
+		claims string
+	}{
+		{name: "missing ID", claims: `{"claims":[{"kind":"edge","from":"pkg.A","to":"pkg.B"}]}`},
+		{name: "duplicate ID", claims: `{"claims":[{"id":"same","kind":"edge","from":"pkg.A","to":"pkg.B"},{"id":"same","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var runErr error
+			got := captureStdout(t, func() {
+				runErr = run([]string{"assert", graphPath, writeClaims(tt.claims), "--json"})
+			})
+			if runErr == nil {
+				t.Fatal("run error = nil, want invalid-machine-ID error")
+			}
+			var verdict verdictError
+			if errors.As(runErr, &verdict) {
+				t.Fatalf("run error = %v, want operational error", runErr)
+			}
+			if got != "" {
+				t.Fatalf("stdout = %q, want no report", got)
+			}
+		})
+	}
+}
+
+// TestAssertStampCommandContract checks that assert binds a report to the
+// supplied graph identity before claim evaluation or report emission.
+func TestAssertStampCommandContract(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+	claimsPath := writeClaims(`{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+	stamped := stampedGraphFile(t, graphPath, "sha-good")
+
+	var runErr error
+	got := captureStdout(t, func() {
+		runErr = run([]string{"assert", stamped, claimsPath, "--expect", "sha-good"})
+	})
+	if runErr != nil {
+		t.Fatalf("matching --expect: %v", runErr)
+	}
+	if !strings.Contains(got, "assert: 1 passed, 0 failed, 0 errored") {
+		t.Fatalf("matching --expect report = %q", got)
+	}
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		set  bool
+	}{
+		{name: "mismatched expect", args: []string{"assert", stamped, claimsPath, "--expect", "sha-bad"}},
+		{name: "missing graph stamp", args: []string{"assert", graphPath, claimsPath, "--expect", "sha-good"}},
+		{name: "require stamp", args: []string{"assert", graphPath, claimsPath}, set: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv(requireStampEnv, "1")
+			}
+			var err error
+			out := captureStdout(t, func() { err = run(tt.args) })
+			if err == nil {
+				t.Fatal("run error = nil, want operational stamp error")
+			}
+			var verdict verdictError
+			if errors.As(err, &verdict) {
+				t.Fatalf("run error = %v, want operational error", err)
+			}
+			if out != "" {
+				t.Fatalf("stdout = %q, want no report", out)
+			}
+		})
+	}
+}
+
+func assertMachineFiles(t *testing.T) (string, func(string) string) {
+	t.Helper()
+	dir := t.TempDir()
+	graphPath := filepath.Join(dir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{
+  "algo":"rta",
+  "tool":"groundwork test",
+  "nodes":[{"fqn":"pkg.A","sig":"func()","tier":1},{"fqn":"pkg.B","sig":"func()","tier":2}],
+  "edges":[{"from":"pkg.A","to":"pkg.B","tier":2}],
+  "blind_spots":[]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return graphPath, func(contents string) string {
+		path := filepath.Join(dir, "claims.json")
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
 }
