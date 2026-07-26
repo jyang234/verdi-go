@@ -2,6 +2,7 @@ package facts
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
@@ -201,12 +202,36 @@ func sortedBypassOccurrences(values []PathWitness) []PathWitness {
 		if left.To != right.To {
 			return left.To < right.To
 		}
-		return pathLess(left.Path, right.Path)
+		leftOwner, rightOwner := occurrenceOwner(left), occurrenceOwner(right)
+		if leftOwner != rightOwner {
+			return leftOwner < rightOwner
+		}
+		return pathLexLess(left.Path, right.Path)
 	})
 	if len(values) == 0 {
 		return nil
 	}
 	return values
+}
+
+func occurrenceOwner(witness PathWitness) string {
+	if strings.HasPrefix(witness.To, "boundary:") && len(witness.Path) >= 2 {
+		return witness.Path[len(witness.Path)-2]
+	}
+	return witness.To
+}
+
+func pathLexLess(left, right []string) bool {
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	for i := 0; i < limit; i++ {
+		if left[i] != right[i] {
+			return left[i] < right[i]
+		}
+	}
+	return len(left) < len(right)
 }
 
 func boundaryEdgeOccurrences(ix *graph.Index) []graph.Edge {

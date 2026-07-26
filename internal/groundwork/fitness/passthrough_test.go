@@ -276,6 +276,24 @@ func TestPassThroughCharacterization(t *testing.T) {
 			},
 		},
 		{
+			name: "boundary occurrences preserve owner order before path length",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, "svc.AMid", "svc.AOwner", "svc.ZOwner", guard),
+				Edges: []graph.Edge{
+					{From: sourceA, To: "svc.ZOwner"},
+					{From: "svc.ZOwner", To: users, Boundary: "outbound-sync"},
+					{From: sourceA, To: "svc.AMid"},
+					{From: "svc.AMid", To: "svc.AOwner"},
+					{From: "svc.AOwner", To: users, Boundary: "outbound-sync"},
+				},
+			},
+			rule: pass([]string{sourceA}, []string{users}, []string{guard}),
+			want: []Finding{
+				violation(sourceA, users, guard, sourceA+" → svc.AMid → svc.AOwner → "+users),
+				violation(sourceA, users, guard, sourceA+" → svc.ZOwner → "+users),
+			},
+		},
+		{
 			name: "allow suppresses only its boundary pair",
 			g: &graph.Graph{
 				Nodes: nodes(sourceA, guard),
