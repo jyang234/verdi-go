@@ -45,6 +45,19 @@ func BindSources(ix *graph.Index, selectors []string) []string {
 	return nonEmptySortedKeys(set)
 }
 
+// BindFunctions expands selectors against graph nodes without the
+// entrypoint:* source expansion. It is used for waypoint bindings, where only
+// actual function identities can be removed from a traversal.
+func BindFunctions(ix *graph.Index, selectors []string) []string {
+	set := make(map[string]bool)
+	ix.RangeNodes(func(fqn string) {
+		if matchesAny(fqn, selectors) {
+			set[fqn] = true
+		}
+	})
+	return nonEmptySortedKeys(set)
+}
+
 // BindTargets expands selectors against every graph node and boundary label.
 // Non-boundary external edges are not targets because the reach index cannot
 // traverse or classify them as effects.

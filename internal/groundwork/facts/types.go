@@ -60,3 +60,49 @@ type ReachResult struct {
 	UnboundFrom []string
 	UnboundTo   []string
 }
+
+// AllowPair exempts one source-target pair from pass-through evaluation. An
+// empty side is a wildcard; a non-empty side uses the shared rich-selector
+// matcher.
+type AllowPair struct {
+	From string
+	To   string
+}
+
+// PassThroughInput is the presentation-free input to a waypoint proof.
+type PassThroughInput struct {
+	From    []string
+	To      []string
+	Through []string
+	Allow   []AllowPair
+}
+
+// PassThroughState is the closed outcome of a waypoint proof.
+type PassThroughState uint8
+
+const (
+	// PassThroughUnbound means a required source or target family bound no
+	// graph identity. An unbound waypoint is recorded separately and does not
+	// stop traversal, preserving the standing fitness contract.
+	PassThroughUnbound PassThroughState = iota
+	// PassThroughBypassed means at least one unallowed path avoids the waypoint.
+	PassThroughBypassed
+	// PassThroughGuarded means no bypass exists over a fully visible frontier.
+	PassThroughGuarded
+	// PassThroughBlind means no bypass was found, but the frontier is incomplete.
+	PassThroughBlind
+)
+
+// PassThroughResult carries complete bindings and deterministic evidence.
+// Unbound selector values are copied exactly, sorted, and de-duplicated.
+type PassThroughResult struct {
+	State          PassThroughState
+	From           []string
+	To             []string
+	Through        []string
+	Bypasses       []PathWitness
+	Blind          *BlindWitness
+	UnboundFrom    []string
+	UnboundTo      []string
+	UnboundThrough []string
+}

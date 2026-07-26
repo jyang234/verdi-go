@@ -46,24 +46,11 @@ func matchAny(s string, patterns []string) bool {
 	return facts.MatchesAny(s, patterns)
 }
 
-// bindFroms is the compatibility entry by which later-migrated From-bearing
-// fitness rules bind sources and disclose an empty family. Expansion and
-// disclosure stay fused here so those rules cannot turn a renamed package into
-// a silent forever-pass; must_not_reach consumes the complete facts result.
-func bindFroms(ix *graph.Index, r *Result, kind, name string, from []string, requireProof bool) []string {
-	froms := expandFroms(ix, from)
-	if len(froms) == 0 {
-		r.add(inertRuleFinding(kind, name, requireProof))
-		return nil
-	}
-	return froms
-}
-
 // expandFroms expands a rule's From selectors against the graph: the
 // "entrypoint:*" selector matches every graph source, anything else is an FQN
 // exact-or-prefix pattern. It delegates binding to facts so fitness and claims
-// cannot diverge. Later-migrated checks call bindFroms, not this, so the
-// inert-rule disclosure cannot be forgotten.
+// cannot diverge. The proposal lens retains this compatibility name while
+// verdict-bearing checks consume complete typed fact results.
 func expandFroms(ix *graph.Index, patterns []string) []string {
 	return facts.BindSources(ix, patterns)
 }

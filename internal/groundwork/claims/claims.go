@@ -42,6 +42,8 @@
 //	out_degree  of, eq [, cp]          #distinct callees (filtered) == eq   ERROR
 //	entrypoint  name, fn               a name-matched record's fn equals    ERROR
 //	            [, entry_kind]         the resolved fn
+//	reach       from, to, expect        reachability matches expectation     ERROR
+//	pass_through from, to, through      every visible path enters waypoint  ERROR
 //
 // entrypoint has its own two-poled polarity, distinct from the absence kinds:
 // ZERO records matching the route/topic name is a FAIL (not an ERROR) — existence
@@ -439,6 +441,9 @@ var allowedFields = map[string][]string{
 	"out_degree": {"of", "eq", "counterpart_matching", "to_matching", "fn"},
 	"entrypoint": {"name", "fn", "entry_kind"},
 	"reach":      {"from", "to", "expect"},
+	"pass_through": {
+		"from", "to", "through",
+	},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -468,6 +473,8 @@ func (m *model) eval(c Claim) Result {
 		return m.evalEntrypoint(c)
 	case "reach":
 		return m.evalReach(c)
+	case "pass_through":
+		return m.evalPassThrough(c)
 	default:
 		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
@@ -522,6 +529,69 @@ func (m *model) evalReach(c Claim) Result {
 	default:
 		return errored(c, ReasonMalformedClaim, "reach evaluator returned an unknown state")
 	}
+}
+
+func (m *model) evalPassThrough(c Claim) Result {
+	if !c.From.Present() || !c.To.Present() || !c.Through.Present() {
+		return errored(c, ReasonMalformedClaim, "pass_through requires 'from', 'to', and 'through'")
+	}
+
+	fact := facts.EvaluatePassThrough(m.reachIndex, facts.PassThroughInput{
+		From: c.From.Values(), To: c.To.Values(), Through: c.Through.Values(),
+	})
+	bindings := Bindings{
+		From:    append([]string(nil), fact.From...),
+		To:      append([]string(nil), fact.To...),
+		Through: append([]string(nil), fact.Through...),
+	}
+	if len(fact.UnboundFrom) > 0 {
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"from selector(s) bind nothing: "+strings.Join(fact.UnboundFrom, ", ")), bindings)
+	}
+	if len(fact.UnboundTo) > 0 {
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"to selector(s) bind nothing: "+strings.Join(fact.UnboundTo, ", ")), bindings)
+	}
+	if len(fact.UnboundThrough) > 0 {
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"through selector(s) bind nothing: "+strings.Join(fact.UnboundThrough, ", ")), bindings)
+	}
+
+	switch fact.State {
+	case facts.PassThroughBypassed:
+		witnesses := make([]Witness, len(fact.Bypasses))
+		for i, bypass := range fact.Bypasses {
+			witnesses[i] = Witness{
+				From: bypass.From,
+				To:   bypass.To,
+				Path: append([]string(nil), bypass.Path...),
+			}
+		}
+		result := withBindings(fail(c, "bypass path found"), bindings)
+		result.Witnesses = witnesses
+		return result
+	case facts.PassThroughGuarded:
+		return withBindings(passWithDetail(c, "all visible paths pass through the waypoint"), bindings)
+	case facts.PassThroughBlind:
+		result := withBindings(errored(c, ReasonBlindFrontier,
+			"no bypass found, but the frontier is blind at "+fact.Blind.Site), bindings)
+		result.Witnesses = []Witness{{
+			From:      fact.Blind.From,
+			BlindSite: fact.Blind.Site,
+		}}
+		return result
+	case facts.PassThroughUnbound:
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"pass_through selector family binds nothing"), bindings)
+	default:
+		return errored(c, ReasonMalformedClaim, "pass_through evaluator returned an unknown state")
+	}
+}
+
+func passWithDetail(c Claim, detail string) Result {
+	result := pass(c)
+	result.Detail = detail
+	return result
 }
 
 func resultForExpectation(c Claim, present bool, detail string) Result {
@@ -1101,6 +1171,8 @@ func label(c Claim) string {
 		return c.Name + " -> " + c.Fn
 	case "reach":
 		return selectorLabel(c.From) + " -> " + selectorLabel(c.To)
+	case "pass_through":
+		return selectorLabel(c.From) + " -> " + selectorLabel(c.Through) + " -> " + selectorLabel(c.To)
 	default:
 		return strings.TrimSpace(selectorLabel(c.From) + selectorLabel(c.To) +
 			selectorLabel(c.Through) + c.Expect + c.FQN + c.Of + c.Fn + c.Name)

@@ -1,6 +1,7 @@
 package fitness
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -167,6 +168,253 @@ func TestPassThroughDeterministic(t *testing.T) {
 		if a.Findings[i] != b.Findings[i] {
 			t.Fatalf("non-deterministic finding %d: %v vs %v", i, a.Findings[i], b.Findings[i])
 		}
+	}
+}
+
+func TestPassThroughCharacterization(t *testing.T) {
+	const (
+		sourceA  = "svc.ASource"
+		sourceZ  = "svc.ZSource"
+		target   = "svc.Target"
+		guard    = "svc.Guard"
+		blind    = "svc.Blind"
+		other    = "svc.Other"
+		users    = "boundary:db UPDATE users"
+		audit    = "boundary:db UPDATE users_audit"
+		missing  = "svc.Missing"
+		ruleName = "guarded"
+	)
+	nodes := func(fqns ...string) []graph.Node {
+		result := make([]graph.Node, len(fqns))
+		for i, fqn := range fqns {
+			result[i] = graph.Node{FQN: fqn}
+		}
+		return result
+	}
+	pass := func(from, to, through []string) policy.PassRule {
+		return policy.PassRule{
+			Name: ruleName, From: from, To: to, Through: through,
+		}
+	}
+	violation := func(from, to, through, detail string) Finding {
+		return Finding{
+			Rule:     "must_pass_through",
+			Severity: Violation,
+			Summary:  ruleName + ": " + ShortName(from) + " reaches " + ShortName(to) + " without passing " + ShortName(through),
+			From:     from,
+			To:       to,
+			Detail:   detail,
+		}
+	}
+
+	tests := []struct {
+		name string
+		g    *graph.Graph
+		rule policy.PassRule
+		want []Finding
+	}{
+		{
+			name: "function bypass",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, target, guard),
+				Edges: []graph.Edge{{From: sourceA, To: target}},
+			},
+			rule: pass([]string{sourceA}, []string{target}, []string{guard}),
+			want: []Finding{violation(
+				sourceA, target, guard,
+				sourceA+" → "+target,
+			)},
+		},
+		{
+			name: "direct boundary bypass",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, guard),
+				Edges: []graph.Edge{{From: sourceA, To: users, Boundary: "outbound-sync"}},
+			},
+			rule: pass([]string{sourceA}, []string{users}, []string{guard}),
+			want: []Finding{violation(
+				sourceA, users, guard,
+				sourceA+" → "+users,
+			)},
+		},
+		{
+			name: "multiple bypass pairs",
+			g: &graph.Graph{
+				Nodes: nodes(sourceZ, target, guard, sourceA),
+				Edges: []graph.Edge{
+					{From: sourceZ, To: audit, Boundary: "outbound-sync"},
+					{From: sourceA, To: target},
+					{From: sourceA, To: users, Boundary: "outbound-sync"},
+				},
+			},
+			rule: pass(
+				[]string{sourceZ, sourceA},
+				[]string{target, "boundary:db UPDATE"},
+				[]string{guard},
+			),
+			want: []Finding{
+				violation(sourceA, users, guard, sourceA+" → "+users),
+				violation(sourceA, target, guard, sourceA+" → "+target),
+				violation(sourceZ, audit, guard, sourceZ+" → "+audit),
+			},
+		},
+		{
+			name: "allow suppresses only its boundary pair",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, guard),
+				Edges: []graph.Edge{
+					{From: sourceA, To: audit, Boundary: "outbound-sync"},
+					{From: sourceA, To: users, Boundary: "outbound-sync"},
+				},
+			},
+			rule: func() policy.PassRule {
+				rule := pass(
+					[]string{sourceA},
+					[]string{"boundary:db UPDATE"},
+					[]string{guard},
+				)
+				rule.Allow = []policy.Exception{{From: sourceA, To: users}}
+				return rule
+			}(),
+			want: []Finding{violation(
+				sourceA, audit, guard,
+				sourceA+" → "+audit,
+			)},
+		},
+		{
+			name: "guarded",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, guard, target),
+				Edges: []graph.Edge{
+					{From: sourceA, To: guard},
+					{From: guard, To: target},
+				},
+			},
+			rule: pass([]string{sourceA}, []string{target}, []string{guard}),
+		},
+		{
+			name: "source is waypoint",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA),
+				Edges: []graph.Edge{{From: sourceA, To: users, Boundary: "outbound-sync"}},
+			},
+			rule: pass([]string{sourceA}, []string{users}, []string{sourceA}),
+		},
+		{
+			name: "blind frontier cautions",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, blind, target, guard),
+				Edges: []graph.Edge{{From: sourceA, To: blind}},
+				BlindSpots: []graph.BlindSpot{{
+					Kind: "reflect", Site: blind, Detail: "opaque dispatch",
+				}},
+			},
+			rule: pass([]string{sourceA}, []string{target}, []string{guard}),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Caution,
+				Summary:  ruleName + ": no bypass found, but the frontier is blind (reflect at " + blind + ") — cannot prove every path is guarded",
+				From:     sourceA,
+			}},
+		},
+		{
+			name: "blind frontier require proof violates",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, blind, target, guard),
+				Edges: []graph.Edge{{From: sourceA, To: blind}},
+				BlindSpots: []graph.BlindSpot{{
+					Kind: "reflect", Site: blind, Detail: "opaque dispatch",
+				}},
+			},
+			rule: func() policy.PassRule {
+				rule := pass([]string{sourceA}, []string{target}, []string{guard})
+				rule.RequireProof = true
+				return rule
+			}(),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Violation,
+				Summary:  ruleName + ": no bypass found, but the frontier is blind (reflect at " + blind + ") — require_proof is set and guarding cannot be proven",
+				From:     sourceA,
+			}},
+		},
+		{
+			name: "unbound from cautions before target",
+			g:    &graph.Graph{Nodes: nodes(target, guard)},
+			rule: pass([]string{missing}, []string{target}, []string{guard}),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Caution,
+				Summary:  ruleName + ": from binds nothing in this graph — inert rule",
+			}},
+		},
+		{
+			name: "unbound from require proof violates",
+			g:    &graph.Graph{Nodes: nodes(target, guard)},
+			rule: func() policy.PassRule {
+				rule := pass([]string{missing}, []string{target}, []string{guard})
+				rule.RequireProof = true
+				return rule
+			}(),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Violation,
+				Summary:  ruleName + ": from binds nothing in this graph — require_proof is set and an inert rule guards nothing",
+			}},
+		},
+		{
+			name: "unbound to cautions",
+			g:    &graph.Graph{Nodes: nodes(sourceA, guard)},
+			rule: pass([]string{sourceA}, []string{missing}, []string{guard}),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Caution,
+				Summary:  ruleName + ": to binds nothing in this graph — name a first-party sink it can bind, or this invariant is vacuous",
+			}},
+		},
+		{
+			name: "unbound to require proof violates",
+			g:    &graph.Graph{Nodes: nodes(sourceA, guard)},
+			rule: func() policy.PassRule {
+				rule := pass([]string{sourceA}, []string{missing}, []string{guard})
+				rule.RequireProof = true
+				return rule
+			}(),
+			want: []Finding{{
+				Rule:     "must_pass_through",
+				Severity: Violation,
+				Summary:  ruleName + ": to binds nothing in this graph — require_proof is set and an unbindable target cannot be proven absent",
+			}},
+		},
+		{
+			name: "dead waypoint with path bypasses",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, target),
+				Edges: []graph.Edge{{From: sourceA, To: target}},
+			},
+			rule: pass([]string{sourceA}, []string{target}, []string{missing}),
+			want: []Finding{violation(
+				sourceA, target, missing,
+				sourceA+" → "+target,
+			)},
+		},
+		{
+			name: "dead waypoint without path is silent",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, target, other),
+				Edges: []graph.Edge{{From: other, To: target}},
+			},
+			rule: pass([]string{sourceA}, []string{target}, []string{missing}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Check(passPolicy(tt.rule), graph.NewIndex(tt.g)).Findings
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("pass-through findings mismatch\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
 	}
 }
 

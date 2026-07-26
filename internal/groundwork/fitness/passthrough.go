@@ -2,9 +2,9 @@ package fitness
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
@@ -25,71 +25,33 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 	for i := range p.MustPassThrough {
 		rule := &p.MustPassThrough[i]
 		throughLabel := shortPatterns(rule.Through)
-
-		froms := bindFroms(ix, r, "must_pass_through", rule.Name, rule.From, rule.RequireProof)
-		if froms == nil {
+		allow := make([]facts.AllowPair, len(rule.Allow))
+		for i, exception := range rule.Allow {
+			allow[i] = facts.AllowPair{From: exception.From, To: exception.To}
+		}
+		fact := facts.EvaluatePassThrough(ix, facts.PassThroughInput{
+			From: rule.From, To: rule.To, Through: rule.Through, Allow: allow,
+		})
+		if len(fact.UnboundFrom) > 0 {
+			r.add(inertRuleFinding("must_pass_through", rule.Name, rule.RequireProof))
 			continue
 		}
-		if !bindsAnyTarget(ix, rule.To) {
+		if len(fact.UnboundTo) > 0 {
 			r.add(unbindableTargetFinding("must_pass_through", rule.Name, "to", rule.RequireProof))
 			continue
 		}
 
-		bypassed := false
-		var blindEv evidence
-		blind := false
-
-		for _, from := range froms {
-			if matchAny(from, rule.Through) {
-				continue // the source IS the waypoint: trivially guarded
-			}
-			cone, parent := guardedWalk(ix, from, rule.Through)
-			effects := ix.Effects(cone...)
-
-			// A reachable function matching To, with the waypoints removed, is a
-			// bypass. The source itself never matches as a target (a route that is
-			// its own target is meaningless), but its direct effects count below.
-			for _, fn := range cone {
-				if fn != from && matchAny(fn, rule.To) && !rule.Allowed(from, fn) {
-					bypassed = true
-					r.add(Finding{
-						Rule:     "must_pass_through",
-						Severity: Violation,
-						Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(from), ShortName(fn), throughLabel),
-						From:     from,
-						To:       fn,
-						Detail:   bypassPath(parent, from, fn, ""),
-					})
-				}
-			}
-			// A boundary effect made anywhere in the guarded-walk cone is reached
-			// without a waypoint (waypoint nodes are never walked, so their own
-			// effects never appear here).
-			for _, e := range effects {
-				if matchAny(e.To, rule.To) && !rule.Allowed(from, e.To) {
-					bypassed = true
-					r.add(Finding{
-						Rule:     "must_pass_through",
-						Severity: Violation,
-						Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(from), e.To, throughLabel),
-						From:     from,
-						To:       e.To,
-						Detail:   bypassPath(parent, from, e.From, e.To),
-					})
-				}
-			}
-			// No bypass from this source: a blind node in the walked cone means
-			// hidden edges could still skirt the waypoint — "guarded" is
-			// unprovable. Probe only until the first blind site is found.
-			if !blind {
-				if site, isBlind := frontierBlindSiteWith(ix, cone, effects); isBlind {
-					blind = true
-					blindEv = evidence{from: from, target: site}
-				}
-			}
+		for _, bypass := range fact.Bypasses {
+			r.add(Finding{
+				Rule:     "must_pass_through",
+				Severity: Violation,
+				Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(bypass.From), ShortName(bypass.To), throughLabel),
+				From:     bypass.From,
+				To:       bypass.To,
+				Detail:   renderBypassPath(bypass.Path),
+			})
 		}
-
-		if !bypassed && blind {
+		if fact.State == facts.PassThroughBlind {
 			sev, note := Caution, "cannot prove every path is guarded"
 			if rule.RequireProof {
 				sev, note = Violation, "require_proof is set and guarding cannot be proven"
@@ -97,59 +59,27 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			r.add(Finding{
 				Rule:     "must_pass_through",
 				Severity: sev,
-				Summary:  fmt.Sprintf("%s: no bypass found, but the frontier is blind (%s) — %s", rule.Name, blindEv.target, note),
-				From:     blindEv.from,
+				Summary:  fmt.Sprintf("%s: no bypass found, but the frontier is blind (%s) — %s", rule.Name, blindDescription(fact.Blind), note),
+				From:     fact.Blind.From,
 			})
 		}
 	}
 }
 
-// guardedWalk is a forward BFS from one source that never enters a
-// Through-matching node, recording each node's BFS parent so a shortest bypass
-// path can be rendered. The cone includes the source. Adjacency lists are
-// pre-sorted, so the parent assignment — and therefore the witness path — is
-// deterministic.
+// guardedWalk is the compatibility adapter used by the proposal lens. Facts
+// owns the waypoint-removal traversal.
 func guardedWalk(ix *graph.Index, from string, through []string) (cone []string, parent map[string]string) {
-	parent = map[string]string{}
-	seen := map[string]bool{from: true}
-	queue := []string{from}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		for _, next := range ix.Callees(cur) {
-			if seen[next] || matchAny(next, through) {
-				continue
-			}
-			seen[next] = true
-			parent[next] = cur
-			queue = append(queue, next)
-		}
-	}
-	cone = make([]string, 0, len(seen))
-	for fqn := range seen {
-		cone = append(cone, fqn)
-	}
-	sort.Strings(cone)
-	return cone, parent
+	return facts.GuardedWalk(ix, from, through)
 }
 
-// bypassPath renders the shortest guarded-walk path from source to fn (plus a
-// trailing boundary effect, when the target is one) — the witness the reviewer
-// reads to see HOW the guard is skipped. Presentation only, never identity.
-func bypassPath(parent map[string]string, from, fn, effect string) string {
-	var rev []string
-	for cur := fn; cur != from; cur = parent[cur] {
-		rev = append(rev, ShortName(cur))
-		if _, ok := parent[cur]; !ok {
-			break
+func renderBypassPath(path []string) string {
+	parts := make([]string, len(path))
+	for i, value := range path {
+		if strings.HasPrefix(value, "boundary:") {
+			parts[i] = value
+		} else {
+			parts[i] = ShortName(value)
 		}
-	}
-	parts := []string{ShortName(from)}
-	for i := len(rev) - 1; i >= 0; i-- {
-		parts = append(parts, rev[i])
-	}
-	if effect != "" {
-		parts = append(parts, effect)
 	}
 	return strings.Join(parts, " → ")
 }
