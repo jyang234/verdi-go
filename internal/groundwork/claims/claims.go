@@ -218,13 +218,58 @@ const (
 	Errored // resolution/schema failure: the claim's gate could not run
 )
 
+// Reason is the closed vocabulary for a machine-report ERROR result.
+type Reason string
+
+const (
+	ReasonUnresolved       Reason = "UNRESOLVED"
+	ReasonAmbiguous        Reason = "AMBIGUOUS"
+	ReasonUnboundSelector  Reason = "UNBOUND_SELECTOR"
+	ReasonBlindFrontier    Reason = "BLIND_FRONTIER"
+	ReasonMalformedClaim   Reason = "MALFORMED_CLAIM"
+	ReasonUnknownStatus    Reason = "UNKNOWN_STATUS"
+	ReasonMissingGraphData Reason = "MISSING_GRAPH_DATA"
+	ReasonCantProve        Reason = "CANT_PROVE"
+	ReasonUnmatched        Reason = "UNMATCHED"
+)
+
+// Bindings identifies the canonical graph values a claim resolved against.
+type Bindings struct {
+	From       []string
+	To         []string
+	Through    []string
+	FQN        []string
+	Of         []string
+	Fn         []string
+	Entrypoint []string
+	Obligation []string
+}
+
+// Witness is deterministic graph evidence for a claim outcome. Path preserves
+// its ordered BFS sequence.
+type Witness struct {
+	From      string
+	To        string
+	Path      []string
+	BlindSite string
+	Rule      string
+	Fn        string
+	Site      string
+	Status    string
+	Detail    string
+}
+
 // Result is one evaluated claim, carrying the pre-rendered label and detail so
 // the report is a pure format of the results (deterministic).
 type Result struct {
-	Kind    string
-	Label   string
-	Outcome Outcome
-	Detail  string
+	ID        string
+	Kind      string
+	Label     string
+	Outcome   Outcome
+	Reason    Reason
+	Detail    string
+	Bindings  Bindings
+	Witnesses []Witness
 }
 
 // Report is the full evaluation, in claims-file order.
