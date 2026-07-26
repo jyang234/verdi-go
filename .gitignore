@@ -16,3 +16,6 @@ coverage.html
 
 # stray build output from `go build ./scripts/commentdrift`
 /commentdrift
+
+# local Codex feature worktrees
+/.worktrees/
