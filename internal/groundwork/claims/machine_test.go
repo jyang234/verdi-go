@@ -29,17 +29,17 @@ func TestStructuralMachineBindings(t *testing.T) {
 	}{
 		{
 			name:  "edge",
-			claim: Claim{ID: "edge-id", Kind: "edge", From: "App).Create", To: "repo.Store).Save"},
+			claim: Claim{ID: "edge-id", Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save")},
 			want:  Bindings{From: []string{create}, To: []string{save}},
 		},
 		{
 			name:  "no_edge",
-			claim: Claim{ID: "no-edge-id", Kind: "no_edge", From: "repo.Store).Save", To: "App).Create"},
+			claim: Claim{ID: "no-edge-id", Kind: "no_edge", From: sel("repo.Store).Save"), To: sel("App).Create")},
 			want:  Bindings{From: []string{save}, To: []string{create}},
 		},
 		{
 			name:  "edge_count",
-			claim: Claim{ID: "edge-count-id", Kind: "edge_count", From: "App).Create", To: "repo.Store).Save", Eq: intp(1)},
+			claim: Claim{ID: "edge-count-id", Kind: "edge_count", From: sel("App).Create"), To: sel("repo.Store).Save"), Eq: intp(1)},
 			want:  Bindings{From: []string{create}, To: []string{save}},
 		},
 		{
@@ -127,7 +127,7 @@ func TestStructuralReasonCodes(t *testing.T) {
 		},
 		{
 			name:  "wrong_kind_field",
-			claim: Claim{ID: "wrong-kind", Kind: "edge", From: "App).Create", To: "repo.Store).Save", Eq: intp(1)},
+			claim: Claim{ID: "wrong-kind", Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save"), Eq: intp(1)},
 			want:  ReasonMalformedClaim,
 		},
 		{
@@ -142,7 +142,7 @@ func TestStructuralReasonCodes(t *testing.T) {
 		},
 		{
 			name:  "zero_required_matches_carries_established_from",
-			claim: Claim{ID: "unresolved", Kind: "edge", From: "App).Create", To: "does.Not.Exist"},
+			claim: Claim{ID: "unresolved", Kind: "edge", From: sel("App).Create"), To: sel("does.Not.Exist")},
 			want:  ReasonUnresolved,
 			bind:  Bindings{From: []string{create}},
 		},

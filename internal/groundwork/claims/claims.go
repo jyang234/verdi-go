@@ -137,15 +137,20 @@ type Claim struct {
 	// present (uniqueness is recommended in docs, not enforced). It is claim
 	// metadata, not a kind field, so it is allowed on EVERY kind and is excluded
 	// from the wrong-kind field check entirely.
-	ID                  string `json:"id,omitempty"`
-	From                string `json:"from,omitempty"`
-	To                  string `json:"to,omitempty"`
-	FQN                 string `json:"fqn,omitempty"`
-	Of                  string `json:"of,omitempty"`
-	Tier                *int   `json:"tier,omitempty"`
-	Eq                  *int   `json:"eq,omitempty"`
-	CounterpartMatching string `json:"counterpart_matching,omitempty"`
-	ToMatching          string `json:"to_matching,omitempty"`
+	ID string `json:"id,omitempty"`
+	// From, To, and Through retain whether JSON supplied a scalar or list.
+	// Structural claims remain scalar-only; later rich claim families consume
+	// the list shape without changing this shared decoder.
+	From                Selectors `json:"from,omitempty"`
+	To                  Selectors `json:"to,omitempty"`
+	Through             Selectors `json:"through,omitempty"`
+	Expect              string    `json:"expect,omitempty"`
+	FQN                 string    `json:"fqn,omitempty"`
+	Of                  string    `json:"of,omitempty"`
+	Tier                *int      `json:"tier,omitempty"`
+	Eq                  *int      `json:"eq,omitempty"`
+	CounterpartMatching string    `json:"counterpart_matching,omitempty"`
+	ToMatching          string    `json:"to_matching,omitempty"`
 	// Fn is a documented alias: for node/no_node it aliases `fqn`; for
 	// in_degree/out_degree it aliases `of`. Both alias and canonical present on
 	// one claim → that claim ERRORs (same treatment as counterpart_matching/
@@ -475,8 +480,10 @@ var claimFieldChecks = []struct {
 	name    string
 	present func(Claim) bool
 }{
-	{"from", func(c Claim) bool { return c.From != "" }},
-	{"to", func(c Claim) bool { return c.To != "" }},
+	{"from", func(c Claim) bool { return c.From.Present() }},
+	{"to", func(c Claim) bool { return c.To.Present() }},
+	{"through", func(c Claim) bool { return c.Through.Present() }},
+	{"expect", func(c Claim) bool { return c.Expect != "" }},
 	{"fqn", func(c Claim) bool { return c.FQN != "" }},
 	{"of", func(c Claim) bool { return c.Of != "" }},
 	{"tier", func(c Claim) bool { return c.Tier != nil }},
@@ -508,22 +515,32 @@ func unexpectedField(c Claim, allowed []string) string {
 
 // resolveEndpoints resolves an edge claim's from/to endpoints under the shared
 // fail-closed rule (each side plain-unique-or-die / regex-any, ERROR on either
-// failing). It is the ONE place the three edge kinds' resolution contract
-// lives, so a future change to it cannot silently reach only some of them
-// (CLAUDE.md, one source of truth). On failure it returns a typed evaluation
-// error plus whichever earlier side resolved successfully.
+// failing). List-shaped inputs abstain before resolution so the widened JSON
+// input shape cannot silently widen structural semantics. It is the ONE place
+// the three edge kinds' resolution contract lives, so a future change to it
+// cannot silently reach only some of them (CLAUDE.md, one source of truth). On
+// failure it returns a typed evaluation error plus whichever earlier side
+// resolved successfully.
 func (m *model) resolveEndpoints(c Claim) (froms, tos []string, bad *evaluationError) {
-	if c.From == "" || c.To == "" {
+	if !c.From.Present() || !c.To.Present() {
 		return nil, nil, &evaluationError{
 			Reason: ReasonMalformedClaim,
 			Detail: c.Kind + " requires 'from' and 'to'",
 		}
 	}
-	froms, bad = m.resolveMany(c.From)
+	from, fromScalar := c.From.Scalar()
+	to, toScalar := c.To.Scalar()
+	if c.From.WasList() || c.To.WasList() || !fromScalar || !toScalar {
+		return nil, nil, &evaluationError{
+			Reason: ReasonMalformedClaim,
+			Detail: c.Kind + " requires scalar 'from' and 'to'",
+		}
+	}
+	froms, bad = m.resolveMany(from)
 	if bad != nil {
 		return nil, nil, bad
 	}
-	tos, bad = m.resolveMany(c.To)
+	tos, bad = m.resolveMany(to)
 	if bad != nil {
 		return froms, nil, bad
 	}
@@ -981,14 +998,15 @@ func (m *model) countPresentPairs(froms, tos []string) int {
 // label is the report-line label for a claim: the free-form `id` when present
 // (a suite identifies its claims by id), else an endpoint-derived label. The
 // derived label reads the anchor through nodeAnchor/degreeAnchor so an `fn`
-// alias is reflected exactly as the evaluator saw it.
+// alias is reflected exactly as the evaluator saw it. Selector families retain
+// input order and join with ", "; existing scalar labels remain byte-identical.
 func label(c Claim) string {
 	if c.ID != "" {
 		return c.ID
 	}
 	switch c.Kind {
 	case "edge", "no_edge", "edge_count":
-		return c.From + " -> " + c.To
+		return selectorLabel(c.From) + " -> " + selectorLabel(c.To)
 	case "node", "no_node":
 		q, det := nodeAnchor(c)
 		if det != "" {
@@ -1015,8 +1033,13 @@ func label(c Claim) string {
 		// empty side, same as the edge kinds' From/To fallback.
 		return c.Name + " -> " + c.Fn
 	default:
-		return strings.TrimSpace(c.From + c.To + c.FQN + c.Of + c.Fn + c.Name)
+		return strings.TrimSpace(selectorLabel(c.From) + selectorLabel(c.To) +
+			selectorLabel(c.Through) + c.Expect + c.FQN + c.Of + c.Fn + c.Name)
 	}
+}
+
+func selectorLabel(selectors Selectors) string {
+	return strings.Join(selectors.Values(), ", ")
 }
 
 func pass(c Claim) Result {
