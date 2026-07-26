@@ -252,14 +252,11 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // finalize sorts nodes and each node's edges into canonical order. The node sort
 // tie-breaks on features.InstanceDiscriminator because a generic instance's FQN
 // (fn.RelString) is documented non-unique: an FQN-only comparator over the
-// map-iteration-ordered node set is nondeterministic on such a tie (M-20). The one
-// FQN+discriminator collision go/ssa is known to produce — interchangeable synthetic
-// $bound/$thunk wrappers minted per use-site — is merged upstream in node() (see
-// mergeKey). A collision surviving to here is therefore either genuinely un-orderable
-// or an unrecognized synthetic class outside that proven-identical merge set; either
-// way, fail loudly rather than emit a run-varying order (determinism before
-// convenience), so an unproven duplicate trips this guard instead of being silently
-// merged.
+// map-iteration-ordered node set is nondeterministic on such a tie (M-20). Two known
+// collision classes are resolved upstream: byte-identical $bound/$thunk wrappers are
+// merged by mergeKey, while generic instances whose type strings lose local lexical
+// scope are separated by their physical declaration sites. Any surviving duplicate
+// is a producer bug and must panic rather than emit a run-varying order.
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
