@@ -171,6 +171,28 @@ func use() { { type result struct{ A int }; instantiate[result]() }; { type resu
 	}
 }
 
+func TestInstanceDiscriminatorCollectsLocalAliasObject(t *testing.T) {
+	const src = `package localtypes
+func instantiate[T any]() {}
+func use() { type result = int; instantiate[result]() }
+`
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src), "example.com/localtypes.instantiate[")
+	if len(instances) != 1 {
+		t.Fatalf("instantiate instances = %d, want 1", len(instances))
+	}
+	args := instances[0].TypeArgs()
+	if len(args) != 1 {
+		t.Fatalf("type arguments = %d, want 1", len(args))
+	}
+	if _, ok := args[0].(*types.Alias); !ok {
+		t.Fatalf("type argument = %T, want *types.Alias", args[0])
+	}
+	sites := localDeclaredTypeSites(instances[0], args)
+	if len(sites) != 1 || !strings.HasPrefix(sites[0], "local.go:") {
+		t.Fatalf("localDeclaredTypeSites() = %v, want one local alias site", sites)
+	}
+}
+
 func identityTestFunction(t *testing.T) *ssa.Function {
 	t.Helper()
 	const src = `package localtypes
@@ -227,6 +249,31 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 			targetUnderlying: targetInt,
 			root: func(_ *testing.T, target *types.Named) types.Type {
 				return types.NewAlias(packageTypeName(fn, "aliasRoot"), target)
+			},
+		},
+		{
+			name:             "alias_type_parameter",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				param := types.NewTypeParam(packageTypeName(fn, "AliasParam"), target)
+				origin := types.NewAlias(packageTypeName(fn, "aliasTypeParamRoot"), types.Typ[types.Int])
+				origin.SetTypeParams([]*types.TypeParam{param})
+				return origin
+			},
+		},
+		{
+			name:             "alias_type_argument",
+			targetUnderlying: targetInt,
+			root: func(t *testing.T, target *types.Named) types.Type {
+				t.Helper()
+				param := types.NewTypeParam(packageTypeName(fn, "AliasArg"), emptyIdentityInterface())
+				origin := types.NewAlias(packageTypeName(fn, "aliasTypeArgRoot"), types.Typ[types.Int])
+				origin.SetTypeParams([]*types.TypeParam{param})
+				instance, err := types.Instantiate(nil, origin, []types.Type{target}, false)
+				if err != nil {
+					t.Fatalf("instantiate alias root: %v", err)
+				}
+				return instance
 			},
 		},
 		{
@@ -294,6 +341,16 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 					t.Fatalf("instantiate named root: %v", err)
 				}
 				return instance
+			},
+		},
+		{
+			name:             "named_type_parameter",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				param := types.NewTypeParam(packageTypeName(fn, "NamedParam"), target)
+				origin := types.NewNamed(packageTypeName(fn, "namedTypeParamRoot"), types.NewStruct(nil, nil), nil)
+				origin.SetTypeParams([]*types.TypeParam{param})
+				return origin
 			},
 		},
 		{
@@ -413,6 +470,23 @@ func assertIdentityPanic(t *testing.T, want string, f func()) {
 }
 
 func TestInstanceDiscriminatorFailsClosedOnUntrustworthyLocalIdentity(t *testing.T) {
+	const wantGuardPanic = "features: local type identity requires an SSA file set"
+	t.Run("nil_function", func(t *testing.T) {
+		assertIdentityPanic(t, wantGuardPanic, func() {
+			localDeclaredTypeSites(nil, nil)
+		})
+	})
+	t.Run("nil_program", func(t *testing.T) {
+		assertIdentityPanic(t, wantGuardPanic, func() {
+			localDeclaredTypeSites(&ssa.Function{}, nil)
+		})
+	})
+	t.Run("nil_file_set", func(t *testing.T) {
+		assertIdentityPanic(t, wantGuardPanic, func() {
+			localDeclaredTypeSites(&ssa.Function{Prog: ssa.NewProgram(nil, 0)}, nil)
+		})
+	})
+
 	fn := identityTestFunction(t)
 	// The invalid-position check after File returns is a defensive invariant:
 	// token.FileSet.File returns a file only when the position is already within
