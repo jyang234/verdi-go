@@ -1488,13 +1488,49 @@ expected report is byte-stable.
 `--json` emits one canonical `groundwork.assert/v1` report. Its top-level fields
 are `schema_version`, `fixture`, `results`, and `summary`. `fixture` always
 contains the graph's `stamp`, `producer_tool`, `algo`, and `caveats`; unrecorded
-scalar provenance is `""`, and caveats are sorted and deduplicated evaluator
-substrate disclosures. `results` has one item per input claim in claims-file
-order. Each result carries `id`, `kind`, and `outcome` (`PASS`, `FAIL`, or
-`ERROR`), with optional human `detail`, canonical resolved `bindings`, and
-deterministic `witnesses`. `reason` appears only on `ERROR`; consumers must use
-it rather than parsing `detail`. `summary` contains `passed`, `failed`,
-`errored`, `nodes`, and `unique_edges`.
+scalar provenance is `""`. `fixture.caveats` is exactly the sorted, deduplicated
+output of `graph.NewIndex(g).GateCaveats("")`: graph-provided `caveats` plus
+the derived reclaimed-edge and SQL-fold disclosures (`ReclaimCaveat` and
+`SQLFoldCaveat`). The empty policy-substrate argument deliberately adds no
+policy-vs-graph mismatch disclosure.
+
+`results` has one item per input claim in claims-file order. Each result carries
+`id`, `kind`, and `outcome` (`PASS`, `FAIL`, or `ERROR`). `reason` is optional
+but appears only on `ERROR`; consumers must use it rather than parsing the
+optional human `detail`. `bindings` is optional and omitted when no graph
+identity was established; its present fields are independently optional,
+canonical sorted/deduplicated identity sets:
+
+| Binding key | Meaning when present |
+|---|---|
+| `from` | Graph identities resolved for the claim's source side. |
+| `to` | Graph identities resolved for the claim's destination side. |
+| `through` | Graph identities established for an intermediate selector. |
+| `fqn` | Nodes resolved for a node-style `fqn` selector. |
+| `of` | Graph identities resolved for a degree-style `of` selector. |
+| `fn` | Nodes resolved for a `fn` selector or handler anchor. |
+| `entrypoint` | Canonical graph identities of resolved entrypoint records. |
+| `obligation` | Canonical graph identities of established obligation records. |
+
+`witnesses` is optional and omitted when a result has no machine evidence. Each
+witness is an independently optional evidence tuple, sorted and deduplicated by
+all of its fields; a `path`, when present, retains its ordered graph walk:
+
+| Witness key | Meaning when present |
+|---|---|
+| `from` | Witness source graph identity. |
+| `to` | Witness destination graph identity. |
+| `path` | Ordered graph path connecting the witness endpoints. |
+| `blind_site` | Graph site at the disclosed blind frontier. |
+| `rule` | Name of the graph rule associated with the evidence. |
+| `fn` | Function associated with the evidence. |
+| `site` | Graph-record site associated with the evidence. |
+| `status` | Graph-recorded status associated with the evidence. |
+| `detail` | Human explanatory evidence; never a machine discriminator. |
+
+`summary` contains `passed`, `failed`, `errored`, `nodes`, and `unique_edges`.
+These nested fields describe the fixed v1 result shape; this structural-machine
+milestone does not yet add rich claim kinds or their execution semantics.
 
 The closed v1 `reason` vocabulary is:
 

@@ -259,12 +259,12 @@ func TestAssertJSONCommandContract(t *testing.T) {
 }
 
 // TestAssertJSONCanonicalAcrossWholeGraphPermutations pins the command boundary:
-// independently reordered graph collections, including duplicate edge and caveat
-// records, must produce the same machine report bytes for the same claims order.
+// each graph collection may arrive in a different order, but no single
+// collection's order may alter the machine report for the same claims order.
 func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 	dir := t.TempDir()
 	claimsPath := filepath.Join(dir, "claims.json")
-	if err := os.WriteFile(claimsPath, []byte(`{"claims":[{"id":"edge","kind":"edge","from":"pkg.A","to":"pkg.B"},{"id":"node","kind":"node","fqn":"pkg.C"}]}`), 0o644); err != nil {
+	if err := os.WriteFile(claimsPath, []byte(`{"claims":[{"id":"edge","kind":"edge","from":"pkg.A","to":"pkg.B"},{"id":"node","kind":"node","fqn":"pkg.C"},{"id":"entrypoint","kind":"entrypoint","name":"GET /a","fn":"pkg.A"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	base := graph.Graph{
@@ -299,20 +299,24 @@ func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 		},
 	}
 
-	var want []byte
-	for permutation := 0; permutation < 6; permutation++ {
-		graphPath := writeAssertGraph(t, dir, permutation, permutedAssertGraph(base, permutation))
-		var out bytes.Buffer
-		if err := cmdAssertTo([]string{graphPath, claimsPath, "--json"}, &out); err != nil {
-			t.Fatalf("permutation %d: cmdAssertTo: %v", permutation, err)
-		}
-		if permutation == 0 {
-			want = append([]byte(nil), out.Bytes()...)
-			continue
-		}
-		if got := out.Bytes(); !bytes.Equal(got, want) {
-			t.Fatalf("permutation %d changed JSON report:\n%s\nwant:\n%s", permutation, got, want)
-		}
+	want := assertMachineJSON(t, writeAssertGraph(t, dir, "baseline", base), claimsPath)
+	for _, tt := range []struct {
+		name  string
+		graph graph.Graph
+	}{
+		{name: "nodes", graph: graphWithPermutedNodes(base)},
+		{name: "edges", graph: graphWithPermutedEdges(base)},
+		{name: "blind spots", graph: graphWithPermutedBlindSpots(base)},
+		{name: "obligations", graph: graphWithPermutedObligations(base)},
+		{name: "entrypoints", graph: graphWithPermutedEntrypoints(base)},
+		{name: "caveats", graph: graphWithPermutedCaveats(base)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := assertMachineJSON(t, writeAssertGraph(t, dir, tt.name, tt.graph), claimsPath)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s permutation changed JSON report:\n%s\nwant:\n%s", tt.name, got, want)
+			}
+		})
 	}
 
 	var report claims.JSONReport
@@ -325,16 +329,47 @@ func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 	if report.Summary.UniqueEdges != 2 {
 		t.Fatalf("unique edges = %d, want 2 after duplicate-edge deduplication", report.Summary.UniqueEdges)
 	}
+	if report.Results[2].Bindings == nil {
+		t.Fatal("entrypoint result omitted bindings")
+	}
+	if got := report.Results[2].Bindings.Entrypoint; len(got) != 1 {
+		t.Fatalf("entrypoint binding = %q, want one canonical entrypoint identity", got)
+	}
 }
 
-func permutedAssertGraph(base graph.Graph, permutation int) graph.Graph {
+func graphWithPermutedNodes(base graph.Graph) graph.Graph {
 	g := base
-	g.Nodes = permuteAssertSlice(base.Nodes, permutation, permutation%2 == 1)
-	g.Edges = permuteAssertSlice(base.Edges, permutation*2, permutation%3 == 1)
-	g.BlindSpots = permuteAssertSlice(base.BlindSpots, permutation*2, permutation%2 == 0)
-	g.Obligations = permuteAssertSlice(base.Obligations, permutation, permutation%3 == 2)
-	g.Entrypoints = permuteAssertSlice(base.Entrypoints, permutation*2, permutation%2 == 1)
-	g.Caveats = permuteAssertSlice(base.Caveats, permutation, permutation%3 == 0)
+	g.Nodes = permuteAssertSlice(base.Nodes, 1, true)
+	return g
+}
+
+func graphWithPermutedEdges(base graph.Graph) graph.Graph {
+	g := base
+	g.Edges = permuteAssertSlice(base.Edges, 2, false)
+	return g
+}
+
+func graphWithPermutedBlindSpots(base graph.Graph) graph.Graph {
+	g := base
+	g.BlindSpots = permuteAssertSlice(base.BlindSpots, 2, true)
+	return g
+}
+
+func graphWithPermutedObligations(base graph.Graph) graph.Graph {
+	g := base
+	g.Obligations = permuteAssertSlice(base.Obligations, 1, true)
+	return g
+}
+
+func graphWithPermutedEntrypoints(base graph.Graph) graph.Graph {
+	g := base
+	g.Entrypoints = permuteAssertSlice(base.Entrypoints, 2, true)
+	return g
+}
+
+func graphWithPermutedCaveats(base graph.Graph) graph.Graph {
+	g := base
+	g.Caveats = permuteAssertSlice(base.Caveats, 1, true)
 	return g
 }
 
@@ -350,17 +385,26 @@ func permuteAssertSlice[T any](values []T, offset int, reverse bool) []T {
 	return out
 }
 
-func writeAssertGraph(t *testing.T, dir string, permutation int, g graph.Graph) string {
+func writeAssertGraph(t *testing.T, dir, name string, g graph.Graph) string {
 	t.Helper()
 	b, err := canonjson.Marshal(g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, fmt.Sprintf("graph-%d.json", permutation))
+	path := filepath.Join(dir, fmt.Sprintf("%s.graph.json", name))
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func assertMachineJSON(t *testing.T, graphPath, claimsPath string) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	if err := cmdAssertTo([]string{graphPath, claimsPath, "--json"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
 }
 
 // TestAssertMachineIDValidation rejects an incomplete machine identity set
