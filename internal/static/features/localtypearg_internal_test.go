@@ -295,7 +295,7 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 			targetUnderlying: targetInt,
 			root: func(_ *testing.T, target *types.Named) types.Type {
 				params := types.NewTuple(types.NewVar(token.NoPos, pkg, "value", target))
-				method := types.NewFunc(token.NoPos, pkg, "Use", types.NewSignature(nil, params, nil, false))
+				method := types.NewFunc(token.NoPos, pkg, "Use", types.NewSignatureType(nil, nil, nil, params, nil, false))
 				return types.NewInterfaceType([]*types.Func{method}, nil).Complete()
 			},
 		},
@@ -365,7 +365,7 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 			targetUnderlying: targetInt,
 			root: func(_ *testing.T, target *types.Named) types.Type {
 				recv := types.NewVar(token.NoPos, pkg, "recv", target)
-				return types.NewSignature(recv, nil, nil, false)
+				return types.NewSignatureType(recv, nil, nil, nil, nil, false)
 			},
 		},
 		{
@@ -390,7 +390,7 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 			targetUnderlying: targetInt,
 			root: func(_ *testing.T, target *types.Named) types.Type {
 				params := types.NewTuple(types.NewVar(token.NoPos, pkg, "value", target))
-				return types.NewSignature(nil, params, nil, false)
+				return types.NewSignatureType(nil, nil, nil, params, nil, false)
 			},
 		},
 		{
@@ -398,7 +398,7 @@ func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
 			targetUnderlying: targetInt,
 			root: func(_ *testing.T, target *types.Named) types.Type {
 				results := types.NewTuple(types.NewVar(token.NoPos, pkg, "", target))
-				return types.NewSignature(nil, nil, results, false)
+				return types.NewSignatureType(nil, nil, nil, nil, results, false)
 			},
 		},
 		{
