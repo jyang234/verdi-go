@@ -1,12 +1,15 @@
 package features
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -145,30 +148,297 @@ func second() { type result struct{ B string }; instantiate[result]() }
 	}
 }
 
-func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
+func TestInstanceDiscriminatorSeparatesSameLineLocalTypes(t *testing.T) {
 	const src = `package localtypes
 func instantiate[T any]() {}
-func shapes() {
-	type localAlias = int
-	type localNamed[P interface{ localAlias | ~string }] struct {
-		Sig func(P, []localAlias) *localNamed[P]
-		Map map[localAlias][]*localNamed[P]
-		Chan chan [2]*localNamed[P]
-		Struct struct { Alias localAlias; Named *localNamed[P] }
-		Interface interface { M(localAlias) *localNamed[P] }
-	}
-	instantiate[localNamed[localAlias]]()
-}
+func use() { { type result struct{ A int }; instantiate[result]() }; { type result struct{ A int }; instantiate[result]() } }
 `
-	prog := buildLocalTypeProgram(t, "/checkout/root/local.go", src)
-	instances := localInstances(t, prog, "example.com/localtypes.instantiate[")
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src), "example.com/localtypes.instantiate[")
+	if len(instances) != 2 {
+		t.Fatalf("instantiate instances = %d, want 2", len(instances))
+	}
+	if got, want := instances[0].RelString(nil), instances[1].RelString(nil); got != want {
+		t.Fatalf("display FQNs differ: %q and %q", got, want)
+	}
+	left, right := InstanceDiscriminator(instances[0]), InstanceDiscriminator(instances[1])
+	if left == right {
+		t.Fatalf("same-line local declarations have equal discriminators %q", left)
+	}
+	for _, key := range []string{left, right} {
+		if got := strings.Count(key, "\x00local-sites/v1\x00"); got != 1 {
+			t.Errorf("discriminator %q has %d local-site suffixes, want 1", key, got)
+		}
+	}
+}
+
+func identityTestFunction(t *testing.T) *ssa.Function {
+	t.Helper()
+	const src = `package localtypes
+func instantiate[T any]() {}
+func use() { instantiate[int]() }
+`
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src), "example.com/localtypes.instantiate[")
 	if len(instances) != 1 {
 		t.Fatalf("instantiate instances = %d, want 1", len(instances))
 	}
-	key := InstanceDiscriminator(instances[0])
-	if got := strings.Count(key, "local.go:"); got != 2 {
-		t.Errorf("discriminator %q contains %d local declaration sites, want alias and named declaration once each", key, got)
+	return instances[0]
+}
+
+func newLocalNamedIdentityType(t *testing.T, fn *ssa.Function, name string, offset int, underlying types.Type) (*types.Named, string) {
+	t.Helper()
+	file := fn.Prog.Fset.File(fn.Origin().Pos())
+	if file == nil {
+		t.Fatal("fixture origin has no physical token file")
 	}
+	if offset < 0 || offset >= file.Size() {
+		t.Fatalf("fixture offset %d outside physical file size %d", offset, file.Size())
+	}
+	pos := file.Pos(offset)
+	pkg := effectivePkg(fn)
+	scope := types.NewScope(pkg.Scope(), pos, pos+1, "identity test local scope")
+	obj := types.NewTypeName(pos, pkg, name, nil)
+	if alt := scope.Insert(obj); alt != nil {
+		t.Fatalf("insert local type %q collided with %v", name, alt)
+	}
+	return types.NewNamed(obj, underlying, nil), filepath.Base(file.Name()) + ":" + strconv.Itoa(offset)
+}
+
+func packageTypeName(fn *ssa.Function, name string) *types.TypeName {
+	return types.NewTypeName(token.NoPos, effectivePkg(fn), name, nil)
+}
+
+func emptyIdentityInterface() *types.Interface {
+	return types.NewInterfaceType(nil, nil).Complete()
+}
+
+func TestInstanceDiscriminatorWalksNestedLocalTypes(t *testing.T) {
+	fn := identityTestFunction(t)
+	pkg := effectivePkg(fn)
+	targetInterface := func() types.Type { return emptyIdentityInterface() }
+	targetInt := func() types.Type { return types.Typ[types.Int] }
+
+	tests := []struct {
+		name             string
+		targetUnderlying func() types.Type
+		root             func(*testing.T, *types.Named) types.Type
+	}{
+		{
+			name:             "alias_RHS",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewAlias(packageTypeName(fn, "aliasRoot"), target)
+			},
+		},
+		{
+			name:             "array_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewArray(target, 2)
+			},
+		},
+		{
+			name:             "channel_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewChan(types.SendRecv, target)
+			},
+		},
+		{
+			name:             "interface_explicit_method",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				params := types.NewTuple(types.NewVar(token.NoPos, pkg, "value", target))
+				method := types.NewFunc(token.NoPos, pkg, "Use", types.NewSignature(nil, params, nil, false))
+				return types.NewInterfaceType([]*types.Func{method}, nil).Complete()
+			},
+		},
+		{
+			name:             "interface_embedded_type",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewInterfaceType(nil, []types.Type{target}).Complete()
+			},
+		},
+		{
+			name:             "map_key",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewMap(target, types.Typ[types.String])
+			},
+		},
+		{
+			name:             "map_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewMap(types.Typ[types.String], target)
+			},
+		},
+		{
+			name:             "named_underlying",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				field := types.NewVar(token.NoPos, pkg, "Value", target)
+				return types.NewNamed(packageTypeName(fn, "namedUnderlyingRoot"), types.NewStruct([]*types.Var{field}, nil), nil)
+			},
+		},
+		{
+			name:             "named_type_argument",
+			targetUnderlying: targetInt,
+			root: func(t *testing.T, target *types.Named) types.Type {
+				t.Helper()
+				param := types.NewTypeParam(packageTypeName(fn, "NamedArg"), emptyIdentityInterface())
+				origin := types.NewNamed(packageTypeName(fn, "namedArgRoot"), types.NewStruct(nil, nil), nil)
+				origin.SetTypeParams([]*types.TypeParam{param})
+				instance, err := types.Instantiate(nil, origin, []types.Type{target}, false)
+				if err != nil {
+					t.Fatalf("instantiate named root: %v", err)
+				}
+				return instance
+			},
+		},
+		{
+			name:             "pointer_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewPointer(target)
+			},
+		},
+		{
+			name:             "signature_receiver",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				recv := types.NewVar(token.NoPos, pkg, "recv", target)
+				return types.NewSignature(recv, nil, nil, false)
+			},
+		},
+		{
+			name:             "signature_receiver_type_parameter",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				recv := types.NewVar(token.NoPos, pkg, "recv", types.Typ[types.Int])
+				param := types.NewTypeParam(packageTypeName(fn, "RecvParam"), target)
+				return types.NewSignatureType(recv, []*types.TypeParam{param}, nil, nil, nil, false)
+			},
+		},
+		{
+			name:             "signature_type_parameter",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				param := types.NewTypeParam(packageTypeName(fn, "SigParam"), target)
+				return types.NewSignatureType(nil, nil, []*types.TypeParam{param}, nil, nil, false)
+			},
+		},
+		{
+			name:             "signature_parameter",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				params := types.NewTuple(types.NewVar(token.NoPos, pkg, "value", target))
+				return types.NewSignature(nil, params, nil, false)
+			},
+		},
+		{
+			name:             "signature_result",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				results := types.NewTuple(types.NewVar(token.NoPos, pkg, "", target))
+				return types.NewSignature(nil, nil, results, false)
+			},
+		},
+		{
+			name:             "slice_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewSlice(target)
+			},
+		},
+		{
+			name:             "struct_field",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				field := types.NewVar(token.NoPos, pkg, "Value", target)
+				return types.NewStruct([]*types.Var{field}, nil)
+			},
+		},
+		{
+			name:             "tuple_element",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewTuple(types.NewVar(token.NoPos, pkg, "value", target))
+			},
+		},
+		{
+			name:             "type_parameter_constraint",
+			targetUnderlying: targetInterface,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewTypeParam(packageTypeName(fn, "ConstraintParam"), target)
+			},
+		},
+		{
+			name:             "union_term",
+			targetUnderlying: targetInt,
+			root: func(_ *testing.T, target *types.Named) types.Type {
+				return types.NewUnion([]*types.Term{types.NewTerm(false, target)})
+			},
+		},
+	}
+
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target, want := newLocalNamedIdentityType(t, fn, "target"+strconv.Itoa(i), 10+i, test.targetUnderlying())
+			got := localDeclaredTypeSites(fn, []types.Type{test.root(t, target)})
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("localDeclaredTypeSites() = %v, want [%q]", got, want)
+			}
+		})
+	}
+}
+
+type unsupportedIdentityType struct{}
+
+func (unsupportedIdentityType) Underlying() types.Type { return unsupportedIdentityType{} }
+func (unsupportedIdentityType) String() string         { return "unsupportedIdentityType" }
+
+func assertIdentityPanic(t *testing.T, want string, f func()) {
+	t.Helper()
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatalf("did not panic, want %q", want)
+		}
+		if message := fmt.Sprint(got); message != want {
+			t.Fatalf("panic = %q, want %q", message, want)
+		}
+	}()
+	f()
+}
+
+func TestInstanceDiscriminatorFailsClosedOnUntrustworthyLocalIdentity(t *testing.T) {
+	fn := identityTestFunction(t)
+	// The invalid-position check after File returns is a defensive invariant:
+	// token.FileSet.File returns a file only when the position is already within
+	// that file's [Base, Base+Size] range. No public token API can construct a
+	// non-nil file that then fails the same bounds check, so the missing-file
+	// case below pins the constructible invalid-position failure.
+	t.Run("missing_physical_file", func(t *testing.T) {
+		const name = "missingFile"
+		pkg := effectivePkg(fn)
+		pos := token.Pos(1 << 29)
+		scope := types.NewScope(pkg.Scope(), pos, pos+1, "missing physical file")
+		obj := types.NewTypeName(pos, pkg, name, nil)
+		if alt := scope.Insert(obj); alt != nil {
+			t.Fatalf("insert local type %q collided with %v", name, alt)
+		}
+		root := types.NewNamed(obj, types.Typ[types.Int], nil)
+		assertIdentityPanic(t, `features: no physical token file for local type "missingFile"`, func() {
+			localDeclaredTypeSites(fn, []types.Type{root})
+		})
+	})
+
+	t.Run("unsupported_type", func(t *testing.T) {
+		assertIdentityPanic(t, "features: unsupported go/types implementation features.unsupportedIdentityType in local type identity", func() {
+			localDeclaredTypeSites(fn, []types.Type{unsupportedIdentityType{}})
+		})
+	})
 }
 
 func TestInstanceDiscriminatorRepeatable(t *testing.T) {
