@@ -111,6 +111,7 @@ import (
 	"strings"
 
 	"github.com/jyang234/golang-code-graph/internal/fqnres"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 	"github.com/jyang234/golang-code-graph/internal/routematch"
@@ -139,8 +140,8 @@ type Claim struct {
 	// from the wrong-kind field check entirely.
 	ID string `json:"id,omitempty"`
 	// From, To, and Through retain whether JSON supplied a scalar or list.
-	// Structural claims remain scalar-only; later rich claim families consume
-	// the list shape without changing this shared decoder.
+	// Structural claims remain scalar-only; rich claim families consume the list
+	// shape without changing this shared decoder.
 	From                Selectors `json:"from,omitempty"`
 	To                  Selectors `json:"to,omitempty"`
 	Through             Selectors `json:"through,omitempty"`
@@ -342,8 +343,9 @@ func Evaluate(g *graph.Graph, cf *File) Report {
 
 // model is the once-per-run graph view every claim shares.
 type model struct {
-	nodeUniverse     []string // sorted declared node FQNs
-	endpointUniverse []string // sorted node FQNs ∪ edge endpoints
+	reachIndex       *graph.Index // shared typed-fact substrate
+	nodeUniverse     []string     // sorted declared node FQNs
+	endpointUniverse []string     // sorted node FQNs ∪ edge endpoints
 	pairs            map[[2]string]bool
 	callers          map[string][]string // to → sorted distinct froms
 	callees          map[string][]string // from → sorted distinct tos
@@ -382,6 +384,7 @@ func newModel(g *graph.Graph) *model {
 		addSet(calleesSet, e.From, e.To)
 	}
 	return &model{
+		reachIndex:       graph.NewIndex(g),
 		nodeUniverse:     setutil.SortedKeys(nodeSet),
 		endpointUniverse: EndpointUniverse(g),
 		pairs:            pairs,
@@ -435,6 +438,7 @@ var allowedFields = map[string][]string{
 	"in_degree":  {"of", "eq", "counterpart_matching", "to_matching", "fn"},
 	"out_degree": {"of", "eq", "counterpart_matching", "to_matching", "fn"},
 	"entrypoint": {"name", "fn", "entry_kind"},
+	"reach":      {"from", "to", "expect"},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -462,9 +466,72 @@ func (m *model) eval(c Claim) Result {
 		return m.evalDegree(c, false)
 	case "entrypoint":
 		return m.evalEntrypoint(c)
+	case "reach":
+		return m.evalReach(c)
 	default:
 		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
+}
+
+func (m *model) evalReach(c Claim) Result {
+	if !c.From.Present() || !c.To.Present() {
+		return errored(c, ReasonMalformedClaim, "reach requires 'from' and 'to'")
+	}
+	if c.Expect != "present" && c.Expect != "absent" {
+		return errored(c, ReasonMalformedClaim, `reach requires expect "present" or "absent"`)
+	}
+
+	fact := facts.EvaluateReach(m.reachIndex, c.From.Values(), c.To.Values())
+	bindings := Bindings{
+		From: append([]string(nil), fact.From...),
+		To:   append([]string(nil), fact.To...),
+	}
+	switch fact.State {
+	case facts.ReachUnbound:
+		field, selectors := "from", fact.UnboundFrom
+		if len(selectors) == 0 {
+			field, selectors = "to", fact.UnboundTo
+		}
+		return withBindings(errored(c, ReasonUnboundSelector,
+			fmt.Sprintf("%s selector(s) bind nothing: %s", field, strings.Join(selectors, ", "))), bindings)
+	case facts.ReachFound:
+		witnesses := make([]Witness, len(fact.Paths))
+		for i, path := range fact.Paths {
+			witnesses[i] = Witness{
+				From: path.From,
+				To:   path.To,
+				Path: append([]string(nil), path.Path...),
+			}
+		}
+		result := resultForExpectation(c, true, "path found")
+		result.Bindings = bindings
+		result.Witnesses = witnesses
+		return result
+	case facts.ReachAbsent:
+		result := resultForExpectation(c, false, "no path found")
+		result.Bindings = bindings
+		return result
+	case facts.ReachBlind:
+		result := withBindings(errored(c, ReasonBlindFrontier,
+			"no path found, but the frontier is blind at "+fact.Blind.Site), bindings)
+		result.Witnesses = []Witness{{
+			From:      fact.Blind.From,
+			BlindSite: fact.Blind.Site,
+		}}
+		return result
+	default:
+		return errored(c, ReasonMalformedClaim, "reach evaluator returned an unknown state")
+	}
+}
+
+func resultForExpectation(c Claim, present bool, detail string) Result {
+	matches := (c.Expect == "present" && present) || (c.Expect == "absent" && !present)
+	if matches {
+		result := pass(c)
+		result.Detail = detail
+		return result
+	}
+	return fail(c, detail)
 }
 
 // claimFieldChecks is the fixed, ordered list of every kind-field unexpectedField
@@ -1032,6 +1099,8 @@ func label(c Claim) string {
 		// asserts. A required field left empty (an ERRORed claim) renders as an
 		// empty side, same as the edge kinds' From/To fallback.
 		return c.Name + " -> " + c.Fn
+	case "reach":
+		return selectorLabel(c.From) + " -> " + selectorLabel(c.To)
 	default:
 		return strings.TrimSpace(selectorLabel(c.From) + selectorLabel(c.To) +
 			selectorLabel(c.Through) + c.Expect + c.FQN + c.Of + c.Fn + c.Name)

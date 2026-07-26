@@ -2,6 +2,7 @@ package fitness
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -162,6 +163,185 @@ func TestMustNotReachProvenAbsentIsSilent(t *testing.T) {
 	res := Check(p, graph.NewIndex(g))
 	if len(res.Findings) != 0 {
 		t.Fatalf("a proven-absent rule must be silent; got %v", res.Findings)
+	}
+}
+
+// TestReachCharacterization pins every Finding field emitted by must_not_reach
+// before its binding, traversal, and blind-frontier facts move to the shared
+// facts package. Presentation changes require an explicit compatibility review.
+func TestReachCharacterization(t *testing.T) {
+	const (
+		source = "svc.A"
+		mid    = "svc.Mid"
+		other  = "svc.Other"
+		target = "boundary:db UPDATE users"
+	)
+
+	baseGraph := func() *graph.Graph {
+		return &graph.Graph{
+			Nodes: []graph.Node{
+				{FQN: source},
+				{FQN: mid},
+				{FQN: other},
+			},
+			Edges: []graph.Edge{
+				{From: source, To: mid},
+				{From: other, To: target, Boundary: "outbound-sync"},
+			},
+		}
+	}
+	rule := func() policy.ReachRule {
+		return policy.ReachRule{
+			Name: "no-write",
+			From: []string{source},
+			To:   []string{"boundary:db UPDATE"},
+		}
+	}
+
+	tests := []struct {
+		name string
+		g    func() *graph.Graph
+		rule func() policy.ReachRule
+		want []Finding
+	}{
+		{
+			name: "reachable violation",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.Edges = append(g.Edges, graph.Edge{
+					From: mid, To: target, Boundary: "outbound-sync",
+				})
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE users",
+				From:     source,
+				To:       target,
+				Detail:   "",
+			}},
+		},
+		{
+			name: "proven absence",
+			g:    baseGraph,
+			rule: rule,
+			want: nil,
+		},
+		{
+			name: "blind frontier caution",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{{
+					Kind: "reflect", Site: mid, Detail: "opaque dispatch",
+				}}
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "require proof blind frontier violation",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{{
+					Kind: "reflect", Site: mid, Detail: "opaque dispatch",
+				}}
+				return g
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.RequireProof = true
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — require_proof is set and absence cannot be proven",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "unbound source",
+			g:    baseGraph,
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.From = []string{"svc.Missing"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: from binds nothing in this graph — inert rule",
+				From:     "",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "unbound target",
+			g:    baseGraph,
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"boundary:db DELETE"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: to binds nothing in this graph — name a first-party sink it can bind, or this invariant is vacuous",
+				From:     "",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "entrypoint star",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{{FQN: source}, {FQN: mid}},
+					Edges: []graph.Edge{{From: source, To: mid}},
+				}
+			},
+			rule: func() policy.ReachRule {
+				return policy.ReachRule{
+					Name: "entrypoint-no-mid",
+					From: []string{policy.EntrypointSelector},
+					To:   []string{mid},
+				}
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "entrypoint-no-mid: svc.A reaches svc.Mid",
+				From:     source,
+				To:       mid,
+				Detail:   "",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &policy.Policy{
+				Service: "svc", Version: 1,
+				MustNotReach: []policy.ReachRule{tt.rule()},
+			}
+			got := Check(p, graph.NewIndex(tt.g())).Findings
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("findings changed\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
 	}
 }
 
