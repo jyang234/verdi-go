@@ -52,45 +52,53 @@ func buildLocalTypeCallGraph(t *testing.T) []*ssa.Function {
 }
 
 func TestFromXKeepsCollidingDisplayGenericInstances(t *testing.T) {
-	roots := buildLocalTypeCallGraph(t)
-	raw := rta.Analyze(roots, true).CallGraph
+	var wantKeys []string
+	for construction := 0; construction < 20; construction++ {
+		roots := buildLocalTypeCallGraph(t)
+		raw := rta.Analyze(roots, true).CallGraph
 
-	var rawInstances []*ssa.Function
-	for fn := range raw.Nodes {
-		if fn != nil && strings.Contains(fn.RelString(nil), "instantiate[") {
-			rawInstances = append(rawInstances, fn)
+		var rawInstances []*ssa.Function
+		for fn := range raw.Nodes {
+			if fn != nil && strings.Contains(fn.RelString(nil), "instantiate[") {
+				rawInstances = append(rawInstances, fn)
+			}
 		}
-	}
-	sort.Slice(rawInstances, func(i, j int) bool {
-		left, right := features.InstanceDiscriminator(rawInstances[i]), features.InstanceDiscriminator(rawInstances[j])
-		if left != right {
-			return left < right
+		sort.Slice(rawInstances, func(i, j int) bool {
+			left, right := features.InstanceDiscriminator(rawInstances[i]), features.InstanceDiscriminator(rawInstances[j])
+			if left != right {
+				return left < right
+			}
+			return rawInstances[i].RelString(nil) < rawInstances[j].RelString(nil)
+		})
+		if len(rawInstances) != 2 {
+			t.Fatalf("construction %d raw graph has %d instances; want 2", construction, len(rawInstances))
 		}
-		return rawInstances[i].RelString(nil) < rawInstances[j].RelString(nil)
-	})
-	if len(rawInstances) < 2 {
-		t.Fatalf("raw graph has %d instances; want at least 2", len(rawInstances))
-	}
-	if rawInstances[0].RelString(nil) != rawInstances[1].RelString(nil) {
-		t.Fatalf("fixture did not reproduce display collision")
-	}
+		if rawInstances[0].RelString(nil) != rawInstances[1].RelString(nil) {
+			t.Fatalf("construction %d fixture did not reproduce display collision", construction)
+		}
 
-	got := fromX(raw, AlgoRTA, nil)
-	var keys []string
-	for _, n := range got.Nodes {
-		if strings.Contains(n.FQN, "instantiate[") {
-			keys = append(keys, n.FQN+"\x00"+features.InstanceDiscriminator(n.Func))
+		got := fromX(raw, AlgoRTA, nil)
+		var keys []string
+		for _, n := range got.Nodes {
+			if strings.Contains(n.FQN, "instantiate[") {
+				keys = append(keys, n.FQN+"\x00"+features.InstanceDiscriminator(n.Func))
+			}
 		}
-	}
-	if len(keys) < 2 {
-		t.Fatalf("converted graph kept %d instances; want at least 2", len(keys))
-	}
-	if !sort.StringsAreSorted(keys) {
-		t.Fatalf("instance keys are not sorted: %q", keys)
-	}
-	for i := 1; i < len(keys); i++ {
-		if keys[i] == keys[i-1] {
-			t.Fatalf("duplicate canonical key %q", keys[i])
+		if len(keys) != 2 {
+			t.Fatalf("construction %d converted graph kept %d instances; want 2", construction, len(keys))
+		}
+		if !sort.StringsAreSorted(keys) {
+			t.Fatalf("construction %d instance keys are not sorted: %q", construction, keys)
+		}
+		if keys[0] == keys[1] {
+			t.Fatalf("construction %d duplicate canonical key %q", construction, keys[0])
+		}
+		if construction == 0 {
+			wantKeys = append([]string(nil), keys...)
+			continue
+		}
+		if strings.Join(keys, "\n") != strings.Join(wantKeys, "\n") {
+			t.Fatalf("construction %d instance order = %q, want %q", construction, keys, wantKeys)
 		}
 	}
 }

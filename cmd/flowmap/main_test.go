@@ -184,13 +184,14 @@ func localTypeArgFixtureDir() string {
 }
 
 func TestGraphFunctionLocalGenericTypesDeterministic(t *testing.T) {
+	const reportFQN = "example.com/localtypeargsvc.report[example.com/localtypeargsvc.result]"
 	dir := localTypeArgFixtureDir()
 	// The fixture is a standalone service module, not a repository workspace member.
 	t.Setenv("GOWORK", "off")
 	var want string
 	for i := 0; i < 20; i++ {
 		got := captureStdout(t, func() {
-			if err := run([]string{"graph", dir}); err != nil {
+			if err := run([]string{"graph", "--algo", "vta", dir}); err != nil {
 				t.Fatalf("run %d: %v", i, err)
 			}
 		})
@@ -207,14 +208,41 @@ func TestGraphFunctionLocalGenericTypesDeterministic(t *testing.T) {
 	if err := json.Unmarshal([]byte(want), &g); err != nil {
 		t.Fatalf("decode graph: %v", err)
 	}
+	if g.Algo != "vta" {
+		t.Fatalf("graph algo = %q, want vta", g.Algo)
+	}
 	var instances int
 	for _, n := range g.Nodes {
-		if strings.Contains(n.FQN, "report[") {
+		if n.FQN == reportFQN {
 			instances++
 		}
 	}
-	if instances < 2 {
-		t.Fatalf("graph kept %d report instances; want at least 2", instances)
+	if instances != 3 {
+		t.Fatalf("graph kept %d report instances; want 3", instances)
+	}
+
+	wantCallers := map[string]bool{
+		"example.com/localtypeargsvc.alpha": false,
+		"example.com/localtypeargsvc.beta":  false,
+		"example.com/localtypeargsvc.gamma": false,
+	}
+	for _, edge := range g.Edges {
+		if edge.To != reportFQN {
+			continue
+		}
+		seen, ok := wantCallers[edge.From]
+		if !ok {
+			t.Fatalf("unexpected edge to retained report instances: %q -> %q", edge.From, edge.To)
+		}
+		if seen {
+			t.Fatalf("duplicate edge to retained report instances: %q -> %q", edge.From, edge.To)
+		}
+		wantCallers[edge.From] = true
+	}
+	for caller, seen := range wantCallers {
+		if !seen {
+			t.Errorf("missing edge from %q to retained report instances", caller)
+		}
 	}
 }
 

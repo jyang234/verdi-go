@@ -193,6 +193,44 @@ func use() { type result = int; instantiate[result]() }
 	}
 }
 
+func TestInstanceDiscriminatorCollectsRecursiveLocalNamedType(t *testing.T) {
+	const src = `package localtypes
+func instantiate[T any]() {}
+func use() { type node struct{ Next *node }; instantiate[node]() }
+`
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src), "example.com/localtypes.instantiate[")
+	if len(instances) != 1 {
+		t.Fatalf("instantiate instances = %d, want 1", len(instances))
+	}
+	args := instances[0].TypeArgs()
+	if len(args) != 1 {
+		t.Fatalf("type arguments = %d, want 1", len(args))
+	}
+	named, ok := args[0].(*types.Named)
+	if !ok {
+		t.Fatalf("type argument = %T, want *types.Named", args[0])
+	}
+	underlying, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		t.Fatalf("recursive type underlying = %T, want *types.Struct", named.Underlying())
+	}
+	if underlying.NumFields() != 1 {
+		t.Fatalf("recursive type fields = %d, want 1", underlying.NumFields())
+	}
+	next, ok := underlying.Field(0).Type().(*types.Pointer)
+	if !ok || next.Elem() != named {
+		t.Fatalf("recursive field type = %v, want pointer to the local named type", underlying.Field(0).Type())
+	}
+
+	key := InstanceDiscriminator(instances[0])
+	if got := strings.Count(key, "\x00local-sites/v1\x00"); got != 1 {
+		t.Fatalf("recursive local discriminator %q has %d local-site suffixes, want 1", key, got)
+	}
+	if !strings.Contains(key, "local.go:") {
+		t.Fatalf("recursive local discriminator %q does not contain its physical declaration site", key)
+	}
+}
+
 func identityTestFunction(t *testing.T) *ssa.Function {
 	t.Helper()
 	const src = `package localtypes
@@ -516,16 +554,22 @@ func TestInstanceDiscriminatorFailsClosedOnUntrustworthyLocalIdentity(t *testing
 }
 
 func TestInstanceDiscriminatorRepeatable(t *testing.T) {
-	var want []string
-	for run := 0; run < 20; run++ {
-		instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", collidingLocalTypes), "example.com/localtypes.instantiate[")
-		got := make([]string, len(instances))
-		for i, fn := range instances {
-			got[i] = InstanceDiscriminator(fn)
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", collidingLocalTypes), "example.com/localtypes.instantiate[")
+	want := make([]string, len(instances))
+	for i, fn := range instances {
+		want[i] = InstanceDiscriminator(fn)
+		for call := 0; call < 20; call++ {
+			if got := InstanceDiscriminator(fn); got != want[i] {
+				t.Fatalf("same-instance call %d discriminator = %q, want %q", call, got, want[i])
+			}
 		}
-		if run == 0 {
-			want = got
-			continue
+	}
+
+	for run := 0; run < 20; run++ {
+		rebuilt := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", collidingLocalTypes), "example.com/localtypes.instantiate[")
+		got := make([]string, len(rebuilt))
+		for i, fn := range rebuilt {
+			got[i] = InstanceDiscriminator(fn)
 		}
 		if strings.Join(got, "\n") != strings.Join(want, "\n") {
 			t.Errorf("run %d discriminators = %q, want %q", run, got, want)
