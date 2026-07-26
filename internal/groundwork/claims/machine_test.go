@@ -120,6 +120,182 @@ func TestMarshalMachineCanonicalizesSets(t *testing.T) {
 	}
 }
 
+func TestMarshalMachineWitnessContract(t *testing.T) {
+	path := []string{"z", "a", "m"}
+	witnesses := []Witness{
+		{From: "same-from", To: "same-to", Path: path, BlindSite: "b"},
+		{From: "same-from", To: "same-to", Path: path, Status: "b"},
+		{From: "same-from", To: "same-to", Path: path, Rule: "a"},
+		{From: "same-from", To: "same-to", Path: path, Detail: "b"},
+		{From: "same-from", To: "same-to", Path: path, Fn: "a"},
+		{From: "same-from", To: "same-to", Path: path, Site: "b"},
+		{From: "same-from", To: "same-to", Path: path, BlindSite: "a"},
+		{From: "same-from", To: "same-to", Path: path, Detail: "a"},
+		{From: "same-from", To: "same-to", Path: path, Status: "a"},
+		{From: "same-from", To: "same-to", Path: path, Site: "a"},
+		{From: "same-from", To: "same-to", Path: path, Fn: "b"},
+		{From: "same-from", To: "same-to", Path: path, Rule: "b"},
+		{From: "same-from", To: "same-to", Path: path, Detail: "b"},
+	}
+	report := Report{Results: []Result{{
+		ID: "witnesses", Kind: "edge", Outcome: Pass, Witnesses: witnesses,
+	}}}
+
+	got, err := MarshalMachine(&graph.Graph{}, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{
+  "schema_version": "groundwork.assert/v1",
+  "fixture": {
+    "stamp": "",
+    "producer_tool": "",
+    "algo": "",
+    "caveats": []
+  },
+  "results": [
+    {
+      "id": "witnesses",
+      "kind": "edge",
+      "outcome": "PASS",
+      "witnesses": [
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "detail": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "detail": "b"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "status": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "status": "b"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "site": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "site": "b"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "fn": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "fn": "b"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "rule": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "rule": "b"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "blind_site": "a"
+        },
+        {
+          "from": "same-from",
+          "to": "same-to",
+          "path": [
+            "z",
+            "a",
+            "m"
+          ],
+          "blind_site": "b"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "errored": 0,
+    "nodes": 0,
+    "unique_edges": 0
+  }
+}
+`
+	if string(got) != want {
+		t.Fatalf("machine witness JSON mismatch\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
 func TestValidateMachineIDs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -176,6 +352,49 @@ func TestMarshalMachineRejectsInvalidResultState(t *testing.T) {
 			}
 			if got != nil {
 				t.Fatalf("MarshalMachine() returned bytes with invalid state: %s", got)
+			}
+		})
+	}
+}
+
+func TestMarshalMachineReasonVocabulary(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason Reason
+		valid  bool
+	}{
+		{name: "UNRESOLVED", reason: ReasonUnresolved, valid: true},
+		{name: "AMBIGUOUS", reason: ReasonAmbiguous, valid: true},
+		{name: "UNBOUND_SELECTOR", reason: ReasonUnboundSelector, valid: true},
+		{name: "BLIND_FRONTIER", reason: ReasonBlindFrontier, valid: true},
+		{name: "MALFORMED_CLAIM", reason: ReasonMalformedClaim, valid: true},
+		{name: "UNKNOWN_STATUS", reason: ReasonUnknownStatus, valid: true},
+		{name: "MISSING_GRAPH_DATA", reason: ReasonMissingGraphData, valid: true},
+		{name: "CANT_PROVE", reason: ReasonCantProve, valid: true},
+		{name: "UNMATCHED", reason: ReasonUnmatched, valid: true},
+		{name: "empty", reason: "", valid: false},
+		{name: "unknown", reason: Reason("OTHER"), valid: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MarshalMachine(&graph.Graph{}, Report{Results: []Result{{
+				ID: "reason", Kind: "edge", Outcome: Errored, Reason: tt.reason,
+			}}})
+			if tt.valid {
+				if err != nil {
+					t.Fatalf("MarshalMachine() error = %v", err)
+				}
+				if got == nil {
+					t.Fatal("MarshalMachine() returned nil bytes for accepted reason")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("MarshalMachine() accepted invalid reason %q", tt.reason)
+			}
+			if got != nil {
+				t.Fatalf("MarshalMachine() returned bytes for invalid reason %q: %s", tt.reason, got)
 			}
 		})
 	}
