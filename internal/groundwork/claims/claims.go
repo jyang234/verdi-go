@@ -499,10 +499,20 @@ func (m *model) evalNoConcurrentReach(c Claim) Result {
 
 	fact := m.concurrentFacts().Evaluate(c.To.Values())
 	bindings := Bindings{To: append([]string(nil), fact.To...)}
-	switch fact.State {
-	case facts.ConcurrentUnbound:
+	// Every NAMED selector must bind before any verdict is computed: a claim is
+	// ephemeral, so a dead selector is an authoring defect, not a smaller surface
+	// to prove over. The check is per-selector and therefore stricter than the
+	// family-level ConcurrentUnbound state (spec §acceptance: "Unbound or
+	// ambiguous required selectors never pass").
+	if len(fact.UnboundTo) > 0 {
 		return withBindings(errored(c, ReasonUnboundSelector,
 			"to selector(s) bind nothing: "+strings.Join(fact.UnboundTo, ", ")), bindings)
+	}
+	switch fact.State {
+	case facts.ConcurrentUnbound:
+		// Defensive: an empty target family always has a non-empty dead set above.
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"no_concurrent_reach selector family binds nothing"), bindings)
 	case facts.ConcurrentHit:
 		witnesses := make([]Witness, len(fact.Hits))
 		for i, hit := range fact.Hits {
@@ -626,14 +636,26 @@ func (m *model) evalReach(c Claim) Result {
 		From: append([]string(nil), fact.From...),
 		To:   append([]string(nil), fact.To...),
 	}
+	// Every NAMED selector must bind before any verdict is computed — from first,
+	// then to, the order the family-level state used. This is per-selector and
+	// therefore stricter than the ReachUnbound state: a family that binds through
+	// one selector while another is dead would otherwise be graded over a smaller
+	// surface than the claim names, turning a typo into a vacuous proof (spec
+	// §acceptance: "Unbound or ambiguous required selectors never pass").
+	if len(fact.UnboundFrom) > 0 {
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"from selector(s) bind nothing: "+strings.Join(fact.UnboundFrom, ", ")), bindings)
+	}
+	if len(fact.UnboundTo) > 0 {
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"to selector(s) bind nothing: "+strings.Join(fact.UnboundTo, ", ")), bindings)
+	}
+
 	switch fact.State {
 	case facts.ReachUnbound:
-		field, selectors := "from", fact.UnboundFrom
-		if len(selectors) == 0 {
-			field, selectors = "to", fact.UnboundTo
-		}
+		// Defensive: an empty from or to family always has a non-empty dead set above.
 		return withBindings(errored(c, ReasonUnboundSelector,
-			fmt.Sprintf("%s selector(s) bind nothing: %s", field, strings.Join(selectors, ", "))), bindings)
+			"reach selector family binds nothing"), bindings)
 	case facts.ReachFound:
 		witnesses := make([]Witness, len(fact.Paths))
 		for i, path := range fact.Paths {
@@ -677,6 +699,10 @@ func (m *model) evalPassThrough(c Claim) Result {
 		To:      append([]string(nil), fact.To...),
 		Through: append([]string(nil), fact.Through...),
 	}
+	// Every NAMED selector must bind, including the waypoint standing fitness
+	// deliberately tolerates: the fact's Unbound* fields are per-SELECTOR, so a
+	// family that binds through one selector still names its dead ones and the
+	// claim refuses to grade over a surface smaller than it names.
 	if len(fact.UnboundFrom) > 0 {
 		return withBindings(errored(c, ReasonUnboundSelector,
 			"from selector(s) bind nothing: "+strings.Join(fact.UnboundFrom, ", ")), bindings)

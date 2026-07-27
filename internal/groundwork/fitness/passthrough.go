@@ -32,11 +32,17 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 		fact := facts.EvaluatePassThrough(ix, facts.PassThroughInput{
 			From: rule.From, To: rule.To, Through: rule.Through, Allow: allow,
 		})
-		if len(fact.UnboundFrom) > 0 {
+		// Standing policy is graded on the bound FAMILY, exactly as checkMustNotReach
+		// grades reach: a rule is inert only when its From binds nothing at all, and
+		// its target is unbindable only when the whole To family binds nothing. The
+		// fact's Unbound* fields are per-SELECTOR (a family that binds through one
+		// selector still names its dead ones) and reading them here would drop the
+		// live selectors' real violations.
+		if len(fact.From) == 0 {
 			r.add(inertRuleFinding("must_pass_through", rule.Name, rule.RequireProof))
 			continue
 		}
-		if len(fact.UnboundTo) > 0 {
+		if len(fact.To) == 0 {
 			r.add(unbindableTargetFinding("must_pass_through", rule.Name, "to", rule.RequireProof))
 			continue
 		}

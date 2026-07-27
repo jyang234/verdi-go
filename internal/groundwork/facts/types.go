@@ -57,7 +57,14 @@ type BlindWitness struct {
 }
 
 // ReachResult carries the complete bound identities and the decisive reach fact.
-// Unbound selector values are copied exactly, sorted, and de-duplicated.
+//
+// UnboundFrom/UnboundTo are PER-SELECTOR dead sets, populated in every state:
+// each names the input selectors that bind nothing ON THEIR OWN, copied exactly,
+// sorted, and de-duplicated. A non-empty dead set therefore does NOT imply
+// State == ReachUnbound — that state means a whole family bound nothing (which
+// in turn always makes that family's dead set the complete selector list).
+// Consumers proving something about the family (fitness) read State; consumers
+// requiring every named selector to bind (claims) read these fields.
 type ReachResult struct {
 	State       ReachState
 	From        []string
@@ -101,7 +108,12 @@ const (
 )
 
 // PassThroughResult carries complete bindings and deterministic evidence.
-// Unbound selector values are copied exactly, sorted, and de-duplicated.
+//
+// UnboundFrom/UnboundTo/UnboundThrough are PER-SELECTOR dead sets with the same
+// meaning as ReachResult's: each names the input selectors that bind nothing on
+// their own, in every state, sorted and de-duplicated. State is decided by the
+// bound families alone, so a partially bound source or target family is still
+// traversed and still yields bypass evidence.
 type PassThroughResult struct {
 	State    PassThroughState
 	From     []string

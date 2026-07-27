@@ -858,6 +858,89 @@ func TestAssertRichMixedFixture(t *testing.T) {
 	}
 }
 
+// TestAssertPartiallyUnboundRichSelectorsError pins the spec's acceptance line
+// ("Unbound or ambiguous required selectors never pass") at the SELECTOR level,
+// not the family level. Each case names one selector that binds and one that
+// binds nothing — a typo'd or renamed FQN sitting beside a live one. Without the
+// per-selector rule every case below PASSES: the family binds through its live
+// member, the dead member is disclosed nowhere, and the report reads as a proof
+// over a set the author believed was larger than it is (a vacuous proof, tenet
+// 2). The claim must ERROR with UNBOUND_SELECTOR naming the dead selector, and a
+// file whose only claims are these must exit 2 (errored, no FAIL).
+func TestAssertPartiallyUnboundRichSelectorsError(t *testing.T) {
+	const dead = "example.com/svc/internal/handler.Typo"
+	dir := t.TempDir()
+	graphPath := writeAssertGraph(t, dir, "rich-partial-binding", richGraph())
+
+	tests := []struct {
+		name  string
+		claim string
+	}{
+		{
+			name: "reach expect absent",
+			claim: `{"id":"partial","kind":"reach",
+			  "from":["example.com/svc/internal/isolated.Orphan","` + dead + `"],
+			  "to":["example.com/svc/internal/unrelated.Sink"],"expect":"absent"}`,
+		},
+		{
+			name: "reach expect present",
+			claim: `{"id":"partial","kind":"reach",
+			  "from":["example.com/svc/internal/handler.Handle","` + dead + `"],
+			  "to":["example.com/svc/internal/store.Store.Update"],"expect":"present"}`,
+		},
+		{
+			name: "pass_through",
+			claim: `{"id":"partial","kind":"pass_through",
+			  "from":["example.com/svc/internal/handler.Handle","` + dead + `"],
+			  "to":["boundary:bus PUBLISH"],
+			  "through":["example.com/svc/internal/outbox.Lifecycle.Publish"]}`,
+		},
+		{
+			name: "no_concurrent_reach",
+			claim: `{"id":"partial","kind":"no_concurrent_reach",
+			  "to":["boundary:bus PUBLISH","` + dead + `"]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claimsPath := filepath.Join(dir, "partial.claims.json")
+			if err := os.WriteFile(claimsPath, []byte(`{"claims":[`+tt.claim+`]}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			err := cmdAssertTo([]string{graphPath, claimsPath, "--json"}, &out)
+			if err == nil {
+				t.Fatalf("a partially unbound selector passed:\n%s", out.String())
+			}
+			// Errored, not failed: exit 2, an operational error rather than a verdict.
+			var verdict verdictError
+			if errors.As(err, &verdict) {
+				t.Fatalf("run error = %v (%T), want a non-verdict error (exit 2)", err, err)
+			}
+
+			var report claims.JSONReport
+			if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+				t.Fatalf("decode machine report: %v\n%s", err, out.String())
+			}
+			if len(report.Results) != 1 {
+				t.Fatalf("reported %d results, want 1", len(report.Results))
+			}
+			got := report.Results[0]
+			if got.Outcome != "ERROR" || got.Reason != "UNBOUND_SELECTOR" {
+				t.Fatalf("outcome/reason = %q/%q, want ERROR/UNBOUND_SELECTOR", got.Outcome, got.Reason)
+			}
+			if !strings.Contains(got.Detail, dead) {
+				t.Errorf("detail = %q, want the dead selector %q named", got.Detail, dead)
+			}
+			if report.Summary.Errored != 1 || report.Summary.Passed != 0 || report.Summary.Failed != 0 {
+				t.Errorf("summary %+v, want exactly one errored claim", report.Summary)
+			}
+		})
+	}
+}
+
 // TestAssertRichNegativeReachWalksNonEmptyCone pins that R2's PASS is a real
 // absence proof and not a vacuous one. An absence verdict is preserved by
 // DELETING edges, so "it still passes with fewer edges" proves nothing; the

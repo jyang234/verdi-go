@@ -12,8 +12,15 @@ import (
 // a waypoint. An unbound waypoint is disclosed but treated as removing no
 // nodes, so standing fitness can preserve its legacy finding while caller-
 // supplied claims can reject the same incomplete binding.
+//
+// UnboundFrom/UnboundTo/UnboundThrough name the individually dead selectors in
+// every state. The PassThroughUnbound state is decided by the bound FAMILIES,
+// not by those fields: a source or target family that binds through any of its
+// selectors is still traversed, so a partially bound rule keeps yielding its
+// bypass evidence.
 func EvaluatePassThrough(ix *graph.Index, in PassThroughInput) PassThroughResult {
 	if ix == nil {
+		// A nil index binds nothing, so every selector is dead.
 		return PassThroughResult{
 			State:          PassThroughUnbound,
 			UnboundFrom:    canonicalStrings(in.From),
@@ -23,20 +30,14 @@ func EvaluatePassThrough(ix *graph.Index, in PassThroughInput) PassThroughResult
 	}
 
 	result := PassThroughResult{
-		From:    BindSources(ix, in.From),
-		To:      BindTargets(ix, in.To),
-		Through: BindFunctions(ix, in.Through),
+		From:           BindSources(ix, in.From),
+		To:             BindTargets(ix, in.To),
+		Through:        BindFunctions(ix, in.Through),
+		UnboundFrom:    deadSelectors(ix, in.From, BindSources),
+		UnboundTo:      deadSelectors(ix, in.To, BindTargets),
+		UnboundThrough: deadSelectors(ix, in.Through, BindFunctions),
 	}
-	if len(result.From) == 0 {
-		result.UnboundFrom = canonicalStrings(in.From)
-	}
-	if len(result.To) == 0 {
-		result.UnboundTo = canonicalStrings(in.To)
-	}
-	if len(result.Through) == 0 {
-		result.UnboundThrough = canonicalStrings(in.Through)
-	}
-	if len(result.UnboundFrom) > 0 || len(result.UnboundTo) > 0 {
+	if len(result.From) == 0 || len(result.To) == 0 {
 		result.State = PassThroughUnbound
 		return result
 	}

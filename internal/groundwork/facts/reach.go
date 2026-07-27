@@ -18,8 +18,13 @@ type boundaryEffect struct {
 // EvaluateReach binds source and target selectors, then finds the first
 // deterministic shortest path. A concrete path dominates blindness across all
 // sources; otherwise blindness dominates a visible absence proof.
+//
+// UnboundFrom/UnboundTo name the individually dead selectors in every state; the
+// ReachUnbound state itself still means a whole FAMILY bound nothing.
 func EvaluateReach(ix *graph.Index, from, to []string) ReachResult {
 	if ix == nil {
+		// A nil index binds nothing, so every selector is dead — the same value the
+		// per-selector probe would produce, without dereferencing the index.
 		return ReachResult{
 			State:       ReachUnbound,
 			UnboundFrom: canonicalStrings(from),
@@ -29,12 +34,14 @@ func EvaluateReach(ix *graph.Index, from, to []string) ReachResult {
 
 	boundFrom := BindSources(ix, from)
 	boundTo := BindTargets(ix, to)
-	return evaluateReachBindings(ix, boundFrom, boundTo, from, to)
+	return evaluateReachBindings(ix, boundFrom, boundTo,
+		deadSelectors(ix, from, BindSources), deadSelectors(ix, to, BindTargets))
 }
 
 // EvaluateReachBoundSources evaluates source identities that a compatibility
 // caller has already bound. It does not name-expand those identities again;
-// target selectors retain normal rich-selector binding.
+// target selectors retain normal rich-selector binding. A supplied identity the
+// graph does not carry is recorded in UnboundFrom, per identity.
 func EvaluateReachBoundSources(ix *graph.Index, from, to []string) ReachResult {
 	if ix == nil {
 		return ReachResult{
@@ -43,32 +50,38 @@ func EvaluateReachBoundSources(ix *graph.Index, from, to []string) ReachResult {
 			UnboundTo:   canonicalStrings(to),
 		}
 	}
-	var boundFrom []string
-	for _, source := range canonicalStrings(from) {
-		if ix.Has(source) {
-			boundFrom = append(boundFrom, source)
-		}
-	}
-	boundTo := BindTargets(ix, to)
-	return evaluateReachBindings(ix, boundFrom, boundTo, from, to)
+	return evaluateReachBindings(ix, boundIdentities(ix, from), BindTargets(ix, to),
+		deadSelectors(ix, from, boundIdentities), deadSelectors(ix, to, BindTargets))
 }
 
+// boundIdentities is the selectorBinder for already-bound source identities: an
+// identity binds itself when the graph carries it as a node, and nothing
+// otherwise. No name expansion happens here.
+func boundIdentities(ix *graph.Index, values []string) []string {
+	var bound []string
+	for _, value := range canonicalStrings(values) {
+		if ix.Has(value) {
+			bound = append(bound, value)
+		}
+	}
+	return bound
+}
+
+// evaluateReachBindings decides the state from the bound FAMILIES and carries
+// the already-computed per-selector dead sets through unchanged.
 func evaluateReachBindings(
 	ix *graph.Index,
 	boundFrom []string,
 	boundTo []string,
-	fromSelectors []string,
-	toSelectors []string,
+	deadFrom []string,
+	deadTo []string,
 ) ReachResult {
-	result := ReachResult{From: boundFrom, To: boundTo}
+	result := ReachResult{
+		From: boundFrom, To: boundTo,
+		UnboundFrom: deadFrom, UnboundTo: deadTo,
+	}
 	if len(boundFrom) == 0 || len(boundTo) == 0 {
 		result.State = ReachUnbound
-		if len(boundFrom) == 0 {
-			result.UnboundFrom = canonicalStrings(fromSelectors)
-		}
-		if len(boundTo) == 0 {
-			result.UnboundTo = canonicalStrings(toSelectors)
-		}
 		return result
 	}
 

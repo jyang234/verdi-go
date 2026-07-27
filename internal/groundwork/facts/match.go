@@ -76,6 +76,32 @@ func BindTargets(ix *graph.Index, selectors []string) []string {
 	return nonEmptySortedKeys(set)
 }
 
+// selectorBinder binds a selector family to graph identities. BindSources,
+// BindFunctions, and BindTargets are the three family binders; a caller may
+// supply its own (boundIdentities) when its inputs are already bound.
+type selectorBinder func(ix *graph.Index, selectors []string) []string
+
+// deadSelectors returns, sorted and de-duplicated, every input selector that
+// binds NOTHING on its own. It is the single definition of "this one selector
+// binds nothing" for every fact family: probing one selector at a time through
+// the family's own binder keeps the answer consistent with what that family
+// would bind.
+//
+// The set is per-SELECTOR, never per-family: a family that binds through one
+// member still names its dead members, which is what lets the claims adapter
+// refuse a partially bound family that standing fitness must keep evaluating.
+// When every selector in a family is dead the result is exactly the family's
+// canonical selector list, so family-level disclosures are unchanged.
+func deadSelectors(ix *graph.Index, selectors []string, bind selectorBinder) []string {
+	set := make(map[string]bool)
+	for _, selector := range selectors {
+		if len(bind(ix, []string{selector})) == 0 {
+			set[selector] = true
+		}
+	}
+	return nonEmptySortedKeys(set)
+}
+
 func nonEmptySortedKeys(set map[string]bool) []string {
 	result := setutil.SortedKeys(set)
 	if len(result) == 0 {

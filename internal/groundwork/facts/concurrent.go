@@ -33,7 +33,11 @@ type ConcurrentWitness struct {
 }
 
 // ConcurrentResult carries target bindings and canonical decisive evidence.
-// Unbound selector values are copied exactly, sorted, and de-duplicated.
+//
+// UnboundTo is a PER-SELECTOR dead set with the same meaning as ReachResult's:
+// it names the target selectors that bind nothing on their own, in every state,
+// sorted and de-duplicated. State == ConcurrentUnbound still means the whole
+// target family bound nothing.
 type ConcurrentResult struct {
 	State     ConcurrentState
 	To        []string
@@ -94,8 +98,13 @@ func BuildConcurrentSurface(ix *graph.Index) ConcurrentSurface {
 // Evaluate binds targets and evaluates them against the precomputed surface. A
 // concrete hit dominates every blind witness, including a matching dynamically
 // named direct concurrent boundary.
+//
+// UnboundTo names the individually dead selectors in every state; the
+// ConcurrentUnbound state itself still means the whole target family bound
+// nothing.
 func (s ConcurrentSurface) Evaluate(to []string) ConcurrentResult {
 	if s.ix == nil {
+		// A nil index binds nothing, so every selector is dead.
 		return ConcurrentResult{
 			State:     ConcurrentUnbound,
 			UnboundTo: canonicalStrings(to),
@@ -103,10 +112,12 @@ func (s ConcurrentSurface) Evaluate(to []string) ConcurrentResult {
 	}
 
 	boundTo := BindTargets(s.ix, to)
-	result := ConcurrentResult{To: boundTo}
+	result := ConcurrentResult{
+		To:        boundTo,
+		UnboundTo: deadSelectors(s.ix, to, BindTargets),
+	}
 	if len(boundTo) == 0 {
 		result.State = ConcurrentUnbound
-		result.UnboundTo = canonicalStrings(to)
 		return result
 	}
 

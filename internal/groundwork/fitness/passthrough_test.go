@@ -440,6 +440,37 @@ func TestPassThroughCharacterization(t *testing.T) {
 			}},
 		},
 		{
+			// The parity pin for the per-selector Unbound* disclosure: standing
+			// fitness grades a From family that binds through ANY of its selectors,
+			// so a rule naming one live and one dead source still reports the live
+			// source's bypass. Reading a per-selector dead set as the inert-rule
+			// trigger would silently drop this real violation.
+			name: "partially bound from still reports the live source's bypass",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, target, guard),
+				Edges: []graph.Edge{{From: sourceA, To: target}},
+			},
+			rule: pass([]string{sourceA, missing}, []string{target}, []string{guard}),
+			want: []Finding{violation(
+				sourceA, target, guard,
+				sourceA+" → "+target,
+			)},
+		},
+		{
+			// The same parity for the To side: a target family with one live and one
+			// dead selector is still graded, not disclosed as an unbindable target.
+			name: "partially bound to still reports the live target's bypass",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, target, guard),
+				Edges: []graph.Edge{{From: sourceA, To: target}},
+			},
+			rule: pass([]string{sourceA}, []string{target, missing}, []string{guard}),
+			want: []Finding{violation(
+				sourceA, target, guard,
+				sourceA+" → "+target,
+			)},
+		},
+		{
 			name: "dead waypoint with path bypasses",
 			g: &graph.Graph{
 				Nodes: nodes(sourceA, target),
