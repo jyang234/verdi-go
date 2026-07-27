@@ -255,26 +255,62 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // map-iteration-ordered node set is nondeterministic on such a tie (M-20). Two known
 // collision classes are resolved upstream: byte-identical $bound/$thunk wrappers are
 // merged by mergeKey, while generic instances whose type strings lose local lexical
-// scope are separated by their physical declaration sites. Any surviving duplicate
-// is a producer bug and must panic rather than emit a run-varying order.
+// scope are separated by their physical declaration sites (features' local-sites/v1).
+//
+// A surviving duplicate must panic rather than emit a run-varying order. The guard is
+// panicOnDuplicateSortKey, run AFTER the sort over adjacent nodes — deliberately not
+// inside the comparator. sort.Slice guarantees only that the result is sorted; it never
+// promises the comparator is invoked on every equal pair, so a comparator-resident
+// guard rests on an implementation detail rather than on the documented contract.
+// Equal keys are adjacent in any correctly sorted slice, so the adjacency scan derives
+// the same panic from the postcondition alone.
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
 		if a.FQN != b.FQN {
 			return a.FQN < b.FQN
 		}
-		ka, kb := features.InstanceDiscriminator(a.Func), features.InstanceDiscriminator(b.Func)
-		if ka != kb {
-			return ka < kb
-		}
-		if a.Func != b.Func {
-			panic(fmt.Sprintf("callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically", a.FQN, ka))
-		}
-		return false
+		return features.InstanceDiscriminator(a.Func) < features.InstanceDiscriminator(b.Func)
 	})
+	panicOnDuplicateSortKey(g.Nodes)
 	for _, n := range g.Nodes {
 		sort.Slice(n.Out, func(i, j int) bool { return edgeLess(n.Out[i], n.Out[j]) })
 		sort.Slice(n.In, func(i, j int) bool { return edgeLess(n.In[i], n.In[j]) })
+	}
+}
+
+// panicOnDuplicateSortKey refuses a node slice in which two DISTINCT functions carry
+// the same (FQN, InstanceDiscriminator) sort key. nodes must already be sorted on that
+// key, which puts every duplicate pair in adjacent slots, so one linear scan sees all
+// of them; the caller is finalize, immediately after its sort.
+//
+// A surviving duplicate is NOT necessarily a producer bug. InstanceDiscriminator is
+// known incomplete, and the residual classes below are DEFERRED: separating them needs
+// a local-sites/v2 framing, and the v1 design is frozen. If you are reading this
+// because the panic fired, suspect one of:
+//
+//	(a) Role/position. The site set is pooled and position-blind, so one instantiation
+//	    is indistinguishable from another that uses the same local types in swapped
+//	    roles — pair[A, B] and pair[B, A] share a key.
+//	(b) Local types declared inside a GENERIC function. An instantiated local
+//	    *types.TypeName has a nil Parent(), so the obj.Parent() != nil arm of the
+//	    local-ness predicate misclassifies it as package scope and it contributes no
+//	    site at all.
+//	(c) Promoted-method wrappers over function-local types, which carry no type
+//	    arguments and therefore get an empty discriminator.
+//
+// Each is a valid Go program the analysis refuses rather than orders by map iteration:
+// a loud abstain, never a run-varying "canonical" order (CLAUDE.md tenets 1 and 2).
+func panicOnDuplicateSortKey(nodes []*Node) {
+	for i := 1; i < len(nodes); i++ {
+		prev, cur := nodes[i-1], nodes[i]
+		if prev.Func == cur.Func || prev.FQN != cur.FQN {
+			continue
+		}
+		key := features.InstanceDiscriminator(prev.Func)
+		if key == features.InstanceDiscriminator(cur.Func) {
+			panic(fmt.Sprintf("callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically", prev.FQN, key))
+		}
 	}
 }
 
