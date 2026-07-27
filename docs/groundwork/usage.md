@@ -1533,9 +1533,13 @@ CODEOWNERS-gated authority; nothing in a claims file can grant, waive, or
 weaken a policy rule.
 
 The committed `testdata/groundwork/claims/assert-rich.claims.json` exercises all
-four kinds across PASS, FAIL, and ERROR, and `cmd/groundwork`'s tests grade it
-against a purpose-built graph and require byte-identical JSON across six
-independently shuffled graph collections.
+four kinds across PASS, FAIL, and ERROR — including an absence claim that must
+abstain because its frontier is blind — and `cmd/groundwork`'s tests grade it
+against a purpose-built graph and require byte-identical JSON across the five
+graph collections a rich kind can read (nodes, edges, blind spots, obligations,
+caveats), each independently shuffled. Entrypoint ordering is pinned by the
+structural-claims permutation test, the one whose claims file reads
+`entrypoints[]`.
 
 **Output and exit codes.** The report prints, in claims-file order, the FAIL
 lines then the ERROR lines, then a summary; passing claims are silent. Each

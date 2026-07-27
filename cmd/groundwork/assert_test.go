@@ -629,23 +629,42 @@ func assertMachineFiles(t *testing.T) (string, func(string) string) {
 
 // richGraph is the purpose-built graph the committed assert-rich claims file is
 // graded against. Every rich kind gets both a passing and a failing case over the
-// SAME graph, so the fixture also proves the four families do not interfere:
-// there are no blind spots, so a blind frontier can never be the reason a
-// negative claim passes, and the single abstaining claim abstains for an
-// obligation reason the graph carries explicitly.
+// SAME graph, so the fixture also proves the four families do not interfere.
+//
+// It carries THREE mutually unreachable regions, so no region can perturb
+// another's verdict (asserted by TestAssertRichRegionsAreDisjoint):
+//
+//   - the SERVICE region — the handler chain every visible-proof claim (R1, R3,
+//     P1, P2) is graded over, plus the spawner chain the concurrent surface (C1,
+//     C2) is graded over. Its two blind spots sit off every cone it evaluates
+//     (sink is reached by nothing; spawner is a concurrent SOURCE, not part of the
+//     spawned cone), so a blind frontier can never be the reason one of those
+//     claims passes;
+//   - the ISOLATED region (orphan -> orphanHelper), whose absence proof R2 walks a
+//     real edge to reach a real "not here" — pinned by
+//     TestAssertRichNegativeReachWalksNonEmptyCone;
+//   - the GATEWAY region, blind at two sites so R4 must ABSTAIN. It is the only
+//     reason a blind_site witness reaches the report, and therefore the only
+//     reason the "blind spots" permutation subtest can observe anything. The two
+//     spots sit on DIFFERENT cone members so the subtest exercises which SITE is
+//     named: cone order must pick it, manifest order must not.
 func richGraph() graph.Graph {
 	const (
-		handler  = "example.com/svc/internal/handler.Handle"
-		process  = "example.com/svc/internal/app.Service.Process"
-		publish  = "example.com/svc/internal/outbox.Lifecycle.Publish"
-		update   = "example.com/svc/internal/store.Store.Update"
-		orphan   = "example.com/svc/internal/isolated.Orphan"
-		sink     = "example.com/svc/internal/unrelated.Sink"
-		spawner  = "example.com/svc/internal/worker.Spawner.Start"
-		audit    = "example.com/svc/internal/worker.Audit.Record"
-		busTopic = "boundary:bus PUBLISH order.created"
-		dbUpdate = "boundary:db UPDATE orders"
-		dbInsert = "boundary:db INSERT audit"
+		handler      = "example.com/svc/internal/handler.Handle"
+		process      = "example.com/svc/internal/app.Service.Process"
+		publish      = "example.com/svc/internal/outbox.Lifecycle.Publish"
+		update       = "example.com/svc/internal/store.Store.Update"
+		orphan       = "example.com/svc/internal/isolated.Orphan"
+		orphanHelper = "example.com/svc/internal/isolated.Helper.Tick"
+		sink         = "example.com/svc/internal/unrelated.Sink"
+		spawner      = "example.com/svc/internal/worker.Spawner.Start"
+		audit        = "example.com/svc/internal/worker.Audit.Record"
+		dispatch     = "example.com/svc/internal/gateway.Router.Dispatch"
+		invoke       = "example.com/svc/internal/gateway.Plugin.Invoke"
+		scan         = "example.com/svc/internal/gateway.Zone.Scan"
+		busTopic     = "boundary:bus PUBLISH order.created"
+		dbUpdate     = "boundary:db UPDATE orders"
+		dbInsert     = "boundary:db INSERT audit"
 	)
 	node := func(fqn string, tier int) graph.Node {
 		return graph.Node{FQN: fqn, Sig: "func()", Tier: tier}
@@ -657,7 +676,8 @@ func richGraph() graph.Graph {
 		Caveats: []string{"zeta", "alpha", "alpha"},
 		Nodes: []graph.Node{
 			node(handler, 1), node(process, 2), node(publish, 2), node(update, 3),
-			node(orphan, 3), node(sink, 3), node(spawner, 1), node(audit, 2),
+			node(orphan, 3), node(orphanHelper, 3), node(sink, 3), node(spawner, 1), node(audit, 2),
+			node(dispatch, 1), node(invoke, 2), node(scan, 2),
 		},
 		Edges: []graph.Edge{
 			{From: handler, To: process, Tier: 2},
@@ -667,14 +687,25 @@ func richGraph() graph.Graph {
 			{From: update, To: dbUpdate, Tier: 3, Boundary: "db"},
 			{From: spawner, To: audit, Tier: 2, Concurrent: true},
 			{From: audit, To: dbInsert, Tier: 2, Boundary: "db"},
+			// R2's absence proof has something to walk: without this edge the cone
+			// is the singleton {orphan} and the proof is vacuous.
+			{From: orphan, To: orphanHelper, Tier: 3},
+			{From: dispatch, To: invoke, Tier: 2},
+			{From: dispatch, To: scan, Tier: 2},
 		},
-		// Sited off every cone this fixture evaluates (sink is reached by nothing;
-		// spawner is a concurrent SOURCE, not part of the spawned cone), so the
-		// permutation subtest is non-vacuous without turning a proven absence into
-		// an abstention. Blindness reaching a verdict is covered by the unit tests.
+		// The last two spots are R4's blind frontier. They sit on two DIFFERENT
+		// members of the gateway cone, and the correct answer (invoke, the first
+		// cone member carrying a spot) is the one that BOTH manifest orders miss:
+		// raw-first here is scan, and kind-sorted-first is scan too. So a selection
+		// that read the manifest instead of the cone would name a different site in
+		// the baseline than under graphWithPermutedBlindSpots, which swaps this
+		// adjacent pair. That is what makes the "blind spots" permutation subtest
+		// load-bearing; deleting this collection changes the report.
 		BlindSpots: []graph.BlindSpot{
 			{Kind: "reflect", Site: sink, Detail: "opaque dispatch"},
 			{Kind: "unsafe", Site: spawner, Detail: "pointer arithmetic"},
+			{Kind: "UnresolvedCall", Site: scan, Detail: "zone table populated at runtime"},
+			{Kind: "reflect", Site: invoke, Detail: "plugin resolved by name"},
 		},
 		Obligations: []graph.Obligation{
 			{Rule: "tx-must-close", Kind: "must-release", Fn: update, Site: "store.go:31", Status: "SATISFIED", Detail: "closed on every path"},
@@ -742,6 +773,11 @@ func TestAssertRichMixedFixture(t *testing.T) {
 		"C2-deliberate-fail-concurrent-audit-insert":  {outcome: "FAIL"},
 		"O1-transaction-closes":                       {outcome: "PASS"},
 		"O2-lock-release-unprovable":                  {outcome: "ERROR", reason: "CANT_PROVE"},
+		// The plan's nine claims plus one: an absence claim over a blind frontier,
+		// which must ERROR rather than PASS (spec: a blind frontier is never a
+		// proof). It is also the only claim whose evidence names a blind SITE, so
+		// it is what makes the blind-spot permutation subtest observable.
+		"R4-gateway-absence-blocked-by-blind-frontier": {outcome: "ERROR", reason: "BLIND_FRONTIER"},
 	}
 	if len(wantOutcome) != len(file.Claims) {
 		t.Fatalf("expectation table covers %d claims, fixture has %d", len(wantOutcome), len(file.Claims))
@@ -788,8 +824,8 @@ func TestAssertRichMixedFixture(t *testing.T) {
 		assertCanonicalEvidence(t, result)
 	}
 
-	if passed != 5 || failed != 3 || errored != 1 {
-		t.Errorf("outcome counts = %d/%d/%d, want 5 passed, 3 failed, 1 errored", passed, failed, errored)
+	if passed != 5 || failed != 3 || errored != 2 {
+		t.Errorf("outcome counts = %d/%d/%d, want 5 passed, 3 failed, 2 errored", passed, failed, errored)
 	}
 	if report.Summary.Passed != passed || report.Summary.Failed != failed || report.Summary.Errored != errored {
 		t.Errorf("summary %+v disagrees with the results it summarizes", report.Summary)
@@ -813,6 +849,87 @@ func TestAssertRichMixedFixture(t *testing.T) {
 	if got := byID["O2-lock-release-unprovable"].Bindings; got == nil || len(got.Obligation) != 1 {
 		t.Errorf("abstaining obligation lost its rule binding: %+v", got)
 	}
+	// The blind abstention names the SITE that stopped the proof. This is the
+	// fixture's only blind_site witness, so it is also the only channel through
+	// which the blind-spot manifest reaches the report at all.
+	if got := byID["R4-gateway-absence-blocked-by-blind-frontier"].Witnesses; len(got) != 1 ||
+		got[0].BlindSite != "example.com/svc/internal/gateway.Plugin.Invoke" {
+		t.Errorf("blind abstention witness = %+v, want one witness naming the first blind cone member", got)
+	}
+}
+
+// TestAssertRichNegativeReachWalksNonEmptyCone pins that R2's PASS is a real
+// absence proof and not a vacuous one. An absence verdict is preserved by
+// DELETING edges, so "it still passes with fewer edges" proves nothing; the
+// discriminating lever is the opposite one. Adding a single edge at the FAR end
+// of R2's cone flips it to FAIL with a path through the whole cone — which can
+// only happen if the traversal actually descended past the source.
+func TestAssertRichNegativeReachWalksNonEmptyCone(t *testing.T) {
+	const (
+		orphan       = "example.com/svc/internal/isolated.Orphan"
+		orphanHelper = "example.com/svc/internal/isolated.Helper.Tick"
+		sink         = "example.com/svc/internal/unrelated.Sink"
+	)
+	reached := richGraph()
+	reached.Edges = append(append([]graph.Edge(nil), reached.Edges...),
+		graph.Edge{From: orphanHelper, To: sink, Tier: 3})
+
+	var report claims.JSONReport
+	if err := json.Unmarshal(
+		richMachineJSON(t, writeAssertGraph(t, t.TempDir(), "rich-orphan-reaches", reached), richClaimsPath),
+		&report,
+	); err != nil {
+		t.Fatalf("decode machine report: %v", err)
+	}
+
+	for _, result := range report.Results {
+		if result.ID != "R2-isolated-reaches-nothing" {
+			continue
+		}
+		if result.Outcome != "FAIL" {
+			t.Fatalf("R2 outcome = %q with a path at the far end of its cone, want FAIL — the absence proof never walked the cone", result.Outcome)
+		}
+		if len(result.Witnesses) != 1 {
+			t.Fatalf("R2 bypass evidence = %+v, want one path witness", result.Witnesses)
+		}
+		if got, want := result.Witnesses[0].Path, []string{orphan, orphanHelper, sink}; !slices.Equal(got, want) {
+			t.Fatalf("R2 path = %q, want %q", got, want)
+		}
+		return
+	}
+	t.Fatal("R2 is missing from the report")
+}
+
+// TestAssertRichRegionsAreDisjoint pins the claim richGraph's doc makes. The
+// isolated and gateway regions exist only to give R2 a cone to walk and R4 a
+// blind frontier to abstain at; if either could reach — or be reached from — the
+// service region, it could silently move one of the plan's nine claims. Every
+// node's cone must stay inside its own region.
+func TestAssertRichRegionsAreDisjoint(t *testing.T) {
+	base := richGraph()
+	ix := graph.NewIndex(&base)
+	for _, node := range base.Nodes {
+		for _, reached := range ix.Reachable(node.FQN) {
+			if richRegion(node.FQN) != richRegion(reached) {
+				t.Errorf("%s (%s region) reaches %s (%s region)",
+					node.FQN, richRegion(node.FQN), reached, richRegion(reached))
+			}
+		}
+	}
+}
+
+// richRegion names the mutually unreachable region a richGraph identity belongs
+// to. The service region spans several packages, so membership is by package
+// group, not by package.
+func richRegion(fqn string) string {
+	switch {
+	case strings.Contains(fqn, "/isolated."):
+		return "isolated"
+	case strings.Contains(fqn, "/gateway."):
+		return "gateway"
+	default:
+		return "service"
+	}
 }
 
 // assertCanonicalEvidence checks the two properties the v1 contract promises of
@@ -835,17 +952,121 @@ func assertCanonicalEvidence(t *testing.T, result claims.JSONResult) {
 		}
 	}
 	for i := 1; i < len(result.Witnesses); i++ {
-		if witnessTuple(result.Witnesses[i-1]) > witnessTuple(result.Witnesses[i]) {
-			t.Errorf("%s witnesses not sorted: %q then %q",
-				result.ID, witnessTuple(result.Witnesses[i-1]), witnessTuple(result.Witnesses[i]))
+		if compareRichWitnesses(result.Witnesses[i-1], result.Witnesses[i]) > 0 {
+			t.Errorf("%s witnesses not sorted: %+v then %+v",
+				result.ID, result.Witnesses[i-1], result.Witnesses[i])
 			break
 		}
 	}
 }
 
-func witnessTuple(w claims.JSONWitness) string {
-	return strings.Join(append([]string{w.From, w.To}, append(append([]string(nil), w.Path...),
-		w.BlindSite, w.Rule, w.Fn, w.Site, w.Status, w.Detail)...), "\x00")
+// compareRichWitnesses mirrors claims.compareWitnesses field for field: From,
+// To, then the PATH element by element with the shorter path first on a prefix
+// tie, then BlindSite, Rule, Fn, Site, Status, Detail.
+//
+// Flattening the witness into one \x00-joined string does NOT reproduce it, and
+// this helper used to do exactly that. A join breaks a path-prefix tie on
+// whatever bytes happen to follow the path rather than on path LENGTH, so it
+// ordered {Path:["p","q"]} before {Path:["p"],BlindSite:"z"} while the contract
+// orders them the other way — the helper would have rejected the canonical order
+// and accepted the unsorted one. TestWitnessComparatorMatchesMachineContract
+// pins the agreement against the production comparator itself, so the two cannot
+// silently drift apart again.
+func compareRichWitnesses(left, right claims.JSONWitness) int {
+	for _, pair := range [][2]string{{left.From, right.From}, {left.To, right.To}} {
+		if cmp := strings.Compare(pair[0], pair[1]); cmp != 0 {
+			return cmp
+		}
+	}
+	if cmp := compareRichWitnessPaths(left.Path, right.Path); cmp != 0 {
+		return cmp
+	}
+	for _, pair := range [][2]string{
+		{left.BlindSite, right.BlindSite},
+		{left.Rule, right.Rule},
+		{left.Fn, right.Fn},
+		{left.Site, right.Site},
+		{left.Status, right.Status},
+		{left.Detail, right.Detail},
+	} {
+		if cmp := strings.Compare(pair[0], pair[1]); cmp != 0 {
+			return cmp
+		}
+	}
+	return 0
+}
+
+func compareRichWitnessPaths(left, right []string) int {
+	limit := min(len(left), len(right))
+	for i := 0; i < limit; i++ {
+		if cmp := strings.Compare(left[i], right[i]); cmp != 0 {
+			return cmp
+		}
+	}
+	return len(left) - len(right)
+}
+
+// TestWitnessComparatorMatchesMachineContract makes the production comparator —
+// not this test file — the oracle for witness order. Every ordered pair from the
+// matrix below is fed to claims.MarshalMachine in BOTH input orders, and the
+// helper must agree with the order the contract actually emitted.
+func TestWitnessComparatorMatchesMachineContract(t *testing.T) {
+	// The first two are the pair a \x00-joined tuple gets wrong: "p" is a prefix
+	// of "p","q", so the contract's length tie-break puts the SHORT path first
+	// while a join compares "z" against "q".
+	short := claims.Witness{Path: []string{"p"}, BlindSite: "z"}
+	long := claims.Witness{Path: []string{"p", "q"}}
+	matrix := []claims.Witness{
+		short,
+		long,
+		{From: "a", To: "b", Path: []string{"p"}},
+		{From: "a", To: "b", Path: []string{"p"}, Detail: "d"},
+		{Rule: "tx-must-close", Fn: "pkg.F", Site: "f.go:1", Status: "SATISFIED"},
+		{BlindSite: "pkg.Blind"},
+	}
+
+	if got := machineWitnesses(t, []claims.Witness{long, short}); len(got) != 2 ||
+		len(got[0].Path) != 1 || got[0].BlindSite != "z" {
+		t.Fatalf("contract emitted %+v, want the shorter path first — the reviewer's witness pair", got)
+	}
+
+	for i, left := range matrix {
+		for j, right := range matrix {
+			if i == j {
+				continue
+			}
+			emitted := machineWitnesses(t, []claims.Witness{left, right})
+			if len(emitted) != 2 {
+				t.Fatalf("matrix[%d] and matrix[%d] collapsed to %d witnesses; they must be distinct", i, j, len(emitted))
+			}
+			if cmp := compareRichWitnesses(emitted[0], emitted[1]); cmp > 0 {
+				t.Errorf("helper disagrees with the contract on matrix[%d] vs matrix[%d]: contract emitted\n %+v\nthen\n %+v\nbut the helper calls that unsorted",
+					i, j, emitted[0], emitted[1])
+			}
+		}
+	}
+}
+
+// machineWitnesses returns the witnesses as the production contract canonically
+// emits them, so a test can compare against the real comparator instead of a
+// restatement of it.
+func machineWitnesses(t *testing.T, witnesses []claims.Witness) []claims.JSONWitness {
+	t.Helper()
+	g := &graph.Graph{Tool: "flowmap-test", Algo: "vta", Nodes: []graph.Node{{FQN: "pkg.A", Sig: "func()"}}}
+	encoded, err := claims.MarshalMachine(g, claims.Report{Results: []claims.Result{{
+		ID: "witness-order", Kind: "reach", Outcome: claims.Pass, Witnesses: witnesses,
+	}}})
+	if err != nil {
+		t.Fatalf("MarshalMachine: %v", err)
+	}
+	var report claims.JSONReport
+	if err := json.Unmarshal(encoded, &report); err != nil {
+		t.Fatalf("decode machine report: %v", err)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("marshalled %d results, want 1", len(report.Results))
+	}
+	return report.Results[0].Witnesses
 }
 
 // richMachineJSON is assertMachineJSON for a fixture that deliberately contains
@@ -863,10 +1084,20 @@ func richMachineJSON(t *testing.T, graphPath, claimsPath string) []byte {
 }
 
 // TestAssertRichCanonicalAcrossWholeGraphPermutations is the byte-level pin for
-// the rich kinds: six independently shuffled graphs, one claims order, identical
-// report bytes. Reach paths, pass-through bypasses, concurrent hits, and
-// obligation witnesses are all evidence derived from graph traversal, so this is
-// where an ordering leak in any of the four fact families would surface.
+// the rich kinds: five independently shuffled graphs, one claims order, identical
+// report bytes. Reach paths, pass-through bypasses, concurrent hits, obligation
+// witnesses, and the blind site R4 abstains at are all evidence derived from
+// graph traversal, so this is where an ordering leak in any of the four fact
+// families would surface. Every collection listed below reaches this report:
+// deleting it changes these bytes (nodes and edges move the traversal, blind
+// spots move R4's named site, obligations move O1/O2, caveats move the fixture
+// header).
+//
+// ENTRYPOINTS ARE DELIBERATELY ABSENT from the list. No rich claim kind consults
+// `entrypoints[]`, so no ordering of that collection can reach this report and a
+// subtest for it here would assert nothing. Entrypoint ordering is covered by
+// TestAssertJSONCanonicalAcrossWholeGraphPermutations, whose claims file contains
+// an `entrypoint` claim.
 func TestAssertRichCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 	dir := t.TempDir()
 	base := richGraph()
@@ -880,7 +1111,6 @@ func TestAssertRichCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 		{name: "edges", graph: graphWithPermutedEdges(base)},
 		{name: "blind spots", graph: graphWithPermutedBlindSpots(base)},
 		{name: "obligations", graph: graphWithPermutedObligations(base)},
-		{name: "entrypoints", graph: graphWithPermutedEntrypoints(base)},
 		{name: "caveats", graph: graphWithPermutedCaveats(base)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

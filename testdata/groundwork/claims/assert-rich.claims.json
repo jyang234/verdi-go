@@ -56,6 +56,13 @@
       "kind": "obligation",
       "name": "lock-must-release",
       "expect": "satisfied"
+    },
+    {
+      "id": "R4-gateway-absence-blocked-by-blind-frontier",
+      "kind": "reach",
+      "from": ["example.com/svc/internal/gateway.Router.Dispatch"],
+      "to": ["example.com/svc/internal/unrelated.Sink"],
+      "expect": "absent"
     }
   ]
 }
