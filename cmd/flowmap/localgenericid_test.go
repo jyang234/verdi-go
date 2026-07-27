@@ -10,10 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/jyang234/golang-code-graph/internal/static/analyze"
+	"github.com/jyang234/golang-code-graph/internal/static/callgraph"
+	"github.com/jyang234/golang-code-graph/internal/static/features"
 	"github.com/jyang234/golang-code-graph/internal/static/graphio"
 )
 
@@ -66,12 +70,47 @@ var (
 	witnessBuildErr   error
 )
 
+// keyDumpEnv puts this test binary into discriminator-dump mode instead of
+// running tests: it analyzes the named service directory and prints the sorted
+// (FQN, discriminator) multiset of the surviving call-graph nodes.
+//
+// It is a deliberate TEST-ONLY observation seam, and it exists because the
+// discriminator is deliberately absent from every artifact (see "Non-goals" in
+// the design). That absence is what makes key-byte nondeterminism invisible to
+// any stdout comparison, so the assertion that polices it needs a channel of its
+// own — and a debug channel wired only into the test binary is the smallest one
+// that does not put an internal sort key into production output.
+const keyDumpEnv = "FLOWMAP_TEST_DISCRIMINATOR_DUMP_DIR"
+
 func TestMain(m *testing.M) {
+	if dir := os.Getenv(keyDumpEnv); dir != "" {
+		os.Exit(dumpDiscriminatorKeys(dir))
+	}
 	code := m.Run()
 	if witnessBuildDir != "" {
 		_ = os.RemoveAll(witnessBuildDir)
 	}
 	os.Exit(code)
+}
+
+// dumpDiscriminatorKeys runs the real loader -> SSA -> roots -> call-graph
+// pipeline over dir and prints one framed line per surviving node, sorted. The
+// discriminator is rendered with %q so its NUL frames and any non-printing byte
+// survive the comparison intact; sorting makes the output a MULTISET, so it does
+// not depend on the node order the graph happens to carry.
+func dumpDiscriminatorKeys(dir string) int {
+	res, err := analyze.Analyze(dir, callgraph.Options{Algo: callgraph.AlgoVTA})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "discriminator dump: %v\n", err)
+		return 2
+	}
+	lines := make([]string, 0, len(res.Graph.Nodes))
+	for _, n := range res.Graph.Nodes {
+		lines = append(lines, fmt.Sprintf("%q\t%q", n.FQN, features.InstanceDiscriminator(n.Func)))
+	}
+	sort.Strings(lines)
+	fmt.Println(strings.Join(lines, "\n"))
+	return 0
 }
 
 func witnessDir(t *testing.T, name string) string {
@@ -331,9 +370,17 @@ func TestF26DeclarationOffsetsStayAligned(t *testing.T) {
 // the encoding's node ids depend on. These runs rebuild the whole
 // loader -> SSA -> discriminator pipeline in a FRESH PROCESS every time.
 //
-// What must not vary is the panic decision: a program that graphs cleanly on one
-// run and refuses on the next would violate determinism outright. Byte-identical
-// stdout over 20 processes is the observable form of that.
+// Each run is checked twice, because stdout alone is blind to the risk it is
+// meant to police:
+//
+//   - the graph bytes must be identical, which is the observable form of "the
+//     panic decision did not vary" — a program that graphs cleanly on one run and
+//     refuses on the next would violate determinism outright;
+//   - the sorted MULTISET of (FQN, discriminator) keys must be identical. The
+//     discriminator reaches no artifact by design, so key bytes that vary per run
+//     without ever colliding change no stdout at all. That is exactly the shape
+//     the disclosed types.Type pointer-identity dependency would take, and only
+//     this assertion sees it.
 func TestLocalGenericIdentityDeterministicAcrossProcesses(t *testing.T) {
 	// A slice, not a map: nothing in this repository iterates a map where the
 	// order is observable, and a subtest order that varies run to run is exactly
@@ -347,20 +394,58 @@ func TestLocalGenericIdentityDeterministicAcrossProcesses(t *testing.T) {
 	for _, subject := range subjects {
 		witness, dir := subject.name, subject.dir
 		t.Run(witness, func(t *testing.T) {
-			var want string
+			var wantGraph, wantKeys string
 			for run := 0; run < 20; run++ {
 				stdout, stderr, code := graphServiceDir(t, dir, "vta")
 				if code != 0 {
 					t.Fatalf("run %d of ./%s exited %d:\n%s", run, witness, code, stderr)
 				}
+				keys := discriminatorKeys(t, dir)
 				if run == 0 {
-					want = stdout
+					wantGraph, wantKeys = stdout, keys
+					if !strings.Contains(keys, localTypeGraphMarkerText) {
+						t.Fatalf("./%s produced no local-type-graph suffix at all; the subject cannot police the encoding:\n%s",
+							witness, keys)
+					}
 					continue
 				}
-				if stdout != want {
+				if stdout != wantGraph {
 					t.Fatalf("run %d of ./%s produced different graph bytes", run, witness)
+				}
+				if keys != wantKeys {
+					t.Fatalf("run %d of ./%s produced a different discriminator key multiset:\n--- got ---\n%s\n--- want ---\n%s",
+						run, witness, keys, wantKeys)
 				}
 			}
 		})
 	}
+}
+
+// localTypeGraphMarkerText is features.LocalTypeGraphMarker as it appears in the
+// %q-quoted dump. Asserting it is present keeps each determinism subject ARMED:
+// a subject whose keys carry no type-graph suffix would compare identical bytes
+// forever and prove nothing about the encoding.
+const localTypeGraphMarkerText = `\x00local-type-graph/v1\x00`
+
+// discriminatorKeys re-executes THIS test binary in discriminator-dump mode over
+// dir and returns the sorted (FQN, discriminator) multiset it printed. A separate
+// process is the whole point: the risk being policed is variance between two
+// independent loader -> SSA builds, which no in-process repetition can reach.
+func discriminatorKeys(t *testing.T, dir string) string {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	cmd := exec.Command(self)
+	// GOWORK=off because the witnesses are standalone service modules, not
+	// workspace members — the same environment graphServiceDir uses.
+	cmd.Env = append(os.Environ(), "GOWORK=off", keyDumpEnv+"="+dir)
+	var out, errOut strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("discriminator dump of %s: %v\n%s", dir, err, errOut.String())
+	}
+	return out.String()
 }
