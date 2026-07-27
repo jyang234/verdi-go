@@ -626,3 +626,333 @@ func assertMachineFiles(t *testing.T) (string, func(string) string) {
 		return path
 	}
 }
+
+// richGraph is the purpose-built graph the committed assert-rich claims file is
+// graded against. Every rich kind gets both a passing and a failing case over the
+// SAME graph, so the fixture also proves the four families do not interfere:
+// there are no blind spots, so a blind frontier can never be the reason a
+// negative claim passes, and the single abstaining claim abstains for an
+// obligation reason the graph carries explicitly.
+func richGraph() graph.Graph {
+	const (
+		handler  = "example.com/svc/internal/handler.Handle"
+		process  = "example.com/svc/internal/app.Service.Process"
+		publish  = "example.com/svc/internal/outbox.Lifecycle.Publish"
+		update   = "example.com/svc/internal/store.Store.Update"
+		orphan   = "example.com/svc/internal/isolated.Orphan"
+		sink     = "example.com/svc/internal/unrelated.Sink"
+		spawner  = "example.com/svc/internal/worker.Spawner.Start"
+		audit    = "example.com/svc/internal/worker.Audit.Record"
+		busTopic = "boundary:bus PUBLISH order.created"
+		dbUpdate = "boundary:db UPDATE orders"
+		dbInsert = "boundary:db INSERT audit"
+	)
+	node := func(fqn string, tier int) graph.Node {
+		return graph.Node{FQN: fqn, Sig: "func()", Tier: tier}
+	}
+	return graph.Graph{
+		Stamp:   "sha-rich",
+		Tool:    "flowmap-test",
+		Algo:    "vta",
+		Caveats: []string{"zeta", "alpha", "alpha"},
+		Nodes: []graph.Node{
+			node(handler, 1), node(process, 2), node(publish, 2), node(update, 3),
+			node(orphan, 3), node(sink, 3), node(spawner, 1), node(audit, 2),
+		},
+		Edges: []graph.Edge{
+			{From: handler, To: process, Tier: 2},
+			{From: process, To: publish, Tier: 2},
+			{From: publish, To: busTopic, Tier: 2, Boundary: "outbound-async"},
+			{From: process, To: update, Tier: 3},
+			{From: update, To: dbUpdate, Tier: 3, Boundary: "db"},
+			{From: spawner, To: audit, Tier: 2, Concurrent: true},
+			{From: audit, To: dbInsert, Tier: 2, Boundary: "db"},
+		},
+		// Sited off every cone this fixture evaluates (sink is reached by nothing;
+		// spawner is a concurrent SOURCE, not part of the spawned cone), so the
+		// permutation subtest is non-vacuous without turning a proven absence into
+		// an abstention. Blindness reaching a verdict is covered by the unit tests.
+		BlindSpots: []graph.BlindSpot{
+			{Kind: "reflect", Site: sink, Detail: "opaque dispatch"},
+			{Kind: "unsafe", Site: spawner, Detail: "pointer arithmetic"},
+		},
+		Obligations: []graph.Obligation{
+			{Rule: "tx-must-close", Kind: "must-release", Fn: update, Site: "store.go:31", Status: "SATISFIED", Detail: "closed on every path"},
+			{Rule: "tx-must-close", Kind: "must-release", Fn: process, Site: "app.go:14", Status: "SATISFIED", Detail: "closed on every path"},
+			{Rule: "lock-must-release", Kind: "must-release", Fn: audit, Site: "audit.go:9", Status: "CANT-PROVE", Detail: "handoff is unprovable"},
+		},
+		Entrypoints: []graph.Entrypoint{
+			{Kind: "http", Name: "POST /orders", Fn: handler},
+			{Kind: "consumer", Name: "orders.audit", Fn: spawner},
+		},
+	}
+}
+
+const richClaimsPath = "../../testdata/groundwork/claims/assert-rich.claims.json"
+
+// TestAssertRichMixedFixture grades the committed nine-claim rich file at the
+// command boundary. It asserts the machine contract structurally rather than by
+// golden bytes: result order, outcome per claim, the reason-only-on-ERROR rule,
+// and the canonical shape of every binding and witness. The byte-level pin is
+// TestAssertRichCanonicalAcrossWholeGraphPermutations, which requires identical
+// bytes for the same claims over six independently shuffled graphs.
+func TestAssertRichMixedFixture(t *testing.T) {
+	dir := t.TempDir()
+	graphPath := writeAssertGraph(t, dir, "rich", richGraph())
+
+	var runErr error
+	var out bytes.Buffer
+	runErr = cmdAssertTo([]string{graphPath, richClaimsPath, "--json"}, &out)
+
+	// A FAIL outranks the errored claim: the exit class is a verdict (exit 1),
+	// not an operational error (exit 2).
+	var verdict verdictError
+	if !errors.As(runErr, &verdict) {
+		t.Fatalf("run error = %v (%T), want a verdictError — FAIL must outrank ERROR", runErr, runErr)
+	}
+
+	var report claims.JSONReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("decode machine report: %v\n%s", err, out.String())
+	}
+
+	// Result order equals CLAIM FILE order, read from the file rather than
+	// restated here: a reordered report would otherwise still pass a hardcoded
+	// list that happened to be written in the report's order.
+	file, err := claims.LoadFile(richClaimsPath)
+	if err != nil {
+		t.Fatalf("load claims fixture: %v", err)
+	}
+	if len(report.Results) != len(file.Claims) {
+		t.Fatalf("reported %d results for %d claims", len(report.Results), len(file.Claims))
+	}
+	for i, claim := range file.Claims {
+		if report.Results[i].ID != claim.ID {
+			t.Fatalf("result %d id = %q, want %q — results must stay in claims-file order", i, report.Results[i].ID, claim.ID)
+		}
+	}
+
+	wantOutcome := map[string]struct{ outcome, reason string }{
+		"R1-handler-reaches-store":                    {outcome: "PASS"},
+		"R2-isolated-reaches-nothing":                 {outcome: "PASS"},
+		"R3-deliberate-fail-handler-does-reach-store": {outcome: "FAIL"},
+		"P1-publishes-go-through-outbox":              {outcome: "PASS"},
+		"P2-deliberate-fail-writes-bypass-outbox":     {outcome: "FAIL"},
+		"C1-no-concurrent-publish":                    {outcome: "PASS"},
+		"C2-deliberate-fail-concurrent-audit-insert":  {outcome: "FAIL"},
+		"O1-transaction-closes":                       {outcome: "PASS"},
+		"O2-lock-release-unprovable":                  {outcome: "ERROR", reason: "CANT_PROVE"},
+	}
+	if len(wantOutcome) != len(file.Claims) {
+		t.Fatalf("expectation table covers %d claims, fixture has %d", len(wantOutcome), len(file.Claims))
+	}
+
+	// Every classification below is read from `outcome` and `reason` ONLY. No
+	// assertion in this test parses `detail`: a machine consumer must be able to
+	// grade the report without reading human prose.
+	knownReasons := map[string]bool{
+		"UNRESOLVED": true, "AMBIGUOUS": true, "UNBOUND_SELECTOR": true,
+		"BLIND_FRONTIER": true, "MALFORMED_CLAIM": true, "UNKNOWN_STATUS": true,
+		"MISSING_GRAPH_DATA": true, "CANT_PROVE": true, "UNMATCHED": true,
+	}
+	var passed, failed, errored int
+	for _, result := range report.Results {
+		want, ok := wantOutcome[result.ID]
+		if !ok {
+			t.Fatalf("unexpected result id %q", result.ID)
+		}
+		if result.Outcome != want.outcome {
+			t.Errorf("%s outcome = %q, want %q", result.ID, result.Outcome, want.outcome)
+		}
+		if result.Reason != want.reason {
+			t.Errorf("%s reason = %q, want %q", result.ID, result.Reason, want.reason)
+		}
+		switch result.Outcome {
+		case "PASS":
+			passed++
+		case "FAIL":
+			failed++
+		case "ERROR":
+			errored++
+			if !knownReasons[result.Reason] {
+				t.Errorf("%s ERROR reason %q is outside the closed v1 vocabulary", result.ID, result.Reason)
+			}
+		default:
+			t.Errorf("%s outcome %q is outside the closed v1 vocabulary", result.ID, result.Outcome)
+		}
+		// Reason is carried by ERROR and by nothing else, so its presence alone
+		// tells a consumer the result did not evaluate.
+		if (result.Reason != "") != (result.Outcome == "ERROR") {
+			t.Errorf("%s: outcome %q with reason %q violates reason-only-on-ERROR", result.ID, result.Outcome, result.Reason)
+		}
+		assertCanonicalEvidence(t, result)
+	}
+
+	if passed != 5 || failed != 3 || errored != 1 {
+		t.Errorf("outcome counts = %d/%d/%d, want 5 passed, 3 failed, 1 errored", passed, failed, errored)
+	}
+	if report.Summary.Passed != passed || report.Summary.Failed != failed || report.Summary.Errored != errored {
+		t.Errorf("summary %+v disagrees with the results it summarizes", report.Summary)
+	}
+
+	// Each family's PASS carries the evidence that justified it, so a reader can
+	// tell a real proof from a vacuous one.
+	byID := map[string]claims.JSONResult{}
+	for _, result := range report.Results {
+		byID[result.ID] = result
+	}
+	if got := byID["R1-handler-reaches-store"].Witnesses; len(got) == 0 || len(got[0].Path) < 2 {
+		t.Errorf("positive reach PASS carries no path witness: %+v", got)
+	}
+	if got := byID["C2-deliberate-fail-concurrent-audit-insert"].Witnesses; len(got) == 0 {
+		t.Error("concurrent FAIL carries no hit witness")
+	}
+	if got := byID["O1-transaction-closes"].Witnesses; len(got) != 2 {
+		t.Errorf("obligation PASS exposes %d record witnesses, want 2", len(got))
+	}
+	if got := byID["O2-lock-release-unprovable"].Bindings; got == nil || len(got.Obligation) != 1 {
+		t.Errorf("abstaining obligation lost its rule binding: %+v", got)
+	}
+}
+
+// assertCanonicalEvidence checks the two properties the v1 contract promises of
+// every evidence array: each binding family is sorted and de-duplicated, and
+// witnesses are sorted on their complete intrinsic tuple. A witness PATH is an
+// ordered BFS sequence and is deliberately NOT sorted.
+func assertCanonicalEvidence(t *testing.T, result claims.JSONResult) {
+	t.Helper()
+	if b := result.Bindings; b != nil {
+		for name, values := range map[string][]string{
+			"from": b.From, "to": b.To, "through": b.Through, "fqn": b.FQN,
+			"of": b.Of, "fn": b.Fn, "entrypoint": b.Entrypoint, "obligation": b.Obligation,
+		} {
+			for i := 1; i < len(values); i++ {
+				if values[i-1] >= values[i] {
+					t.Errorf("%s bindings.%s not sorted+deduplicated: %q", result.ID, name, values)
+					break
+				}
+			}
+		}
+	}
+	for i := 1; i < len(result.Witnesses); i++ {
+		if witnessTuple(result.Witnesses[i-1]) > witnessTuple(result.Witnesses[i]) {
+			t.Errorf("%s witnesses not sorted: %q then %q",
+				result.ID, witnessTuple(result.Witnesses[i-1]), witnessTuple(result.Witnesses[i]))
+			break
+		}
+	}
+}
+
+func witnessTuple(w claims.JSONWitness) string {
+	return strings.Join(append([]string{w.From, w.To}, append(append([]string(nil), w.Path...),
+		w.BlindSite, w.Rule, w.Fn, w.Site, w.Status, w.Detail)...), "\x00")
+}
+
+// richMachineJSON is assertMachineJSON for a fixture that deliberately contains
+// FAILs: the report is still complete and printed, so only a non-verdict error
+// is a test failure.
+func richMachineJSON(t *testing.T, graphPath, claimsPath string) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	err := cmdAssertTo([]string{graphPath, claimsPath, "--json"}, &out)
+	var verdict verdictError
+	if err != nil && !errors.As(err, &verdict) {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+// TestAssertRichCanonicalAcrossWholeGraphPermutations is the byte-level pin for
+// the rich kinds: six independently shuffled graphs, one claims order, identical
+// report bytes. Reach paths, pass-through bypasses, concurrent hits, and
+// obligation witnesses are all evidence derived from graph traversal, so this is
+// where an ordering leak in any of the four fact families would surface.
+func TestAssertRichCanonicalAcrossWholeGraphPermutations(t *testing.T) {
+	dir := t.TempDir()
+	base := richGraph()
+	want := richMachineJSON(t, writeAssertGraph(t, dir, "rich-baseline", base), richClaimsPath)
+
+	for _, tt := range []struct {
+		name  string
+		graph graph.Graph
+	}{
+		{name: "nodes", graph: graphWithPermutedNodes(base)},
+		{name: "edges", graph: graphWithPermutedEdges(base)},
+		{name: "blind spots", graph: graphWithPermutedBlindSpots(base)},
+		{name: "obligations", graph: graphWithPermutedObligations(base)},
+		{name: "entrypoints", graph: graphWithPermutedEntrypoints(base)},
+		{name: "caveats", graph: graphWithPermutedCaveats(base)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := richMachineJSON(t, writeAssertGraph(t, dir, "rich-"+strings.ReplaceAll(tt.name, " ", "-"), tt.graph), richClaimsPath)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s permutation changed the report:\n%s\nwant:\n%s", tt.name, got, want)
+			}
+		})
+	}
+
+	// Duplicate EDGE records are not evidence — the graph carries the same call
+	// twice — so they must collapse to the same bytes. (A duplicate OBLIGATION
+	// record is different: two producer verdicts are two records, and the report
+	// says so; that asymmetry is pinned in facts.)
+	duped := base
+	duped.Edges = append(append([]graph.Edge(nil), base.Edges...), base.Edges[0], base.Edges[len(base.Edges)-1])
+	if got := richMachineJSON(t, writeAssertGraph(t, dir, "rich-duplicate-edges", duped), richClaimsPath); !bytes.Equal(got, want) {
+		t.Fatalf("duplicate edge records changed the report:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestAssertReachPathStableUnderEdgeOrder pins BFS tie-breaking: with two
+// equal-length paths to the same target, the reported witness path must be a
+// function of the graph's content, not of which edge the producer emitted first.
+func TestAssertReachPathStableUnderEdgeOrder(t *testing.T) {
+	const (
+		source = "svc.Source"
+		viaA   = "svc.AlphaHop"
+		viaZ   = "svc.ZetaHop"
+		target = "svc.Target"
+	)
+	build := func(edges []graph.Edge) graph.Graph {
+		return graph.Graph{
+			Tool: "flowmap-test", Algo: "vta",
+			Nodes: []graph.Node{
+				{FQN: source, Sig: "func()"}, {FQN: viaA, Sig: "func()"},
+				{FQN: viaZ, Sig: "func()"}, {FQN: target, Sig: "func()"},
+			},
+			Edges: edges,
+		}
+	}
+	forward := []graph.Edge{
+		{From: source, To: viaA}, {From: viaA, To: target},
+		{From: source, To: viaZ}, {From: viaZ, To: target},
+	}
+	reversed := []graph.Edge{
+		{From: source, To: viaZ}, {From: viaZ, To: target},
+		{From: source, To: viaA}, {From: viaA, To: target},
+	}
+
+	dir := t.TempDir()
+	claimsPath := filepath.Join(dir, "claims.json")
+	if err := os.WriteFile(claimsPath, []byte(
+		`{"claims":[{"id":"tie","kind":"reach","from":["svc.Source"],"to":["svc.Target"],"expect":"present"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first := richMachineJSON(t, writeAssertGraph(t, dir, "forward", build(forward)), claimsPath)
+	second := richMachineJSON(t, writeAssertGraph(t, dir, "reversed", build(reversed)), claimsPath)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("edge order changed the chosen shortest path:\n%s\nwant:\n%s", second, first)
+	}
+
+	var report claims.JSONReport
+	if err := json.Unmarshal(first, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 1 || len(report.Results[0].Witnesses) == 0 {
+		t.Fatalf("no path witness in %s", first)
+	}
+	if got, want := report.Results[0].Witnesses[0].Path, []string{source, viaA, target}; !slices.Equal(got, want) {
+		t.Fatalf("tie-broken path = %q, want the lexicographically first hop %q", got, want)
+	}
+}
