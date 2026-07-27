@@ -179,13 +179,30 @@ func compositionRootSet(g *Graph) map[string]bool {
 func (g *Graph) RollupByPackage() *PackageRollup {
 	// First-party node → its package, plus per-package node counts. A synthetic node
 	// (empty Package) is not a component and anchors no edge.
+	//
+	// The count is over DISTINCT FQNs, not records. A display FQN can carry several node
+	// records (a generic instantiated at two function-local types serializes as
+	// byte-identical records the graph deliberately keeps), while a component's `nodes` is
+	// read as "this package declares N functions" — the record count would report 7 for a
+	// package declaring 5, a number a human acts on that does not mean what it says.
+	//
+	// Disclosed scope, not an oversight: node counters OUTSIDE this package still count
+	// RECORDS — reviewtriage's BaseNodes/BranchNodes, the groundwork claims report's
+	// numNodes, and cmd/flowmap's "wrote N node(s)" log line. Until those are aligned, a
+	// rollup `nodes` and a triage `base_nodes` over the SAME graph can legitimately differ
+	// by the duplicate-record count.
 	pkgOf := make(map[string]string, len(g.Nodes))
 	counts := map[string]int{}
+	counted := make(map[string]bool, len(g.Nodes))
 	for _, n := range g.Nodes {
 		if n.Package == "" {
 			continue
 		}
 		pkgOf[n.FQN] = n.Package
+		if counted[n.FQN] {
+			continue
+		}
+		counted[n.FQN] = true
 		counts[n.Package]++
 	}
 	roots := compositionRootSet(g)

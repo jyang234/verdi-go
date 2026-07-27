@@ -16,7 +16,8 @@ import (
 // mechanically). It models the exact failure mode of the "<dynamic>" bug: in Mermaid's
 // HTML-label mode, a '<' or '>' in a label that is not part of an allowed <br/> tag is
 // parsed as a (dropped) tag, silently blanking the label. It also pins balanced label
-// quotes and that every :::class is defined. It accepts an optional ```mermaid fence.
+// quotes, that every node id is declared at most once, and that every :::class is
+// defined. It accepts an optional ```mermaid fence.
 func validateMermaid(diagram string) error {
 	body := strings.TrimPrefix(diagram, "```mermaid\n")
 	body = strings.TrimSuffix(body, "```\n")
@@ -77,6 +78,15 @@ func validateMermaid(diagram string) error {
 	// line we don't recognize means a new Mermaid feature crept in — fail here so its
 	// cross-host compatibility (notably older GitLab-pinned mermaid) is reviewed before
 	// it ships, rather than silently breaking a reviewer's rendered view.
+	//
+	// The same pass pins single declaration per node id. A graph may legally carry SEVERAL
+	// node records for one display FQN (a generic instantiated at two function-local types
+	// serializes as byte-identical records the graph deliberately keeps), and every one of
+	// them maps to the SAME mermaid id. Re-declaring that id does not draw a second box —
+	// Mermaid collapses it — so the render would silently disagree with the graph it claims
+	// to draw. Checking it here makes the invariant self-enforcing for every test that
+	// already routes output through the validator, not just the one that found it.
+	declaredAt := map[string]int{}
 	for i, ln := range lines {
 		trimmed := strings.TrimSpace(ln)
 		switch {
@@ -106,6 +116,16 @@ func validateMermaid(diagram string) error {
 			}
 		case strings.Contains(ln, `"`):
 			// a node declaration; its label was checked above
+			id := leadingID(trimmed)
+			if id == "" {
+				break
+			}
+			if prev, dup := declaredAt[id]; dup {
+				return fmt.Errorf("node id %q is declared twice (lines %d and %d): a repeated "+
+					"declaration is not a second box — Mermaid collapses it, so the diagram no "+
+					"longer matches the graph it renders: %q", id, prev, i+1, ln)
+			}
+			declaredAt[id] = i + 1
 		default:
 			return fmt.Errorf("line %d is not a recognized Mermaid construct (dialect floor — "+
 				"vet cross-host compatibility before adding): %q", i+1, ln)
@@ -128,6 +148,17 @@ func stripQuotedLabel(ln string) string {
 		return ln[:lo] + ln[hi+1:]
 	}
 	return ln
+}
+
+// leadingID returns the leading identifier of a node-declaration line — the id that
+// precedes its shape delimiter ([ , ([ , {{ , [( ) — or "" when the line does not start
+// with one.
+func leadingID(trimmed string) string {
+	i := 0
+	for i < len(trimmed) && isIDChar(trimmed[i]) {
+		i++
+	}
+	return trimmed[:i]
 }
 
 func isIDChar(c byte) bool {

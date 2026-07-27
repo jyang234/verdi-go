@@ -330,14 +330,27 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// Pass A: assign ids to the first-party nodes we will show.
 	nodeID := make(map[string]string, len(g.Nodes))
 	shown := make(map[string]bool, len(g.Nodes))
-	hidden := 0
+	hiddenFQN := make(map[string]bool)
 	for _, n := range g.Nodes {
 		if !keepNode(n, opts.MaxTier, emitsEffect, force) {
-			hidden++
+			hiddenFQN[n.FQN] = true
 			continue
 		}
 		nodeID[n.FQN] = ids.get(frontier.ShortName(n.FQN))
 		shown[n.FQN] = true
+	}
+	// The hidden note is a number a human ACTS on ("how much did the default view fold
+	// away"), and what the render folds away is FUNCTIONS, not records: a display FQN can
+	// carry several node records (a generic instantiated at two function-local types), and
+	// all of them collapse into the one box that is not drawn. Counting records would
+	// claim 6 hidden for 4 collapsed functions. Subtracting `shown` is the honest reading
+	// of "hidden": should two records of one FQN ever disagree on tier, the FQN IS drawn,
+	// so it was never hidden. Map iteration only sums, so the count stays order-free.
+	hidden := 0
+	for fqn := range hiddenFQN {
+		if !shown[fqn] {
+			hidden++
+		}
 	}
 
 	// Disclose the pin only when it actually RESCUED the root from collapse — i.e. the
@@ -451,12 +464,25 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 		b.WriteString("    %% " + comment(n) + "\n")
 	}
 
-	// First-party node declarations, in canonical Node order.
+	// First-party node declarations, in canonical Node order. A display FQN can carry
+	// SEVERAL node records — a generic instantiated at two function-local types serializes
+	// as byte-identical records the graph deliberately keeps (they are distinct instances
+	// with distinct behavior) — and every one of them maps to the same mermaid id. A
+	// repeated declaration is not a second box; Mermaid collapses it, so the diagram would
+	// silently disagree with the graph it renders.
+	//
+	// First writer wins is SAFE, not a choice of representative: every label-bearing field
+	// of a duplicate-FQN record (the FQN itself, Fallible) is origin-derived and therefore
+	// identical across the instances, and g.Nodes arrives in sortGraph's canonical order,
+	// so which record declares cannot change the emitted bytes. `declared` exists to
+	// prevent re-declaration, not to adjudicate between records.
+	declared := make(map[string]bool, len(nodeID))
 	for _, n := range g.Nodes {
 		id, ok := nodeID[n.FQN]
-		if !ok {
+		if !ok || declared[n.FQN] {
 			continue
 		}
+		declared[n.FQN] = true
 		label := mermaidText(frontier.ShortName(n.FQN))
 		if n.Fallible {
 			label += " ⚠"

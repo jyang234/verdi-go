@@ -246,6 +246,39 @@ func TestGraphFunctionLocalGenericTypesDeterministic(t *testing.T) {
 	}
 }
 
+// TestGraphMermaidDeclaresCollidingFQNOnce is the end-to-end half of the duplicate-record
+// render pin: the fixture's generic is instantiated at three function-local types, so the
+// graph legally carries three node records for ONE display FQN (see
+// TestGraphFunctionLocalGenericTypesDeterministic). The diagram draws one box per FQN, so
+// `--mermaid --show-plumbing` must declare that id exactly once — a repeated declaration
+// is not a second box, it is a render that disagrees with the graph it claims to draw.
+func TestGraphMermaidDeclaresCollidingFQNOnce(t *testing.T) {
+	dir := localTypeArgFixtureDir()
+	// The fixture is a standalone service module, not a repository workspace member.
+	t.Setenv("GOWORK", "off")
+	out := captureStdout(t, func() {
+		if err := run([]string{"graph", "--algo", "vta", "--mermaid", "--show-plumbing", dir}); err != nil {
+			t.Fatalf("graph --mermaid: %v", err)
+		}
+	})
+	decls := map[string]int{}
+	for _, ln := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if !strings.Contains(trimmed, `["`) || strings.Contains(trimmed, "-->") {
+			continue
+		}
+		decls[trimmed[:strings.Index(trimmed, `["`)]]++
+	}
+	if len(decls) == 0 {
+		t.Fatalf("no node declarations in mermaid output:\n%s", out)
+	}
+	for id, n := range decls {
+		if n != 1 {
+			t.Errorf("node id %q declared %d times, want exactly 1:\n%s", id, n, out)
+		}
+	}
+}
+
 // TestTaintRendersPerSourceDecomposition pins the B1 CLI surface: `flowmap taint`
 // emits the additive "by source" block alongside the aggregate, so an aggregate FLOW
 // no longer masks the other declared sources. taintsvc declares a FLOW source, an
