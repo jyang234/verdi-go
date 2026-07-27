@@ -278,6 +278,43 @@ func TestReachClaimBothUnboundSidesAreExactSortedSets(t *testing.T) {
 	}
 }
 
+// TestReachClaimAbstainsOnBlindSpotAtUnparsableConeMember is the claim-level
+// consequence of the unconditional package-site probe: a blind spot recorded at
+// the empty site, reachable through a cone member whose FQN parses to no
+// package, must abstain (ERROR BLIND_FRONTIER) instead of grading the absence
+// claim as a proof. A blind frontier is never a pass.
+func TestReachClaimAbstainsOnBlindSpotAtUnparsableConeMember(t *testing.T) {
+	const (
+		source     = "example.com/svc/handler.Source"
+		unparsable = "(unclosed"
+		target     = "example.com/svc/store.Sink"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: source}, {FQN: unparsable}, {FQN: target}},
+		Edges: []graph.Edge{{From: source, To: unparsable}},
+		BlindSpots: []graph.BlindSpot{{
+			Kind: "reflect", Site: "", Detail: "dispatch table built at init",
+		}},
+	}
+
+	got := evalOneG(t, g, Claim{
+		ID: "blind-empty-site", Kind: "reach",
+		From: sel(source), To: sel(target), Expect: "absent",
+	})
+	want := Result{
+		ID: "blind-empty-site", Kind: "reach", Label: "blind-empty-site",
+		Outcome: Errored, Reason: ReasonBlindFrontier,
+		Detail: "no path found, but the frontier is blind at ",
+		Bindings: Bindings{
+			From: []string{source}, To: []string{target},
+		},
+		Witnesses: []Witness{{From: source}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("blind-frontier abstention mismatch\nwant: %#v\ngot:  %#v", want, got)
+	}
+}
+
 func TestReachClaimMachineBindingsAndWitnessJSON(t *testing.T) {
 	const (
 		found    = "svc.Found"

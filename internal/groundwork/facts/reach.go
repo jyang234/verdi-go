@@ -273,12 +273,15 @@ func blindForCone(
 			witness := candidates[0]
 			return &witness
 		}
-		if pkg := PackageOf(fn); pkg != "" {
-			candidates := blindSpotsAt(ix, from, pkg, BlindInPackage)
-			if len(candidates) > 0 {
-				witness := candidates[0]
-				return &witness
-			}
+		// PackageOf is probed unconditionally, including the "" it returns for an
+		// FQN that does not parse: graph.Load accepts both an unparsable node FQN
+		// and a blind spot recorded at the empty site, so skipping the probe there
+		// would drop a real blind frontier and turn a fail-closed abstention into a
+		// silent absence proof.
+		candidates := blindSpotsAt(ix, from, PackageOf(fn), BlindInPackage)
+		if len(candidates) > 0 {
+			witness := candidates[0]
+			return &witness
 		}
 	}
 

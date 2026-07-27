@@ -423,6 +423,49 @@ func TestEvaluateReachBlindClassification(t *testing.T) {
 	}
 }
 
+// TestEvaluateReachProbesPackageSiteOfUnparsableFQN pins that the package-site
+// blind-spot probe runs for EVERY cone member, including one whose FQN parses to
+// no package. graph.Load rejects neither an unparsable node FQN ("(unclosed" has
+// no closing paren) nor a blind spot recorded at the empty site, so both reach
+// the traversal together; skipping the probe when PackageOf returns "" turns a
+// fail-closed abstention into a silent clean absence proof — a false PROVEN
+// (tenet 4), and under require_proof a gate that stops failing.
+func TestEvaluateReachProbesPackageSiteOfUnparsableFQN(t *testing.T) {
+	const (
+		source     = "example.com/svc/handler.Source"
+		unparsable = "(unclosed"
+		target     = "boundary:db UPDATE users"
+		other      = "example.com/svc/handler.Other"
+	)
+	g := &graph.Graph{
+		Nodes: []graph.Node{{FQN: source}, {FQN: unparsable}, {FQN: other}},
+		Edges: []graph.Edge{
+			{From: source, To: unparsable},
+			{From: other, To: target, Boundary: "outbound-sync"},
+		},
+		BlindSpots: []graph.BlindSpot{{
+			Kind: "reflect", Site: "", Detail: "dispatch table built at init",
+		}},
+	}
+
+	got := EvaluateReach(graph.NewIndex(g), []string{source}, []string{"boundary:db UPDATE"})
+	want := ReachResult{
+		State: ReachBlind,
+		From:  []string{source},
+		To:    []string{target},
+		Blind: &BlindWitness{
+			From:     source,
+			Site:     "",
+			Kind:     "reflect",
+			Detail:   "dispatch table built at init",
+			Location: BlindInPackage,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unparsable cone member skipped its package-site probe\nwant: %#v\ngot:  %#v", want, got)
+	}
+}
+
 func TestEvaluateReachLegacyBlindPrecedence(t *testing.T) {
 	const (
 		source = "example.com/svc/handler.Source"
