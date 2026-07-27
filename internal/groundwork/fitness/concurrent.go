@@ -20,7 +20,9 @@ import (
 // effects) is one finding, not a multiset that churns the base-vs-branch diff.
 //
 // Three-valued like the other reach checks: no hit over a blind frontier is a
-// Caution, escalated by require_proof.
+// Caution, escalated by require_proof. The state fold is TOTAL for the same
+// reason checkMustNotReach's is: the clean arm is silent, so a state this gate
+// has not been taught must be disclosed rather than fall through as a clean hold.
 func checkNoConcurrentReach(p *policy.Policy, surface facts.ConcurrentSurface, r *Result) {
 	for _, rule := range p.NoConcurrentReach {
 		// Parity with must_not_reach (reach.go): a To that binds nothing ANYWHERE in
@@ -29,22 +31,24 @@ func checkNoConcurrentReach(p *policy.Policy, surface facts.ConcurrentSurface, r
 		// target — a Caution by default, escalated under require_proof — so a guard
 		// that quietly stopped existing is loud, not silently "enforced".
 		fact := surface.Evaluate(rule.To)
-		if fact.State == facts.ConcurrentUnbound {
+		// TOTAL over ConcurrentState, for the reason checkMustNotReach's switch is:
+		// an if-chain that names only Unbound and Blind emits nothing for a state it
+		// has not been taught, and the rule then reports as a clean hold — a silent
+		// pass in a live gate (tenet 4).
+		switch fact.State {
+		case facts.ConcurrentUnbound:
 			r.add(unbindableTargetFinding("no_concurrent_reach", rule.Name, "to", rule.RequireProof))
-			continue
-		}
-
-		for _, hit := range fact.Hits {
-			r.add(Finding{
-				Rule:     "no_concurrent_reach",
-				Severity: Violation,
-				Summary:  fmt.Sprintf("%s: %s reachable on a concurrent path", rule.Name, ShortName(hit.To)),
-				From:     hit.From,
-				To:       hit.To,
-			})
-		}
-
-		if fact.State == facts.ConcurrentBlind {
+		case facts.ConcurrentHit:
+			for _, hit := range fact.Hits {
+				r.add(Finding{
+					Rule:     "no_concurrent_reach",
+					Severity: Violation,
+					Summary:  fmt.Sprintf("%s: %s reachable on a concurrent path", rule.Name, ShortName(hit.To)),
+					From:     hit.From,
+					To:       hit.To,
+				})
+			}
+		case facts.ConcurrentBlind:
 			sev, note := Caution, "cannot prove the concurrent cone avoids the target"
 			if rule.RequireProof {
 				sev, note = Violation, "require_proof is set and avoidance cannot be proven"
@@ -54,6 +58,12 @@ func checkNoConcurrentReach(p *policy.Policy, surface facts.ConcurrentSurface, r
 				Severity: sev,
 				Summary:  fmt.Sprintf("%s: no concurrent path found, but the frontier is blind (%s) — %s", rule.Name, blindDescription(fact.Blind), note),
 			})
+		case facts.ConcurrentClean:
+			// No target on the visible concurrent surface: nothing to report. What
+			// "visible" excludes is disclosed at facts.ConcurrentClean.
+		default:
+			r.add(unrecognizedStateFinding("no_concurrent_reach", rule.Name,
+				fmt.Sprintf("concurrent state %d", fact.State), rule.RequireProof))
 		}
 	}
 }

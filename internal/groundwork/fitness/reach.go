@@ -26,6 +26,11 @@ const (
 // matching rule.From may transitively reach any target (function or boundary
 // effect) matching rule.To. A reachable path is a Violation; an unprovable rule
 // (no path, but a blind frontier) is a Caution naming where the graph went blind.
+//
+// The state switch is TOTAL: exactly one arm is silent (facts.ReachAbsent, the
+// real proof), and a state this gate has not been taught reaches the default and
+// is disclosed. A bare switch would emit nothing for such a state and the rule
+// would read as a clean hold — a silent pass in a live gate (tenet 4).
 func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	for _, rule := range p.MustNotReach {
 		fact := facts.EvaluateReach(ix, rule.From, rule.To)
@@ -56,10 +61,13 @@ func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 				Rule:     "must_not_reach",
 				Severity: sev,
 				Summary:  fmt.Sprintf("%s: no path found, but the frontier is blind (%s) — %s", rule.Name, blindDescription(fact.Blind), note),
-				From:     fact.Blind.From,
+				From:     blindFrom(fact.Blind),
 			})
 		case facts.ReachAbsent:
 			// A real proof: nothing to report. Absence is the desired state.
+		default:
+			r.add(unrecognizedStateFinding("must_not_reach", rule.Name,
+				fmt.Sprintf("reach state %d", fact.State), rule.RequireProof))
 		}
 	}
 }
@@ -105,6 +113,32 @@ func unbindableTargetFinding(kind, name, field string, requireProof bool) Findin
 	}
 }
 
+// unrecognizedStateFinding discloses a typed fact state this groundwork's judges
+// have never been taught — a later facts release adding a state, arriving at a
+// switch written before it existed. Every other arm of those switches decides a
+// verdict, so a bare fall-through emits NOTHING and the rule reports as a clean
+// hold: a silent pass in a live gate, the worst outcome (tenet 4). It abstains
+// rather than panicking, because the prime directive prefers a disclosed
+// abstention the caller surfaces to a crash. Caution by default, escalated to
+// Violation under require_proof — the same escalation every other unprovable
+// disposition in this package uses. It is the fitness-side twin of
+// checkObligations' vocabulary-drift default, and of the "evaluator returned an
+// unknown state" ERROR the claims judge emits for the same condition.
+//
+// state is the human name of the offending value ("reach state 7"); it is not
+// part of a Severity decision, only of the disclosure.
+func unrecognizedStateFinding(kind, name, state string, requireProof bool) Finding {
+	sev, note := Caution, "upgrade or investigate"
+	if requireProof {
+		sev, note = Violation, "require_proof is set and an unrecognized state cannot be proven"
+	}
+	return Finding{
+		Rule:     kind,
+		Severity: sev,
+		Summary:  fmt.Sprintf("%s: %s is not understood by this groundwork — %s", name, state, note),
+	}
+}
+
 // bindsAnyTarget is the compatibility wrapper for later-migrated fitness
 // evaluators. facts owns target binding.
 func bindsAnyTarget(ix *graph.Index, patterns []string) bool {
@@ -135,7 +169,7 @@ func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, e
 		witness := fact.Paths[0]
 		return reachable, evidence{from: witness.From, target: witness.To}
 	case facts.ReachBlind:
-		return noPathFound, evidence{from: fact.Blind.From, target: blindDescription(fact.Blind)}
+		return noPathFound, evidence{from: blindFrom(fact.Blind), target: blindDescription(fact.Blind)}
 	case facts.ReachUnbound:
 		return noPathFound, evidence{}
 	case facts.ReachAbsent:
@@ -159,6 +193,23 @@ func frontierBlindSiteWith(ix *graph.Index, cone []string, effects []graph.Edge)
 		return "", false
 	}
 	return blindDescription(witness), true
+}
+
+// blindFrom is the nil-safe accessor for a blind witness's source, the twin of
+// blindDescription. The fact types document Blind as non-nil exactly when the
+// state is the blind one, but every fitness site that renders a blind finding
+// reads TWO fields off the same pointer, so a producer bug would panic in the
+// middle of a gate on the second one after blindDescription had already absorbed
+// it. Both accessors degrade to "" instead: the finding still carries its
+// Caution/Violation severity, so a broken witness abstains loudly rather than
+// crashing — and can never become a pass. The claims judge closes the same hole
+// by ERRORing (claims.evalReach's "blind state without evidence"); this is the
+// fitness-side symmetry.
+func blindFrom(witness *facts.BlindWitness) string {
+	if witness == nil {
+		return ""
+	}
+	return witness.From
 }
 
 func blindDescription(witness *facts.BlindWitness) string {

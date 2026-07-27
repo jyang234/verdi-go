@@ -21,6 +21,9 @@ import (
 //
 // Three-valued like must_not_reach: no bypass over a blind frontier is a
 // Caution ("cannot prove every path is guarded"), escalated by require_proof.
+// The state fold is TOTAL for the same reason checkMustNotReach's is: the
+// guarded arm is silent, so a state this gate has not been taught must be
+// disclosed rather than fall through as a clean hold.
 func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 	for i := range p.MustPassThrough {
 		rule := &p.MustPassThrough[i]
@@ -47,17 +50,23 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			continue
 		}
 
-		for _, bypass := range fact.BypassOccurrences {
-			r.add(Finding{
-				Rule:     "must_pass_through",
-				Severity: Violation,
-				Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(bypass.From), shortTarget(bypass.To), throughLabel),
-				From:     bypass.From,
-				To:       bypass.To,
-				Detail:   renderBypassPath(bypass.Path),
-			})
-		}
-		if fact.State == facts.PassThroughBlind {
+		// TOTAL over PassThroughState, for the reason checkMustNotReach's switch is:
+		// an if-chain that names only Bypassed and Blind emits nothing for a state it
+		// has not been taught, and the rule then reports as a clean hold — a silent
+		// pass in a live gate (tenet 4).
+		switch fact.State {
+		case facts.PassThroughBypassed:
+			for _, bypass := range fact.BypassOccurrences {
+				r.add(Finding{
+					Rule:     "must_pass_through",
+					Severity: Violation,
+					Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(bypass.From), shortTarget(bypass.To), throughLabel),
+					From:     bypass.From,
+					To:       bypass.To,
+					Detail:   renderBypassPath(bypass.Path),
+				})
+			}
+		case facts.PassThroughBlind:
 			sev, note := Caution, "cannot prove every path is guarded"
 			if rule.RequireProof {
 				sev, note = Violation, "require_proof is set and guarding cannot be proven"
@@ -66,8 +75,16 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 				Rule:     "must_pass_through",
 				Severity: sev,
 				Summary:  fmt.Sprintf("%s: no bypass found, but the frontier is blind (%s) — %s", rule.Name, blindDescription(fact.Blind), note),
-				From:     fact.Blind.From,
+				From:     blindFrom(fact.Blind),
 			})
+		case facts.PassThroughGuarded:
+			// A real proof: every visible path enters the waypoint. No finding.
+		case facts.PassThroughUnbound:
+			// Already returned by the two family guards above — an unbound family is
+			// exactly what they screen. Named so the switch is total, not silent.
+		default:
+			r.add(unrecognizedStateFinding("must_pass_through", rule.Name,
+				fmt.Sprintf("pass-through state %d", fact.State), rule.RequireProof))
 		}
 	}
 }

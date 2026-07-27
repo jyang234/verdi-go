@@ -85,7 +85,9 @@ func ClassifyObligationStatus(status string) ObligationState {
 // never be laundered into a proof: a concrete VIOLATED already disproves the
 // rule even if a sibling record abstains; an unrecognized status outranks a
 // known abstention because its meaning is unavailable, not merely unproven; and
-// SATISFIED is reachable only when every matched record proved it.
+// SATISFIED is reachable only when every matched record proved it. The fold
+// itself is dominantObligationState, which owns the fail-closed treatment of a
+// state it has not been taught.
 //
 // An empty obligations section is ObligationMissingData whether it was omitted
 // or present-but-empty. The decoder DOES preserve that difference (an omitted
@@ -115,31 +117,62 @@ func EvaluateObligation(ix *graph.Index, name string) ObligationResult {
 	}
 	sortObligations(result.Records)
 
-	var sawUnknown, sawCantProve, sawUnmatched bool
-	for _, record := range result.Records {
-		switch ClassifyObligationStatus(record.Status) {
+	states := make([]ObligationState, len(result.Records))
+	for i, record := range result.Records {
+		states[i] = ClassifyObligationStatus(record.Status)
+	}
+	result.State = dominantObligationState(states)
+	return result
+}
+
+// dominantObligationState folds one rule's per-record states into the rule's
+// verdict, in the dominance order EvaluateObligation documents: VIOLATED wins
+// outright, then Unknown, CantProve, Unmatched, and only then the proof pole.
+//
+// The proof pole needs POSITIVE evidence. ObligationSatisfied is returned only
+// when at least one state IS ObligationSatisfied and none of the four negative
+// flags is set — never as a fall-through. The earlier shape defaulted to
+// ObligationSatisfied and was safe only because ClassifyObligationStatus happens
+// to map everything it does not recognize to ObligationUnknown; a state added
+// there (or an aggregate state handed in by a future caller) would have landed
+// straight on the pole, which is a false PROVEN, the worst outcome (tenet 4).
+// A state this fold has not been taught — and the empty fold, which
+// EvaluateObligation never produces because it returns ObligationUnresolved for
+// zero records — is ObligationUnknown: unavailable meaning, not a proof.
+// Pinned by TestDominantObligationStateNeverProvesAnUnmodelledState.
+func dominantObligationState(states []ObligationState) ObligationState {
+	var sawUnknown, sawCantProve, sawUnmatched, sawSatisfied bool
+	for _, state := range states {
+		switch state {
 		case ObligationViolated:
-			result.State = ObligationViolated
-			return result
+			return ObligationViolated
 		case ObligationUnknown:
 			sawUnknown = true
 		case ObligationCantProve:
 			sawCantProve = true
 		case ObligationUnmatched:
 			sawUnmatched = true
+		case ObligationSatisfied:
+			sawSatisfied = true
+		default:
+			// ObligationMissingData, ObligationUnresolved (aggregate-only states that
+			// describe a whole rule's evidence, never one record's) and anything a
+			// later release adds. Fail closed rather than let it vanish from the fold.
+			sawUnknown = true
 		}
 	}
 	switch {
 	case sawUnknown:
-		result.State = ObligationUnknown
+		return ObligationUnknown
 	case sawCantProve:
-		result.State = ObligationCantProve
+		return ObligationCantProve
 	case sawUnmatched:
-		result.State = ObligationUnmatched
+		return ObligationUnmatched
+	case sawSatisfied:
+		return ObligationSatisfied
 	default:
-		result.State = ObligationSatisfied
+		return ObligationUnknown
 	}
-	return result
 }
 
 // sortObligations orders records on their complete intrinsic tuple, so a tie on

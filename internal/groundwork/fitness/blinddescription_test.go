@@ -12,6 +12,30 @@ import (
 // facts.BlindLocation constants: a characterization test that pins the behavior
 // an extraction must preserve has to COMPILE against the pre-extraction package,
 // or it cannot be run in the "before" state it exists to capture.
+// TestBlindWitnessAccessorsAreNilSafe pins the symmetry between the two
+// accessors every blind finding in this package reads. The fact types document
+// Blind as non-nil exactly when the state is the blind one, but each rendering
+// site reads BOTH fields off that one pointer: before blindFrom existed,
+// blindDescription absorbed a nil and the very next expression (fact.Blind.From)
+// panicked mid-gate. Both must degrade to "" so a broken witness abstains — the
+// finding keeps its Caution/Violation severity — instead of crashing, and can
+// never become a pass. The claims judge closes the same hole by ERRORing.
+func TestBlindWitnessAccessorsAreNilSafe(t *testing.T) {
+	if got := blindFrom(nil); got != "" {
+		t.Errorf("blindFrom(nil) = %q, want the empty source", got)
+	}
+	if got := blindDescription(nil); got != "" {
+		t.Errorf("blindDescription(nil) = %q, want the empty description", got)
+	}
+	witness := &facts.BlindWitness{
+		From: "svc.Source", Site: "svc.Mid", Kind: "reflect",
+		Location: facts.BlindAtFunction,
+	}
+	if got := blindFrom(witness); got != "svc.Source" {
+		t.Errorf("blindFrom(witness) = %q, want %q", got, "svc.Source")
+	}
+}
+
 func TestBlindDescriptionConcurrentLocations(t *testing.T) {
 	tests := []struct {
 		name    string

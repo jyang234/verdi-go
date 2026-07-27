@@ -190,6 +190,46 @@ func TestEvaluateObligationCanonicalRecordsOverShuffledInput(t *testing.T) {
 	}
 }
 
+// TestDominantObligationStateNeverProvesAnUnmodelledState pins the fail-closed
+// side of the dominance fold. The fold used to reach ObligationSatisfied through
+// a bare `default:` — every record that was not Violated/Unknown/CantProve/
+// Unmatched landed on the PROOF pole. That was safe only by accident, because
+// ClassifyObligationStatus maps everything it does not recognize to
+// ObligationUnknown; the day a state is added there (or an aggregate state is
+// handed in), an unmodelled record would have proven the rule. A false PROVEN is
+// the worst outcome this codebase can produce (tenet 4), so the pole now needs
+// positive ObligationSatisfied evidence and everything else abstains.
+//
+// The unmodelled value is exercised directly because no producer status can
+// reach it: ClassifyObligationStatus is total over strings, which is exactly why
+// the hole was invisible from the outside.
+func TestDominantObligationStateNeverProvesAnUnmodelledState(t *testing.T) {
+	const unmodelled = ObligationState(200) // no such state today, by construction
+
+	tests := []struct {
+		name   string
+		states []ObligationState
+		want   ObligationState
+	}{
+		{"all satisfied is the only proof", []ObligationState{ObligationSatisfied, ObligationSatisfied}, ObligationSatisfied},
+		{"violated dominates everything", []ObligationState{ObligationSatisfied, ObligationViolated, ObligationUnknown}, ObligationViolated},
+		{"unknown outranks a known abstention", []ObligationState{ObligationCantProve, ObligationUnknown}, ObligationUnknown},
+		{"cant-prove outranks unmatched", []ObligationState{ObligationUnmatched, ObligationCantProve}, ObligationCantProve},
+		{"unmatched outranks satisfied", []ObligationState{ObligationSatisfied, ObligationUnmatched}, ObligationUnmatched},
+		{"an unmodelled state alone abstains", []ObligationState{unmodelled}, ObligationUnknown},
+		{"an unmodelled state beside a proof abstains", []ObligationState{ObligationSatisfied, unmodelled}, ObligationUnknown},
+		{"an aggregate-only state is never a record's proof", []ObligationState{ObligationSatisfied, ObligationMissingData}, ObligationUnknown},
+		{"an empty fold is not a proof", nil, ObligationUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dominantObligationState(tt.states); got != tt.want {
+				t.Fatalf("dominantObligationState(%v) = %v, want %v", tt.states, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEvaluateObligationEmptySectionIsMissingData pins the deliberate fold of the
 // two empty-section shapes the decoder DOES distinguish. Both are missing data:
 // ObligationUnresolved means "the section names other rules but not this one",
