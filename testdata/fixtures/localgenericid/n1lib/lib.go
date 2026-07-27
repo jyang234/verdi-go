@@ -13,7 +13,7 @@
 // asserts "this program instantiates the enclosing generic more than once", or
 // that offers "instantiate it only once" as a remedy, is false here under every
 // algorithm — and the analyzer cannot tell this shape from n1b's, so it must not
-// claim either. See "The `cha` sub-case" in
+// claim either. See "The uninstantiated-body sub-case" in
 // docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
 package n1lib
 

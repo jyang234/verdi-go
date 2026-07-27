@@ -222,8 +222,8 @@ Encoding rules, all normative:
    | Kind | Definition |
    |---|---|
    | `Basic` | `basic:<Basic.Name()>` — **the name, not merely the kind tag**; `basic:int` and `basic:string` must differ, or witness `n1c` is not separated |
-   | `Named` | `named:<pkgpath>.<name>[@<site>]:<targ ids in order>:><underlying id>` |
-   | `Alias` | `alias:<pkgpath>.<name>[@<site>]:<targ ids in order>:><rhs id>` |
+   | `Named` | `named:<pkgpath>.<name>[@<site>]:<type-param ids in order>:<targ ids in order>:><underlying id>` |
+   | `Alias` | `alias:<pkgpath>.<name>[@<site>]:<type-param ids in order>:<targ ids in order>:><rhs id>` |
    | `Array` | `array:<Len()>:><elem id>` |
    | `Chan` | `chan:<int(Dir())>:><elem id>` |
    | `Interface` | `iface:` then, for each explicit method, `<pkgpath>.<name>><sig id>`; then, for each embedded, `e><id>` |
@@ -242,7 +242,8 @@ Encoding rules, all normative:
    not.
 
    **Type parameters are encoded too**, as a further id list on `Named` and
-   `Alias` (`named:<qualified name>[@<site>]:<type-param ids>:<targ ids>:><underlying id>`).
+   `Alias`, written **before** the type arguments — carried into the rule-4 table
+   above, which is normative and must not be read without them.
    They are reachable neither through a node's underlying type nor through its
    type arguments, and a function-local type can hide inside a constraint — which
    the shipped walker already reached and a permanent test already pins. Encoding
@@ -440,6 +441,19 @@ Four additional normative rules:
   a deterministic diagnostic — never a truncated key, which would silently merge
   two distinct functions. This is belt-and-braces against a pathological type
   graph the id-sharing analysis did not anticipate.
+
+  **The budget is a refusal surface wider than the suffix it guards, and that is
+  disclosed, not accidental.** It is checked as each definition is completed —
+  during the traversal, before the encoder knows whether any function-local
+  declaration was reachable at all. A function whose reachable type graph exceeds
+  the budget is therefore refused even when it would have emitted **no suffix**
+  and returned the prefix byte-for-byte, which is a refusal the pre-budget code
+  did not make. This does not breach the fail-closed rule — it is a loud abstain
+  on an input the encoder cannot represent, never a merge — but it is a behavior
+  change on programs unrelated to function-local types, and a reader of the
+  budget's rationale must not have to infer it. Narrowing the check to
+  suffix-emitting functions would mean completing a >1 MiB traversal before
+  deciding to discard it, so the wider surface is deliberate.
 
 An unrecognized future `go/types` implementation must fail loudly in tests and
 production rather than silently skip a possible local declaration.
@@ -763,5 +777,21 @@ determinism guard must never be removed as a rollback mechanism.
 - The pooled-sorted-deduplicated site set no longer appears anywhere, and the
   string `local-sites/v1` no longer appears in code, tests, or comments.
 - `loader.Tests` is still `false`, or "Physical position" has been revisited.
-- The `localtypeargsvc` fixture's `flowmap graph --algo vta` output is
-  byte-identical to the pre-change binary's.
+- The `localtypeargsvc` fixture's `flowmap graph --algo vta` output is unchanged
+  by this design, compared **with `provenance.tool` normalized** — or, equivalently,
+  between two binaries built the same way.
+
+  The criterion must not be stated as a literal `sha256` of the whole document.
+  `provenance.tool` is a build stamp: `go run` yields `"dev"`, a VCS-visible
+  `go build` yields a version string, and two otherwise byte-identical graphs then
+  differ by exactly that one line and by every hash taken over it. Stated as a
+  digest, this criterion has already raised one false alarm.
+
+  **No committed test pins this equality, and none can**: it is a comparison
+  between two *binaries*, and only one of them exists in the tree at a time. The
+  committed evidence is adjacent, not equivalent —
+  `TestGraphFunctionLocalGenericTypesDeterministic` pins that one binary's output
+  is stable over 20 runs and still carries three `report[...]` records with their
+  three callers, and `TestLocalGenericIdentityDeterministicAcrossProcesses` pins
+  the same across processes plus the discriminator key multiset. Cross-binary
+  equality stays a release-time check, run by hand, with the tool line normalized.

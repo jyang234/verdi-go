@@ -30,6 +30,14 @@ const LocalTypeGraphMarker = "\x00local-type-graph/v1\x00"
 // type graph this analysis did not anticipate. Exceeding it panics rather than
 // truncating, because a truncated key would silently merge two distinct
 // functions — the one outcome worse than a refused analysis.
+//
+// It is charged inside id(), i.e. DURING the traversal — before the encoder knows
+// whether any function-local declaration was reachable. So a type graph over the
+// budget is refused even when it carries no local declaration and would have
+// emitted no suffix at all. That surface is wider than the suffix it guards, and
+// it is disclosed in the design's "Byte budget" rule rather than left to be
+// discovered: narrowing it would mean completing a >1 MiB traversal only to throw
+// the result away. A loud abstain, never a merge.
 const localTypeGraphBudget = 1 << 20
 
 // HasLocalTypeGraph reports whether a discriminator carries the positional

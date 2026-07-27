@@ -1091,6 +1091,13 @@ func TestLocalTypeGraphEncodesSharedDAGInBoundedSize(t *testing.T) {
 // panic with a deterministic diagnostic and never truncate: a truncated key would
 // silently merge two distinct functions, which is the one outcome worse than a
 // refused analysis.
+//
+// The root here carries NO function-local declaration — every field is a basic
+// int — so this also pins the budget's DISCLOSED wider surface: it is charged
+// during the traversal, so a graph over the budget is refused even though it
+// would have emitted no suffix and returned the prefix unchanged. The first
+// assertion below is what keeps that half honest; see the "Byte budget" rule in
+// the design.
 func TestLocalTypeGraphFailsClosedOverBudget(t *testing.T) {
 	fn := identityTestFunction(t)
 	fields := make([]*types.Var, 0, 3000)
@@ -1099,6 +1106,13 @@ func TestLocalTypeGraphFailsClosedOverBudget(t *testing.T) {
 		fields = append(fields, types.NewVar(token.NoPos, effectivePkg(fn), name+strconv.Itoa(i), types.Typ[types.Int]))
 	}
 	root := types.NewStruct(fields, nil)
+
+	// A one-field prefix of the same shape stays under the budget and proves the
+	// shape is suffix-less: no local declaration is reachable through it.
+	small := types.NewStruct(fields[:1], nil)
+	if got := localTypeGraph(fn, []types.Type{small}); got != "" {
+		t.Fatalf("the budget fixture reaches a function-local declaration (%q); it can no longer pin the suffix-less surface", got)
+	}
 
 	want := fmt.Sprintf(
 		"features: local type graph for %q exceeds the %d-byte budget",
