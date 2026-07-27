@@ -68,7 +68,45 @@ var (
 	witnessBuildDir   string
 	witnessBinaryPath string
 	witnessBuildErr   error
+
+	keyDumpBuildOnce sync.Once
+	keyDumpPath      string
+	keyDumpBuildErr  error
 )
+
+// keyDumpBinary compiles THIS test package to a standalone binary once per run
+// and returns its path. The determinism test execs it 20 times per subject in
+// discriminator-dump mode (see keyDumpEnv).
+//
+// It is compiled with `go test -c`, i.e. WITHOUT whatever flags the outer run
+// carries, deliberately: `make verify` runs `go test -race ./...`, and a
+// race-instrumented child is roughly eight times slower per analysis, which put
+// this package within sight of the 10-minute per-package timeout on a slower
+// machine. The child's job is to re-run the loader -> SSA -> discriminator
+// pipeline in a fresh process; the race detector adds nothing to that and only
+// buys a timeout risk. os.Executable() would have been shorter and is what this
+// must not use.
+func keyDumpBinary(t *testing.T) string {
+	t.Helper()
+	keyDumpBuildOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "flowmap-keydump")
+		if err != nil {
+			keyDumpBuildErr = err
+			return
+		}
+		keyDumpPath = filepath.Join(dir, "keydump")
+		_, file, _, _ := runtime.Caller(0)
+		cmd := exec.Command("go", "test", "-c", "-o", keyDumpPath, ".")
+		cmd.Dir = filepath.Dir(file)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			keyDumpBuildErr = fmt.Errorf("go test -c ./cmd/flowmap: %v\n%s", err, out)
+		}
+	})
+	if keyDumpBuildErr != nil {
+		t.Fatalf("build discriminator dumper: %v", keyDumpBuildErr)
+	}
+	return keyDumpPath
+}
 
 // keyDumpEnv puts this test binary into discriminator-dump mode instead of
 // running tests: it analyzes the named service directory and prints the sorted
@@ -89,6 +127,9 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	if witnessBuildDir != "" {
 		_ = os.RemoveAll(witnessBuildDir)
+	}
+	if keyDumpPath != "" {
+		_ = os.RemoveAll(filepath.Dir(keyDumpPath))
 	}
 	os.Exit(code)
 }
@@ -427,17 +468,13 @@ func TestLocalGenericIdentityDeterministicAcrossProcesses(t *testing.T) {
 // forever and prove nothing about the encoding.
 const localTypeGraphMarkerText = `\x00local-type-graph/v1\x00`
 
-// discriminatorKeys re-executes THIS test binary in discriminator-dump mode over
-// dir and returns the sorted (FQN, discriminator) multiset it printed. A separate
-// process is the whole point: the risk being policed is variance between two
-// independent loader -> SSA builds, which no in-process repetition can reach.
+// discriminatorKeys runs the dump binary over dir and returns the sorted
+// (FQN, discriminator) multiset it printed. A separate process is the whole
+// point: the risk being policed is variance between two independent
+// loader -> SSA builds, which no in-process repetition can reach.
 func discriminatorKeys(t *testing.T, dir string) string {
 	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatalf("locate test binary: %v", err)
-	}
-	cmd := exec.Command(self)
+	cmd := exec.Command(keyDumpBinary(t))
 	// GOWORK=off because the witnesses are standalone service modules, not
 	// workspace members — the same environment graphServiceDir uses.
 	cmd.Env = append(os.Environ(), "GOWORK=off", keyDumpEnv+"="+dir)
