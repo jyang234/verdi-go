@@ -12,11 +12,8 @@
 package features
 
 import (
-	"fmt"
 	"go/types"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -278,19 +275,36 @@ func EffectivePkgPath(fn *ssa.Function) string {
 
 // InstanceDiscriminator returns a run-independent secondary sort key that
 // distinguishes functions sharing a RelString display FQN — chiefly generic
-// INSTANCES, whose display name is documented non-unique. Its effective-package
-// and type-string prefix is compatibility-sensitive: package-only arguments stay
-// byte-identical. Function-local declarations add a sorted, framed physical-site
-// suffix so same-rendering local types remain distinct across checkout roots and
-// //line directives. Unknown or invalid local identity inputs fail closed by
-// panicking rather than emitting a plausible but untrustworthy key. Empty for a
-// non-instance, whose FQN is already unique.
+// INSTANCES, whose display name is documented non-unique, and promoted-method
+// wrappers over function-local receivers. Its effective-package and type-string
+// prefix is compatibility-sensitive: package-only arguments stay byte-identical.
+// A reachable function-local declaration appends the framed, positional
+// local-type-graph/v1 serialization (see localTypeGraph), so same-rendering local
+// types remain distinct across checkout roots and //line directives. Unknown or
+// invalid local identity inputs fail closed by panicking rather than emitting a
+// plausible but untrustworthy key. Empty for a function whose FQN is already
+// unique.
+//
+// It separates every collision class the vocabulary of declaration position and
+// type structure can decide, and ONE class survives it: two instances produced
+// from one function-local declaration inside a generic function, structurally
+// identical in both. That class is refused, not merged, at callgraph.finalize —
+// see "Residual undecided classes" in the design.
 func InstanceDiscriminator(fn *ssa.Function) string {
 	if fn == nil {
 		return ""
 	}
+	roots := discriminatorRoots(fn)
+	if len(roots) == 0 {
+		return ""
+	}
 	targs := fn.TypeArgs()
-	if len(targs) == 0 {
+	suffix := localTypeGraph(fn, roots)
+	// A method that is not a generic instance had an empty discriminator before
+	// the receiver joined the root set, and keeps it unless its receiver actually
+	// reaches a function-local declaration. Only wrappers over local receivers
+	// change, and only from "" to something.
+	if len(targs) == 0 && suffix == "" {
 		return ""
 	}
 	var b strings.Builder
@@ -299,151 +313,8 @@ func InstanceDiscriminator(fn *ssa.Function) string {
 		b.WriteByte('\x00')
 		b.WriteString(types.TypeString(t, nil))
 	}
-	sites := localDeclaredTypeSites(fn, targs)
-	if len(sites) == 0 {
-		return b.String()
-	}
-	b.WriteString("\x00local-sites/v1")
-	for _, site := range sites {
-		b.WriteByte('\x00')
-		b.WriteString(strconv.Itoa(len(site)))
-		b.WriteByte(':')
-		b.WriteString(site)
-	}
+	b.WriteString(suffix)
 	return b.String()
-}
-
-// localDeclaredTypeSites returns the sorted, deduplicated physical declaration
-// sites of function-local named and alias types reachable from roots. A type's
-// display string does not carry this identity, so incomplete position data is not
-// safe to render as a canonical key and must fail closed.
-func localDeclaredTypeSites(fn *ssa.Function, roots []types.Type) []string {
-	if fn == nil || fn.Prog == nil || fn.Prog.Fset == nil {
-		panic("features: local type identity requires an SSA file set")
-	}
-	seenTypes := make(map[types.Type]bool)
-	seenSites := make(map[string]bool)
-
-	addObject := func(obj *types.TypeName) {
-		if obj == nil || obj.Pkg() == nil || obj.Parent() == nil ||
-			obj.Parent() == obj.Pkg().Scope() {
-			return
-		}
-		file := fn.Prog.Fset.File(obj.Pos())
-		if file == nil {
-			panic(fmt.Sprintf(
-				"features: no physical token file for local type %q",
-				obj.Name(),
-			))
-		}
-		pos := int(obj.Pos())
-		if pos < file.Base() || pos > file.Base()+file.Size() {
-			panic(fmt.Sprintf(
-				"features: invalid physical position for local type %q",
-				obj.Name(),
-			))
-		}
-		offset := file.Offset(obj.Pos())
-		seenSites[filepath.Base(file.Name())+":"+strconv.Itoa(offset)] = true
-	}
-
-	var walk func(types.Type)
-	walkTuple := func(tuple *types.Tuple) {
-		if tuple == nil {
-			return
-		}
-		for i := 0; i < tuple.Len(); i++ {
-			walk(tuple.At(i).Type())
-		}
-	}
-	walkTypeParams := func(list *types.TypeParamList) {
-		if list == nil {
-			return
-		}
-		for i := 0; i < list.Len(); i++ {
-			walk(list.At(i))
-		}
-	}
-	walk = func(t types.Type) {
-		if t == nil || seenTypes[t] {
-			return
-		}
-		seenTypes[t] = true
-		switch x := t.(type) {
-		case *types.Basic:
-		case *types.Alias:
-			addObject(x.Obj())
-			walkTypeParams(x.TypeParams())
-			if args := x.TypeArgs(); args != nil {
-				for i := 0; i < args.Len(); i++ {
-					walk(args.At(i))
-				}
-			}
-			walk(x.Rhs())
-		case *types.Array:
-			walk(x.Elem())
-		case *types.Chan:
-			walk(x.Elem())
-		case *types.Interface:
-			for i := 0; i < x.NumExplicitMethods(); i++ {
-				walk(x.ExplicitMethod(i).Type())
-			}
-			for i := 0; i < x.NumEmbeddeds(); i++ {
-				walk(x.EmbeddedType(i))
-			}
-		case *types.Map:
-			walk(x.Key())
-			walk(x.Elem())
-		case *types.Named:
-			addObject(x.Obj())
-			walkTypeParams(x.TypeParams())
-			if args := x.TypeArgs(); args != nil {
-				for i := 0; i < args.Len(); i++ {
-					walk(args.At(i))
-				}
-			}
-			walk(x.Underlying())
-		case *types.Pointer:
-			walk(x.Elem())
-		case *types.Signature:
-			if x.Recv() != nil {
-				walk(x.Recv().Type())
-			}
-			walkTypeParams(x.RecvTypeParams())
-			walkTypeParams(x.TypeParams())
-			walkTuple(x.Params())
-			walkTuple(x.Results())
-		case *types.Slice:
-			walk(x.Elem())
-		case *types.Struct:
-			for i := 0; i < x.NumFields(); i++ {
-				walk(x.Field(i).Type())
-			}
-		case *types.Tuple:
-			walkTuple(x)
-		case *types.TypeParam:
-			walk(x.Constraint())
-		case *types.Union:
-			for i := 0; i < x.Len(); i++ {
-				walk(x.Term(i).Type())
-			}
-		default:
-			panic(fmt.Sprintf(
-				"features: unsupported go/types implementation %T in local type identity",
-				t,
-			))
-		}
-	}
-
-	for _, root := range roots {
-		walk(root)
-	}
-	sites := make([]string, 0, len(seenSites))
-	for site := range seenSites {
-		sites = append(sites, site)
-	}
-	sort.Strings(sites)
-	return sites
 }
 
 func effectivePkg(fn *ssa.Function) *types.Package {

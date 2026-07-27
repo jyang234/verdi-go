@@ -252,10 +252,22 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // finalize sorts nodes and each node's edges into canonical order. The node sort
 // tie-breaks on features.InstanceDiscriminator because a generic instance's FQN
 // (fn.RelString) is documented non-unique: an FQN-only comparator over the
-// map-iteration-ordered node set is nondeterministic on such a tie (M-20). Two known
-// collision classes are resolved upstream: byte-identical $bound/$thunk wrappers are
-// merged by mergeKey, while generic instances whose type strings lose local lexical
-// scope are separated by their physical declaration sites (features' local-sites/v1).
+// map-iteration-ordered node set is nondeterministic on such a tie (M-20). These
+// collision classes are resolved upstream:
+//
+//   - byte-identical $bound/$thunk wrappers, merged by mergeKey;
+//   - generic instances whose type strings lose local lexical scope, separated by
+//     the positional local-type-graph/v1 serialization;
+//   - local declarations inside generic functions, whose TypeName has a nil
+//     Parent() after instantiation;
+//   - offset-aligned local declarations in same-basename files of DIFFERENT
+//     packages, separated by the package path carried in each named node;
+//   - promoted-method wrappers over function-local receivers, separated by the
+//     same serialization applied to the receiver.
+//
+// One class is NOT resolved and is not claimed to be: two instances produced from
+// one function-local declaration inside a generic function, structurally
+// identical in both. See panicOnDuplicateSortKey.
 //
 // A surviving duplicate must panic rather than emit a run-varying order. The guard is
 // panicOnDuplicateSortKey, run AFTER the sort over adjacent nodes — deliberately not
@@ -290,23 +302,26 @@ func (g *Graph) finalize() {
 // group is caught whenever it should be, though not necessarily on the pair a reader of
 // the diagnostic first suspects. The caller is finalize, immediately after its sort.
 //
-// A surviving duplicate is NOT necessarily a producer bug. InstanceDiscriminator is
-// known incomplete, and the residual classes below are DEFERRED: separating them needs
-// a local-sites/v2 framing, and the v1 design is frozen. If you are reading this
-// because the panic fired, suspect one of:
+// A surviving duplicate is NOT necessarily a producer bug. InstanceDiscriminator
+// separates every collision class the vocabulary of declaration position and type
+// structure can decide, and exactly ONE class survives it:
 //
-//	(a) Role/position. The site set is pooled and position-blind, so one instantiation
-//	    is indistinguishable from another that uses the same local types in swapped
-//	    roles — pair[A, B] and pair[B, A] share a key.
-//	(b) Local types declared inside a GENERIC function. An instantiated local
-//	    *types.TypeName has a nil Parent(), so the obj.Parent() != nil arm of the
-//	    local-ness predicate misclassifies it as package scope and it contributes no
-//	    site at all.
-//	(c) Promoted-method wrappers over function-local types, which carry no type
-//	    arguments and therefore get an empty discriminator.
+//	A generic function that declares a function-local type, instantiated more than
+//	once, where the local's structure does NOT vary with the type parameter. All
+//	instantiations share one syntactic declaration, hence one source position; and
+//	`type L struct{ A int }` is byte-identical structure in every instantiation. No
+//	refinement of position or structure can decide it.
 //
-// Each is a valid Go program the analysis refuses rather than orders by map iteration:
-// a loud abstain, never a run-varying "canonical" order (CLAUDE.md tenets 1 and 2).
+// That class is refused, not merged. Merging would delete one of two distinct
+// *ssa.Function and its out-edges from the graph, and every absence proof
+// downstream — PROVEN, NO-FLOW, NEVER, "no path", "covered" — would then cover a
+// function the analysis never examined: a SILENT false PROVEN, the worst outcome
+// under CLAUDE.md tenet 4. A panic is a refused analysis; a merge is a wrong
+// answer that looks right. Do not soften this into a merge as a convenience.
+//
+// A duplicate whose discriminator carries the local-type-graph suffix is diagnosed
+// as that disclosed class; one WITHOUT the suffix is an unknown class and keeps
+// the generic wording, because the diagnosis cannot be proven for it.
 func panicOnDuplicateSortKey(nodes []*Node) {
 	for i := 1; i < len(nodes); i++ {
 		prev, cur := nodes[i-1], nodes[i]
@@ -315,10 +330,66 @@ func panicOnDuplicateSortKey(nodes []*Node) {
 		}
 		key := features.InstanceDiscriminator(prev.Func)
 		if key == features.InstanceDiscriminator(cur.Func) {
-			panic(fmt.Sprintf("callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically", prev.FQN, key))
+			panic(duplicateSortKeyDiagnostic(prev.FQN, key, prev.Func))
 		}
 	}
 }
+
+// duplicateSortKeyDiagnostic renders the refusal. A refusal in the disclosed
+// residual class is a user-facing failure on a VALID Go program, so it must say
+// what was refused, WHY, that this is a disclosed limit rather than a crash, and
+// what the user can change. It is deterministic: no pointer values, no map-ordered
+// content, no wall clock — the named declaration is the first @site-bearing node
+// of the shared discriminator, in node-id order.
+//
+// The disclosed wording is used only when the discriminator carries the
+// local-type-graph suffix AND a local declaration can be named. Anything else gets
+// the generic wording: asserting the diagnosis on a key that does not carry its
+// signature would be laundering a guess into a claim.
+func duplicateSortKeyDiagnostic(fqn, key string, fn *ssa.Function) string {
+	name, site, ok := features.FirstLocalDeclaration(fn)
+	if !ok || !features.HasLocalTypeGraph(key) {
+		return fmt.Sprintf(
+			"callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically",
+			fqn, key,
+		)
+	}
+	return fmt.Sprintf(residualCollisionDiagnostic, fqn, name, site, fqn, key)
+}
+
+// residualCollisionDiagnostic is the exact text ratified in "Residual undecided
+// classes" of the design. Its %s/%q verbs are, in order: FQN, local type name,
+// site, FQN, discriminator. Rewording it is a spec change, not an edit.
+const residualCollisionDiagnostic = `callgraph: refusing to order two distinct instances of
+    %s
+
+WHY: both instances were produced from ONE declaration of the function-local
+type %q at %s, inside a generic function that this program instantiates more
+than once. One declaration means one source position, and in these two
+instantiations the type also has identical structure — so neither position nor
+structure can tell the instances apart. flowmap will not invent an order it
+cannot derive from the source: a run-varying "canonical" order would silently
+change every downstream verdict, snapshot, and gate.
+
+This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash
+and not a defect in your program. See "Residual undecided classes" in
+docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+
+WHAT YOU CAN DO — any one of:
+  * give the local type a structure that depends on the enclosing type
+    parameter, so the instantiations differ:
+        type L struct{ A int }        // indistinguishable
+        type L struct{ A int; _ X }   // distinguishable — mentions X
+  * move the type declaration out of the generic function (package scope, or a
+    non-generic helper called from it);
+  * instantiate the enclosing generic function only once.
+
+If your program does not match that shape, this is an UNKNOWN collision class,
+not the disclosed one — please report it with this message; the correct fix is a
+further refinement of the key, never a merge.
+
+sort key:      %s
+discriminator: %q`
 
 // edgeLess orders edges by callee then caller then call-site position, a total
 // order over the de-duplicated edge set.

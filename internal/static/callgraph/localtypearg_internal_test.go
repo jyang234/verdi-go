@@ -32,19 +32,20 @@ func buildLocalTypeCallGraph(t *testing.T) []*ssa.Function {
 	return buildCallGraphRoots(t, collidingLocalTypeArgsSrc)
 }
 
-// swappedLocalTypeArgsSrc reproduces a residual collision class the
-// local-sites/v1 discriminator cannot separate: the pooled site set is
-// position-blind, so pair[A, B] and pair[B, A] over the same two local types
-// share both the display FQN and the discriminator. The local `result` inside
-// the generic `first` additionally contributes no site at all (an instantiated
-// local TypeName has a nil Parent), so both instances reduce to the same single
-// site. It exists to prove finalize's duplicate-key guard fires on EVERY run.
-const swappedLocalTypeArgsSrc = `package localtypes
-func pair[A any, B any]() {}
-func swap[A any, B any]() { pair[A, B](); pair[B, A]() }
-func first[X any]() { type result struct{ N int }; swap[result, X]() }
-func second() { type result struct{ N int }; first[result]() }
-func main() { second() }
+// residualLocalTypeArgsSrc reproduces the ONE collision class the discriminator
+// is not claimed to separate: `gen` declares ONE function-local type and is
+// instantiated twice, and L's structure does not mention X — so both sink[L]
+// instances come from one source position with byte-identical structure. Neither
+// position nor structure can decide them, and no refinement of either will.
+//
+// The swapped-role shape this fixture replaced (pair[A, B] versus pair[B, A] over
+// two local types) is now SEPARATED by the positional encoding, so it can no
+// longer prove the guard fires. This one exists to prove finalize's duplicate-key
+// guard fires on EVERY run, and to pin the disclosed diagnostic.
+const residualLocalTypeArgsSrc = `package localtypes
+func sink[T any](v T) {}
+func gen[X any](x X) { type L struct{ A int }; sink(L{}) }
+func main() { gen(1); gen("s") }
 `
 
 // buildCallGraphRoots returns the main and init roots for src.
@@ -86,17 +87,17 @@ func buildCallGraphRoots(t *testing.T, src string) []*ssa.Function {
 // order alone.
 func TestFinalizePanicsOnEverySurvivingKeyCollision(t *testing.T) {
 	for run := 0; run < 5; run++ {
-		roots := buildCallGraphRoots(t, swappedLocalTypeArgsSrc)
+		roots := buildCallGraphRoots(t, residualLocalTypeArgsSrc)
 		raw := rta.Analyze(roots, true).CallGraph
 
 		var colliding []*ssa.Function
 		for fn := range raw.Nodes {
-			if fn != nil && strings.Contains(fn.RelString(nil), ".pair[") {
+			if fn != nil && strings.Contains(fn.RelString(nil), ".sink[") {
 				colliding = append(colliding, fn)
 			}
 		}
 		if len(colliding) != 2 {
-			t.Fatalf("run %d: raw graph has %d pair instances; want 2", run, len(colliding))
+			t.Fatalf("run %d: raw graph has %d sink instances; want 2", run, len(colliding))
 		}
 		if colliding[0].RelString(nil) != colliding[1].RelString(nil) {
 			t.Fatalf("run %d: fixture did not reproduce the display FQN collision: %q and %q",
@@ -117,17 +118,17 @@ func TestFinalizePanicsOnEverySurvivingKeyCollision(t *testing.T) {
 // run, so a group of two lands adjacent) rather
 // than from the undocumented question of which pairs the comparator happens to visit.
 func TestPanicOnDuplicateSortKeyScansSortedNodes(t *testing.T) {
-	roots := buildCallGraphRoots(t, swappedLocalTypeArgsSrc)
+	roots := buildCallGraphRoots(t, residualLocalTypeArgsSrc)
 	raw := rta.Analyze(roots, true).CallGraph
 
 	var colliding []*ssa.Function
 	for fn := range raw.Nodes {
-		if fn != nil && strings.Contains(fn.RelString(nil), ".pair[") {
+		if fn != nil && strings.Contains(fn.RelString(nil), ".sink[") {
 			colliding = append(colliding, fn)
 		}
 	}
 	if len(colliding) != 2 {
-		t.Fatalf("raw graph has %d pair instances; want 2", len(colliding))
+		t.Fatalf("raw graph has %d sink instances; want 2", len(colliding))
 	}
 	nodes := []*Node{
 		{FQN: colliding[0].RelString(nil), Func: colliding[0]},
@@ -151,29 +152,27 @@ func TestPanicOnDuplicateSortKeyScansSortedNodes(t *testing.T) {
 		if got == nil {
 			t.Fatal("panicOnDuplicateSortKey accepted two distinct functions with one sort key")
 		}
-		if message := fmt.Sprint(got); !strings.Contains(message, "share sort key") {
-			t.Fatalf("panic = %q, want the duplicate sort-key diagnostic", message)
-		}
+		assertResidualDiagnostic(t, fmt.Sprint(got))
 	}()
 	panicOnDuplicateSortKey(nodes)
 }
 
-// collidingSortKeyPair returns the two DISTINCT *ssa.Functions of swappedLocalTypeArgsSrc
+// collidingSortKeyPair returns the two DISTINCT *ssa.Functions of residualLocalTypeArgsSrc
 // that share one (FQN, InstanceDiscriminator) sort key, failing if the fixture stops
 // reproducing the collision the guard exists for.
 func collidingSortKeyPair(t *testing.T) (*ssa.Function, *ssa.Function) {
 	t.Helper()
-	roots := buildCallGraphRoots(t, swappedLocalTypeArgsSrc)
+	roots := buildCallGraphRoots(t, residualLocalTypeArgsSrc)
 	raw := rta.Analyze(roots, true).CallGraph
 
 	var colliding []*ssa.Function
 	for fn := range raw.Nodes {
-		if fn != nil && strings.Contains(fn.RelString(nil), ".pair[") {
+		if fn != nil && strings.Contains(fn.RelString(nil), ".sink[") {
 			colliding = append(colliding, fn)
 		}
 	}
 	if len(colliding) != 2 {
-		t.Fatalf("raw graph has %d pair instances; want 2", len(colliding))
+		t.Fatalf("raw graph has %d sink instances; want 2", len(colliding))
 	}
 	if colliding[0].RelString(nil) != colliding[1].RelString(nil) ||
 		features.InstanceDiscriminator(colliding[0]) != features.InstanceDiscriminator(colliding[1]) {
@@ -245,9 +244,7 @@ func TestPanicOnDuplicateSortKeyScansDuplicateGroups(t *testing.T) {
 				if got == nil {
 					t.Fatal("panicOnDuplicateSortKey accepted a group of three holding two distinct functions")
 				}
-				if message := fmt.Sprint(got); !strings.Contains(message, "share sort key") {
-					t.Fatalf("panic = %q, want the duplicate sort-key diagnostic", message)
-				}
+				assertResidualDiagnostic(t, fmt.Sprint(got))
 			}()
 			panicOnDuplicateSortKey(test.nodes)
 		})
@@ -322,9 +319,7 @@ func assertFinalizeCollisionPanic(t *testing.T, run int, raw *xcg.Graph) {
 		if got == nil {
 			t.Fatalf("run %d: fromX returned without panicking on a duplicate sort key", run)
 		}
-		if message := fmt.Sprint(got); !strings.Contains(message, "share sort key") {
-			t.Fatalf("run %d: panic = %q, want the duplicate sort-key diagnostic", run, message)
-		}
+		assertResidualDiagnostic(t, fmt.Sprint(got))
 	}()
 	fromX(raw, AlgoRTA, nil)
 }
@@ -378,5 +373,80 @@ func TestFromXKeepsCollidingDisplayGenericInstances(t *testing.T) {
 		if strings.Join(keys, "\n") != strings.Join(wantKeys, "\n") {
 			t.Fatalf("construction %d instance order = %q, want %q", construction, keys, wantKeys)
 		}
+	}
+}
+
+// assertResidualDiagnostic requires the DISCLOSED residual wording, not merely
+// "something panicked". A refusal here lands on a VALID Go program, so the
+// message is the only thing standing between a user and the conclusion that the
+// tool is broken: it must name the refused FQN, name the single declaration both
+// instances were produced from, say plainly that this is a disclosed limit rather
+// than a crash, and list what the user can change.
+//
+// It also requires the generic unknown-class wording to be ABSENT: falling back
+// to "share sort key" here would mean the guard stopped recognizing the class it
+// documents.
+func assertResidualDiagnostic(t *testing.T, message string) {
+	t.Helper()
+	for _, want := range []string{
+		"callgraph: refusing to order two distinct instances of\n    example.com/localtypes.sink[example.com/localtypes.L]",
+		"WHY: both instances were produced from ONE declaration of the function-local\ntype \"L\" at local.go:",
+		"This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash",
+		"WHAT YOU CAN DO — any one of:",
+		"give the local type a structure that depends on the enclosing type",
+		"move the type declaration out of the generic function",
+		"instantiate the enclosing generic function only once",
+		"this is an UNKNOWN collision class,\nnot the disclosed one",
+		"sort key:      example.com/localtypes.sink[example.com/localtypes.L]",
+		"discriminator: ",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("residual diagnostic is missing %q\n--- got ---\n%s", want, message)
+		}
+	}
+	if strings.Contains(message, "share sort key") {
+		t.Errorf("residual collision fell back to the unknown-class wording:\n%s", message)
+	}
+	// The discriminator is rendered with %q, so its NUL frames appear escaped; the
+	// marker is matched in that escaped form rather than as raw bytes.
+	if !strings.Contains(message, `local-type-graph/v1`) {
+		t.Errorf("residual diagnostic does not quote the colliding discriminator:\n%s", message)
+	}
+}
+
+// TestResidualDiagnosticFillsPlaceholdersInOrder pins the ratified placeholder
+// ORDER — FQN, local type name, site, FQN, discriminator — which a substring
+// check alone cannot catch: swapping the name and the site, or the two FQN slots,
+// still leaves every phrase present.
+func TestResidualDiagnosticFillsPlaceholdersInOrder(t *testing.T) {
+	left, _ := collidingSortKeyPair(t)
+	fqn := left.RelString(nil)
+	key := features.InstanceDiscriminator(left)
+	name, site, ok := features.FirstLocalDeclaration(left)
+	if !ok {
+		t.Fatal("fixture instance carries no function-local declaration")
+	}
+	if name != "L" || !strings.HasPrefix(site, "local.go:") {
+		t.Fatalf("first local declaration = %q at %q, want L at local.go:<offset>", name, site)
+	}
+
+	want := fmt.Sprintf(residualCollisionDiagnostic, fqn, name, site, fqn, key)
+	if got := duplicateSortKeyDiagnostic(fqn, key, left); got != want {
+		t.Fatalf("duplicateSortKeyDiagnostic() =\n%s\n\nwant\n%s", got, want)
+	}
+}
+
+// TestDuplicateSortKeyDiagnosticKeepsUnknownClassWording is the negative path: a
+// surviving duplicate whose discriminator does NOT carry the local-type-graph
+// suffix is a DIFFERENT, unknown class. Diagnosing it as the disclosed residual
+// would assert a diagnosis the key cannot support.
+func TestDuplicateSortKeyDiagnosticKeepsUnknownClassWording(t *testing.T) {
+	left, _ := collidingSortKeyPair(t)
+	got := duplicateSortKeyDiagnostic("example.com/localtypes.opaque", "", left)
+	if !strings.Contains(got, "share sort key") {
+		t.Errorf("suffix-less duplicate = %q, want the unknown-class wording", got)
+	}
+	if strings.Contains(got, "DISCLOSED LIMIT") {
+		t.Errorf("suffix-less duplicate claims the disclosed residual class: %q", got)
 	}
 }
