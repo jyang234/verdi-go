@@ -261,6 +261,15 @@ func TestAssertJSONCommandContract(t *testing.T) {
 // TestAssertJSONCanonicalAcrossWholeGraphPermutations pins the command boundary:
 // each graph collection may arrive in a different order, but no single
 // collection's order may alter the machine report for the same claims order.
+//
+// BLIND SPOTS AND OBLIGATIONS ARE DELIBERATELY ABSENT from the list. This test's
+// claims file carries only edge, node, and entrypoint claims, none of which
+// consults `blind_spots[]` or `obligations[]` — deleting either collection
+// outright leaves these report bytes identical, so a permutation subtest for
+// them here would assert nothing. Both are covered by
+// TestAssertRichCanonicalAcrossWholeGraphPermutations, whose claims file has an
+// absence claim over a blind frontier and two obligation claims. (That test
+// carries the reciprocal note about entrypoints.)
 func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 	dir := t.TempDir()
 	claimsPath := filepath.Join(dir, "claims.json")
@@ -306,8 +315,6 @@ func TestAssertJSONCanonicalAcrossWholeGraphPermutations(t *testing.T) {
 	}{
 		{name: "nodes", graph: graphWithPermutedNodes(base)},
 		{name: "edges", graph: graphWithPermutedEdges(base)},
-		{name: "blind spots", graph: graphWithPermutedBlindSpots(base)},
-		{name: "obligations", graph: graphWithPermutedObligations(base)},
 		{name: "entrypoints", graph: graphWithPermutedEntrypoints(base)},
 		{name: "caveats", graph: graphWithPermutedCaveats(base)},
 	} {
@@ -457,6 +464,12 @@ func TestAssertStampCommandContract(t *testing.T) {
 		t.Fatalf("matching --expect report = %q", got)
 	}
 
+	// Each refusal is pinned in BOTH output modes. JSON mode matters on its own:
+	// a machine consumer that received partial or empty-but-present bytes could
+	// decode a report the command never stood behind, so the spec's no-partial-
+	// report rule requires exactly zero bytes on stdout. The exit class is pinned
+	// the way run() computes it (main.go: a verdictError exits 1, anything else
+	// exits 2) — a stamp refusal is operational, never a verdict.
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -465,6 +478,9 @@ func TestAssertStampCommandContract(t *testing.T) {
 		{name: "mismatched expect", args: []string{"assert", stamped, claimsPath, "--expect", "sha-bad"}},
 		{name: "missing graph stamp", args: []string{"assert", graphPath, claimsPath, "--expect", "sha-good"}},
 		{name: "require stamp", args: []string{"assert", graphPath, claimsPath}, set: true},
+		{name: "mismatched expect JSON", args: []string{"assert", stamped, claimsPath, "--expect", "sha-bad", "--json"}},
+		{name: "missing graph stamp JSON", args: []string{"assert", graphPath, claimsPath, "--expect", "sha-good", "--json"}},
+		{name: "require stamp JSON", args: []string{"assert", graphPath, claimsPath, "--json"}, set: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.set {
@@ -477,12 +493,67 @@ func TestAssertStampCommandContract(t *testing.T) {
 			}
 			var verdict verdictError
 			if errors.As(err, &verdict) {
-				t.Fatalf("run error = %v, want operational error", err)
+				t.Fatalf("run error = %v, want operational error (exit 2), not a verdict (exit 1)", err)
 			}
 			if out != "" {
 				t.Fatalf("stdout = %q, want no report", out)
 			}
 		})
+	}
+
+	// Repeating --expect is last-wins: takeValueFlag removes every occurrence and
+	// keeps the last value (main.go's documented singular-flag contract, applied
+	// identically by every verb). Pinned here so the shared helper's behavior is
+	// visible at the one command where a silently-dropped stamp would bind a
+	// report to the wrong code.
+	t.Run("repeated expect is last-wins", func(t *testing.T) {
+		var err error
+		out := captureStdout(t, func() {
+			err = run([]string{"assert", stamped, claimsPath, "--expect", "sha-bad", "--expect", "sha-good"})
+		})
+		if err != nil {
+			t.Fatalf("last --expect must win: %v", err)
+		}
+		if !strings.Contains(out, "assert: 1 passed, 0 failed, 0 errored") {
+			t.Fatalf("report = %q", out)
+		}
+		out = captureStdout(t, func() {
+			err = run([]string{"assert", stamped, claimsPath, "--expect", "sha-good", "--expect", "sha-bad"})
+		})
+		if err == nil {
+			t.Fatal("run error = nil: the LAST --expect must decide, and sha-bad mismatches")
+		}
+		if out != "" {
+			t.Fatalf("stdout = %q, want no report", out)
+		}
+	})
+}
+
+// TestAssertUnknownFlagIsUsageError pins that an unrecognized flag is refused
+// rather than silently ignored: takeFlag/takeValueFlag leave anything they do
+// not recognize in the positional list, so `--bogus` makes the arity three and
+// the command must print its usage line. The assertion reads the usage message
+// itself — a bare non-nil error would not distinguish "unknown flag rejected"
+// from any other operational failure on the same path.
+func TestAssertUnknownFlagIsUsageError(t *testing.T) {
+	graphPath, writeClaims := assertMachineFiles(t)
+	claimsPath := writeClaims(`{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)
+
+	var err error
+	out := captureStdout(t, func() { err = run([]string{"assert", graphPath, claimsPath, "--bogus"}) })
+	if err == nil {
+		t.Fatal("run error = nil, want a usage error for an unknown flag")
+	}
+	const want = "usage: groundwork assert <graph.json> <claims.json>"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("run error = %q, want it to contain %q", err, want)
+	}
+	var verdict verdictError
+	if errors.As(err, &verdict) {
+		t.Fatalf("run error = %v, want operational error (exit 2), not a verdict (exit 1)", err)
+	}
+	if out != "" {
+		t.Fatalf("stdout = %q, want no report", out)
 	}
 }
 
