@@ -383,25 +383,42 @@ func TestFromXKeepsCollidingDisplayGenericInstances(t *testing.T) {
 // instances were produced from, say plainly that this is a disclosed limit rather
 // than a crash, and list what the user can change.
 //
-// It also requires the generic unknown-class wording to be ABSENT: falling back
-// to "share sort key" here would mean the guard stopped recognizing the class it
-// documents.
+// It also requires two wordings to be ABSENT. Falling back to "share sort key"
+// would mean the guard stopped recognizing the class it documents. Asserting an
+// instantiation count — or offering "instantiate it only once" as a remedy —
+// would mean it started claiming a door it cannot establish.
 func assertResidualDiagnostic(t *testing.T, message string) {
 	t.Helper()
 	for _, want := range []string{
 		"callgraph: refusing to order two distinct instances of\n    example.com/localtypes.sink[example.com/localtypes.L]",
 		"WHY: both instances were produced from ONE declaration of the function-local\ntype \"L\" at local.go:",
 		"This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash",
+		"HOW THE ANALYSIS GOT TWO OF THEM:",
+		"the analyzed set holds its UNINSTANTIATED body",
 		"WHAT YOU CAN DO — any one of:",
 		"give the local type a structure that depends on the enclosing type",
 		"move the type declaration out of the generic function",
-		"instantiate the enclosing generic function only once",
+		"shrink the analyzed set to ONE instance of the enclosing generic body",
 		"this is an UNKNOWN collision class,\nnot the disclosed one",
 		"sort key:      example.com/localtypes.sink[example.com/localtypes.L]",
 		"discriminator: ",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("residual diagnostic is missing %q\n--- got ---\n%s", want, message)
+		}
+	}
+	// Neither door is established at the panic site, so neither may be asserted.
+	// One instantiation is enough to reach this class whenever the analyzed set
+	// also holds the generic's uninstantiated body — under cha always, and under
+	// rta/vta whenever an exported generic is a library unit's root (fixture
+	// n1lib). The retired text claimed the count and offered a remedy that shape
+	// already satisfies.
+	for _, forbidden := range []string{
+		"instantiate the enclosing generic function only once",
+		"this program instantiates more",
+	} {
+		if strings.Contains(message, forbidden) {
+			t.Errorf("residual diagnostic claims %q, which is false for a generic instantiated once:\n%s", forbidden, message)
 		}
 	}
 	if strings.Contains(message, "share sort key") {

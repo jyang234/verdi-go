@@ -22,15 +22,16 @@ import (
 // is a valid Go program that flowmap refused before this design revision, and
 // each pins a DIFFERENT mechanism:
 //
-//	f3a  swapped two-parameter roles over two structurally identical locals
-//	f3b  the same swap collapsed into one type argument via a generic container
-//	f3c  repeated struct roles (struct{X A; Y B; Z A}) — the global-seen-set case
-//	n1   a local declared inside a GENERIC function (nil Parent after instantiation)
-//	n1b  the DECLARED RESIDUAL — must keep failing closed
-//	n1c  a local whose structure varies with the enclosing type parameter
-//	n2   promoted-method wrappers over function-local receivers
-//	f26  two packages, equal file basenames, offset-aligned local declarations
-//	rec  a recursive function-local named type
+//	f3a    swapped two-parameter roles over two structurally identical locals
+//	f3b    the same swap collapsed into one type argument via a generic container
+//	f3c    repeated struct roles (struct{X A; Y B; Z A}) — the global-seen-set case
+//	n1     a local declared inside a GENERIC function (nil Parent after instantiation)
+//	n1b    the DECLARED RESIDUAL — must keep failing closed
+//	n1c    a local whose structure varies with the enclosing type parameter
+//	n1lib  the residual reached with ONE instantiation, under rta and vta
+//	n2     promoted-method wrappers over function-local receivers
+//	f26    two packages, equal file basenames, offset-aligned local declarations
+//	rec    a recursive function-local named type
 //
 // They are driven through the BUILT BINARY in separate processes: the residual
 // refusal is a panic, which an in-process call cannot observe without unwinding
@@ -214,17 +215,29 @@ func TestLocalGenericIdentityWitnessN2Graphs(t *testing.T) {
 // two distinct *ssa.Function were collapsed into one node and every absence proof
 // downstream now covers a function the analysis never examined — a silent false
 // PROVEN, which is strictly worse than the refusal.
+//
+// It asserts the TEXT, not merely the exit code, in both directions: the refusal
+// must carry the disclosed wording, and it must NOT claim an instantiation count.
+// Two of the three subjects here (n1 under cha, n1lib under every algorithm)
+// instantiate their generic exactly once.
 func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 	tests := []struct {
 		name  string
 		algos []string
 		fqn   string
+		file  string
 	}{
-		{name: "n1b", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1b.sink[example.com/n1b.L]"},
-		// The cha sub-case: gen is instantiated ONCE, but the whole-program scope
-		// also analyzes its uninstantiated body, so two distinct sink[L] come from
-		// one declaration with identical structure. Same undecidable class.
-		{name: "n1", algos: []string{"cha"}, fqn: "example.com/n1.sink[example.com/n1.L]"},
+		{name: "n1b", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1b.sink[example.com/n1b.L]", file: "main.go"},
+		// The whole-program sub-case: gen is instantiated ONCE, but cha also
+		// analyzes its uninstantiated body, so two distinct sink[L] come from one
+		// declaration with identical structure. Same undecidable class.
+		{name: "n1", algos: []string{"cha"}, fqn: "example.com/n1.sink[example.com/n1.L]", file: "main.go"},
+		// The same sub-case under rta and vta: a library unit roots at its exported
+		// surface, so an exported generic's uninstantiated body is analyzed
+		// alongside its single instantiation. The uninstantiated-body door is NOT
+		// cha-specific, which is why the diagnostic may not claim an instantiation
+		// count and may not offer "instantiate it only once" as a remedy.
+		{name: "n1lib", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1lib.sink[example.com/n1lib.L]", file: "lib.go"},
 	}
 
 	for _, test := range tests {
@@ -238,16 +251,32 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 					"callgraph: refusing to order two distinct instances of",
 					test.fqn,
 					`ONE declaration of the function-local`,
-					`type "L" at main.go:`,
+					`type "L" at ` + test.file + ":",
 					"This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash",
+					"HOW THE ANALYSIS GOT TWO OF THEM:",
+					"the analyzed set holds its UNINSTANTIATED body",
 					"WHAT YOU CAN DO — any one of:",
 					"move the type declaration out of the generic function",
-					"instantiate the enclosing generic function only once",
+					"shrink the analyzed set to ONE instance of the enclosing generic body",
 					"UNKNOWN collision class",
 					"local-type-graph/v1",
 				} {
 					if !strings.Contains(stderr, want) {
 						t.Errorf("refusal of ./%s under %s is missing %q:\n%s", test.name, algo, want, stderr)
+					}
+				}
+				// The retired wording was written for one sub-case and is FALSE for
+				// the other: n1 under cha and n1lib under every algorithm instantiate
+				// their generic exactly once, so an instantiation count the analyzer
+				// never established must not reappear, and neither may a remedy that
+				// is already satisfied.
+				for _, forbidden := range []string{
+					"instantiate the enclosing generic function only once",
+					"this program instantiates more",
+				} {
+					if strings.Contains(stderr, forbidden) {
+						t.Errorf("refusal of ./%s under %s claims %q, which is false for a generic instantiated once:\n%s",
+							test.name, algo, forbidden, stderr)
 					}
 				}
 				if strings.Contains(stderr, "share sort key") {

@@ -306,11 +306,18 @@ func (g *Graph) finalize() {
 // separates every collision class the vocabulary of declaration position and type
 // structure can decide, and exactly ONE class survives it:
 //
-//	A generic function that declares a function-local type, instantiated more than
-//	once, where the local's structure does NOT vary with the type parameter. All
-//	instantiations share one syntactic declaration, hence one source position; and
-//	`type L struct{ A int }` is byte-identical structure in every instantiation. No
-//	refinement of position or structure can decide it.
+//	A generic function that declares a function-local type whose structure does NOT
+//	vary with the type parameter, reached through TWO analyzed instances of that
+//	one generic body. Every instance shares the one syntactic declaration, hence
+//	one source position; and `type L struct{ A int }` is byte-identical structure
+//	in all of them. No refinement of position or structure can decide it.
+//
+// Two analyzed instances arise EITHER from instantiating the generic more than
+// once OR from analyzing its uninstantiated body alongside a single
+// instantiation — whole-program cha always does the latter, and rta/vta do it
+// too when an exported generic is a library unit's discovered root. The guard
+// cannot tell the two apart (it sees functions and keys, not provenance), and
+// neither can the algorithm, so the diagnostic asserts no instantiation count.
 //
 // That class is refused, not merged. Merging would delete one of two distinct
 // *ssa.Function and its out-edges from the graph, and every absence proof
@@ -360,16 +367,35 @@ func duplicateSortKeyDiagnostic(fqn, key string, fn *ssa.Function) string {
 // residualCollisionDiagnostic is the exact text ratified in "Residual undecided
 // classes" of the design. Its %s/%q verbs are, in order: FQN, local type name,
 // site, FQN, discriminator. Rewording it is a spec change, not an edit.
+//
+// It states NO instantiation count. The class has two doors — a generic
+// instantiated more than once, or an analyzed set holding the generic's
+// uninstantiated body alongside ONE instantiation — and the guard establishes
+// neither: it sees two *ssa.Function with one key, not how they were produced.
+// Nor does the algorithm decide it. Whole-program cha always analyzes
+// uninstantiated bodies, and rta/vta do too whenever an exported generic is a
+// library unit's discovered root (fixture n1lib), so a message tailored on
+// g.Algo would still assert a count that is false. The earlier text claimed
+// "instantiates more than once" and offered "instantiate it only once" as a
+// remedy; both are wrong for a one-instantiation program, and the second reads
+// as the tool being broken to the user who already satisfies it.
 const residualCollisionDiagnostic = `callgraph: refusing to order two distinct instances of
     %s
 
 WHY: both instances were produced from ONE declaration of the function-local
-type %q at %s, inside a generic function that this program instantiates more
-than once. One declaration means one source position, and in these two
-instantiations the type also has identical structure — so neither position nor
-structure can tell the instances apart. flowmap will not invent an order it
-cannot derive from the source: a run-varying "canonical" order would silently
-change every downstream verdict, snapshot, and gate.
+type %q at %s, inside a generic function, and in both the type has identical
+structure. One declaration means one source position, and equal structure means
+equal structure — so neither position nor structure can tell the instances
+apart. flowmap will not invent an order it cannot derive from the source: a
+run-varying "canonical" order would silently change every downstream verdict,
+snapshot, and gate.
+
+HOW THE ANALYSIS GOT TWO OF THEM: either the enclosing generic function is
+instantiated more than once, or the analyzed set holds its UNINSTANTIATED body
+alongside a single instantiation — which is what --algo cha does for the whole
+program, and what root discovery does when an exported generic is a library
+unit's entry point. flowmap does not report which: it refused on the key, and
+the key does not record it.
 
 This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash
 and not a defect in your program. See "Residual undecided classes" in
@@ -377,12 +403,14 @@ docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
 
 WHAT YOU CAN DO — any one of:
   * give the local type a structure that depends on the enclosing type
-    parameter, so the instantiations differ:
+    parameter, so the instances differ:
         type L struct{ A int }        // indistinguishable
         type L struct{ A int; _ X }   // distinguishable — mentions X
   * move the type declaration out of the generic function (package scope, or a
     non-generic helper called from it);
-  * instantiate the enclosing generic function only once.
+  * shrink the analyzed set to ONE instance of the enclosing generic body:
+    instantiate the generic once AND keep its uninstantiated body out of the
+    analysis (see HOW above).
 
 If your program does not match that shape, this is an UNKNOWN collision class,
 not the disclosed one — please report it with this message; the correct fix is a

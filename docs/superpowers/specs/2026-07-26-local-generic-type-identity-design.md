@@ -19,11 +19,13 @@ the goal is restated as **bounded**.
 
 **Goal 1 is bounded, and the bound is this: the discriminator separates every
 collision class *except* structurally-identical function-local types declared
-inside a generic function that the program instantiates more than once.** That
+inside a generic function of which the analysis holds two instances.** That
 class is undecidable by the chosen identity vocabulary — one declaration means one
 position, and equal structure means equal structure — and it is refused loudly
 rather than merged or ordered by map iteration. This is a deliberate, disclosed
-limit, not an oversight and not a deferral.
+limit, not an oversight and not a deferral. Two instances need not mean two
+instantiations: an uninstantiated generic body analyzed alongside one
+instantiation is enough (see "Residual undecided classes").
 
 ## Summary
 
@@ -118,8 +120,10 @@ The spike was removed after recording these conclusions.
    The discriminator separates every class the identity vocabulary of
    *declaration position* and *type structure* can decide. It cannot separate
    **structurally identical function-local types declared inside a generic
-   function that is instantiated more than once**: one syntactic declaration
-   means one position, and equal structure means equal structure. That class
+   function of which the analysis holds two instances**: one syntactic
+   declaration means one position, and equal structure means equal structure.
+   Two instances arise from two instantiations, or from one instantiation
+   analyzed alongside the generic's uninstantiated body. That class
    continues to **fail closed** at `callgraph.finalize` with the diagnostic
    specified in "Residual undecided classes". No claim of totality may be made
    in this document, in code comments, or in commit messages while that class
@@ -456,8 +460,9 @@ Resolved:
 - promoted-method wrappers over function-local receivers, separated by the same
   serialization applied to the receiver.
 
-Residual (see "Residual undecided classes"): two instantiations of one generic
-function whose function-local declaration is structurally identical in both.
+Residual (see "Residual undecided classes"): two analyzed instances of one
+generic function whose function-local declaration is structurally identical in
+both.
 
 `panicOnDuplicateSortKey`'s doc comment must enumerate exactly that single
 residual class; the three deferred classes `(a)`, `(b)`, `(c)` it previously
@@ -538,7 +543,13 @@ keys and *no panic* unless stated:
   terminates and the encoding is finite;
 - the `n1b` residual, asserted to **still panic**, with the diagnostic text of
   "Residual undecided classes"; the test must fail if it ever silently stops
-  panicking.
+  panicking;
+- `n1lib`, a **library** unit whose exported generic is instantiated exactly
+  once, asserted to still panic under `rta`, `vta` **and** `cha` with that same
+  text. It is what keeps the diagnostic honest: any message asserting an
+  instantiation count, or offering "instantiate it only once" as a remedy, is
+  false here under every algorithm, and the test asserts those phrasings are
+  absent.
 
 ### Guard regression
 
@@ -572,31 +583,51 @@ One class survives this revision. It is not deferred for convenience — it is
 undecidable by the chosen identity vocabulary, and it is the reason Goal 1 is
 stated as bounded.
 
-**A generic function that declares a function-local type and is instantiated
-more than once.** All instantiations share one syntactic declaration, hence one
-site. When the local's structure varies with the type parameter
-(`type L struct{ A X }`, witness `n1c`), the structural component separates them.
-When it does not (`type L struct{ A int }`, witness `n1b`), position and
-structure are both identical and no refinement of either can help.
+**A generic function that declares a function-local type, reached through two
+analyzed instances of that one generic body.** Every instance shares one
+syntactic declaration, hence one site. When the local's structure varies with the
+type parameter (`type L struct{ A X }`, witness `n1c`), the structural component
+separates them. When it does not (`type L struct{ A int }`, witness `n1b`),
+position and structure are both identical and no refinement of either can help.
 
-### The `cha` sub-case — same class, one instantiation
+Two analyzed instances arise **either** from instantiating the generic more than
+once (witness `n1b`) **or** from analyzing the generic's own uninstantiated body
+alongside a single instantiation (witnesses `n1` under `cha`, `n1lib` under all
+three algorithms) — see the sub-case below. Nothing available at the refusal
+distinguishes them, so nothing in the diagnostic may assert which occurred.
 
-Under `--algo cha` the analyzed set is the whole program, which includes the
-**uninstantiated** body of every generic function alongside its instantiations.
-`go/ssa` builds `sink[L]` from the uninstantiated body of `gen[X]` *and* from each
-instantiation, and those are distinct `*ssa.Function` produced from the same one
-declaration of `L` with the same structure. So under `cha` the class is reached
-with a generic instantiated only **once** — witness `n1`, which graphs cleanly
-under `rta` and `vta` and is refused under `cha`.
+### The uninstantiated-body sub-case — same class, one instantiation
 
-This is the same undecidable class, reached through a different door, and it is
-refused with the same diagnostic. Two consequences the diagnostic's own text does
-not yet carry, recorded here rather than silently: its "instantiates more than
-once" phrasing under-describes the `cha` case, and its third remediation
-("instantiate the enclosing generic function only once") does not apply there.
-The message's closing escape hatch — report anything that does not match the
-described shape — keeps it honest in the meantime. Correcting the wording is a
-change to ratified text and is left for the next ratification.
+**Blast radius, plainly: under `--algo cha`, ANY program containing
+`func f[X any]() { type L struct{ …no X… }; g(L{}) }` is refused — even when `f`
+is instantiated exactly once, and even when it is never instantiated at all.**
+That is an ordinary Go idiom, not a pathological one, so the refusal is not a
+corner case; it is the price of failing closed, and it is paid by whole-program
+analysis of any unit written that way.
+
+The mechanism: under `cha` the analyzed set is the whole program, which includes
+the **uninstantiated** body of every generic function alongside its
+instantiations. `go/ssa` builds `sink[L]` from the uninstantiated body of `gen[X]`
+*and* from each instantiation, and those are distinct `*ssa.Function` produced
+from the same one declaration of `L` with the same structure. So the class is
+reached with a generic instantiated only **once** — witness `n1`, which graphs
+cleanly under `rta` and `vta` and is refused under `cha`.
+
+**`cha` is not the only door to it.** Root discovery falls back to a unit's
+exported surface when it finds no primary entry point, and an exported *generic*
+function's **uninstantiated** body is one of those roots. A library unit with an
+exported generic is therefore refused under `rta` and `vta` too, with the generic
+instantiated once — witness `n1lib`, refused under all three algorithms. The
+algorithm the caller chose does **not** decide which door was taken.
+
+This is the same undecidable class reached through a different door, and it is
+refused with the same diagnostic. The diagnostic therefore states **no
+instantiation count**: it names both doors, says plainly that flowmap does not
+report which one was taken, and offers no remedy that a one-instantiation program
+already satisfies. Its earlier wording ("…that this program instantiates more than
+once", and the remedy "instantiate the enclosing generic function only once") was
+written for the two-instantiation door alone, was false for this one, and is
+retired.
 
 ### Decision: fail closed
 
@@ -639,6 +670,11 @@ duplicate with **no** suffix is a different, unknown class and keeps the generic
 duplicate-sort-key wording; the message below says so explicitly rather than
 asserting a diagnosis it cannot prove.
 
+It must also state **no instantiation count**, because the refusal establishes
+none: it sees two `*ssa.Function` with one key, not how they were produced. Both
+doors of the class (above) must be named, and no remedy may be offered that a
+one-instantiation program already satisfies.
+
 Exact text (`%s` placeholders in order: FQN, local type name, site, FQN,
 discriminator):
 
@@ -647,12 +683,19 @@ callgraph: refusing to order two distinct instances of
     %s
 
 WHY: both instances were produced from ONE declaration of the function-local
-type %q at %s, inside a generic function that this program instantiates more
-than once. One declaration means one source position, and in these two
-instantiations the type also has identical structure — so neither position nor
-structure can tell the instances apart. flowmap will not invent an order it
-cannot derive from the source: a run-varying "canonical" order would silently
-change every downstream verdict, snapshot, and gate.
+type %q at %s, inside a generic function, and in both the type has identical
+structure. One declaration means one source position, and equal structure means
+equal structure — so neither position nor structure can tell the instances
+apart. flowmap will not invent an order it cannot derive from the source: a
+run-varying "canonical" order would silently change every downstream verdict,
+snapshot, and gate.
+
+HOW THE ANALYSIS GOT TWO OF THEM: either the enclosing generic function is
+instantiated more than once, or the analyzed set holds its UNINSTANTIATED body
+alongside a single instantiation — which is what --algo cha does for the whole
+program, and what root discovery does when an exported generic is a library
+unit's entry point. flowmap does not report which: it refused on the key, and
+the key does not record it.
 
 This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash
 and not a defect in your program. See "Residual undecided classes" in
@@ -660,12 +703,14 @@ docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
 
 WHAT YOU CAN DO — any one of:
   * give the local type a structure that depends on the enclosing type
-    parameter, so the instantiations differ:
+    parameter, so the instances differ:
         type L struct{ A int }        // indistinguishable
         type L struct{ A int; _ X }   // distinguishable — mentions X
   * move the type declaration out of the generic function (package scope, or a
     non-generic helper called from it);
-  * instantiate the enclosing generic function only once.
+  * shrink the analyzed set to ONE instance of the enclosing generic body:
+    instantiate the generic once AND keep its uninstantiated body out of the
+    analysis (see HOW above).
 
 If your program does not match that shape, this is an UNKNOWN collision class,
 not the disclosed one — please report it with this message; the correct fix is a
@@ -702,11 +747,12 @@ determinism guard must never be removed as a rollback mechanism.
 - `make verify` passes.
 - Every witness of the 2026-07-27 revision graphs successfully under `rta`,
   `vta`, and `cha`, except the declared residual (`n1b`), which must still exit
-  non-zero with the specified diagnostic — **and except `n1` under `cha`**, which
-  falls into the same declared residual class through the uninstantiated generic
-  body (see "The `cha` sub-case"). `n1` under `rta` and `vta` must exit 0. This
-  exception is a disclosed unmet criterion, not a relaxation: the shape is
-  undecidable by the ratified vocabulary, and it fails closed.
+  non-zero with the specified diagnostic — **and except `n1` under `cha`, and
+  `n1lib` under all three**, which fall into the same declared residual class
+  through the uninstantiated generic body (see "The uninstantiated-body
+  sub-case"). `n1` under `rta` and `vta` must exit 0. These exceptions are
+  disclosed unmet criteria, not a relaxation: the shape is undecidable by the
+  ratified vocabulary, and it fails closed.
 - The pooled-sorted-deduplicated site set no longer appears anywhere, and the
   string `local-sites/v1` no longer appears in code, tests, or comments.
 - `loader.Tests` is still `false`, or "Physical position" has been revisited.
