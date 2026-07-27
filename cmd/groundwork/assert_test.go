@@ -792,12 +792,13 @@ func richGraph() graph.Graph {
 
 const richClaimsPath = "../../testdata/groundwork/claims/assert-rich.claims.json"
 
-// TestAssertRichMixedFixture grades the committed nine-claim rich file at the
+// TestAssertRichMixedFixture grades the committed ten-claim rich file at the
 // command boundary. It asserts the machine contract structurally rather than by
 // golden bytes: result order, outcome per claim, the reason-only-on-ERROR rule,
 // and the canonical shape of every binding and witness. The byte-level pin is
 // TestAssertRichCanonicalAcrossWholeGraphPermutations, which requires identical
-// bytes for the same claims over six independently shuffled graphs.
+// bytes for the same claims over five independently shuffled graphs plus a
+// duplicate-edge graph.
 func TestAssertRichMixedFixture(t *testing.T) {
 	dir := t.TempDir()
 	graphPath := writeAssertGraph(t, dir, "rich", richGraph())

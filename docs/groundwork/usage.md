@@ -1533,8 +1533,11 @@ CODEOWNERS-gated authority; nothing in a claims file can grant, waive, or
 weaken a policy rule.
 
 The committed `testdata/groundwork/claims/assert-rich.claims.json` exercises all
-four kinds across PASS, FAIL, and ERROR — including an absence claim that must
-abstain because its frontier is blind — and `cmd/groundwork`'s tests grade it
+four rich kinds, and PASS, FAIL, and ERROR each appear across the file — not
+every kind in every outcome: `pass_through` and `no_concurrent_reach` carry no
+ERROR claim, and `obligation` carries no FAIL claim. The ERROR cases are an
+absence claim that must abstain because its frontier is blind, and an obligation
+the producer could not prove. `cmd/groundwork`'s tests grade the file
 against a purpose-built graph and require byte-identical JSON across the five
 graph collections a rich kind can read (nodes, edges, blind spots, obligations,
 caveats), each independently shuffled. Entrypoint ordering is pinned by the
@@ -1615,8 +1618,30 @@ canonical sorted/deduplicated identity sets:
 | `fqn` | Nodes resolved for a node-style `fqn` selector. |
 | `of` | Graph identities resolved for a degree-style `of` selector. |
 | `fn` | Nodes resolved for a `fn` selector or handler anchor. |
-| `entrypoint` | Canonical graph identities of resolved entrypoint records. |
-| `obligation` | Canonical graph identities of established obligation records. |
+| `entrypoint` | Canonical identities of the matched entrypoint records, one per record, in the framed encoding below. |
+| `obligation` | The matched obligation RULE NAME — exactly one entry, whatever the number of matched records. Per-record evidence is in `witnesses`. |
+
+An `entrypoint` binding value is a length-framed encoding of the complete record
+identity:
+
+```text
+entrypoint/v1\x00<len>:<kind>\x00<len>:<name>\x00<len>:<fn>
+```
+
+where:
+
+- `len` is the decimal byte length of the field that follows it;
+- the three fields appear in this fixed order: `kind`, `name`, `fn`;
+- fields are separated by a NUL byte, which the JSON report renders escaped as
+  `\u0000`.
+
+Length framing is what makes the value machine-parseable: an entrypoint `name`
+is a graph-supplied route or topic string and may contain any human-readable
+delimiter — a space, a colon, a slash, a brace — so a plain delimiter join could
+not be split back apart unambiguously. A consumer reads each field by taking the
+decimal prefix up to `:` and then exactly that many bytes; it never has to guess
+where a field ends. The `entrypoint/v1` marker names the encoding so a future
+shape can be told apart from this one.
 
 `witnesses` is optional and omitted when a result has no machine evidence. Each
 witness is an independently optional evidence tuple, sorted and deduplicated by
