@@ -74,6 +74,14 @@ func BuildConcurrentSurface(ix *graph.Index) ConcurrentSurface {
 			direct = append(direct, edge)
 		}
 	}
+	// DISCLOSED GAP: an edge that is neither a boundary label nor a graph node —
+	// graph.Load validates an edge's From but not its To, so a concurrent edge can
+	// name a target the node table does not carry — is dropped here: no seed, and
+	// no blind spot recorded for it. The surface then omits whatever that target
+	// spawns, and ConcurrentClean does NOT cover such edges even though it reads
+	// as a clean concurrent surface. This is exact parity with the pre-extraction
+	// base and is kept deliberately; the fail-closed correction (seed it, or
+	// disclose it as a blind concurrent dispatch) is deferred pending review.
 	for _, edge := range ix.Edges() {
 		if edge.Concurrent && !edge.IsBoundary() && ix.Has(edge.To) {
 			seedSet[edge.To] = true

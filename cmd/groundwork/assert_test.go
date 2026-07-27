@@ -447,7 +447,10 @@ func TestAssertMachineIDValidation(t *testing.T) {
 }
 
 // TestAssertStampCommandContract checks that assert binds a report to the
-// supplied graph identity before claim evaluation or report emission.
+// supplied graph identity before claim evaluation or report emission. Every
+// refusal is checked in BOTH text and --json mode (a machine consumer must
+// receive zero bytes, not a partial report), and the last subtest pins the
+// last-wins semantics of a repeated --expect.
 func TestAssertStampCommandContract(t *testing.T) {
 	graphPath, writeClaims := assertMachineFiles(t)
 	claimsPath := writeClaims(`{"claims":[{"id":"pass","kind":"edge","from":"pkg.A","to":"pkg.B"}]}`)

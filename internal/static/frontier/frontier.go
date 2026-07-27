@@ -310,8 +310,8 @@ func Classify(in *Input) *Result {
 		// ReclaimableShare — the metric of how reclaimable the SEVERANCE frontier is —
 		// with framework/SDK plumbing, so it rides the blind-spots manifest and the
 		// render's blind channel instead. The same predicate gates the reach frontier
-		// (fitness.firstReachBlinding); blindSpotBin still maps it to A for the
-		// exhaustiveness guard, but this loop never asks.
+		// (facts.blindSpotsAt, under facts.blindForCone); blindSpotBin still maps it
+		// to A for the exhaustiveness guard, but this loop never asks.
 		if blindspots.Kind(bs.Kind).IsDisclosureOnlyFrontier() {
 			continue
 		}

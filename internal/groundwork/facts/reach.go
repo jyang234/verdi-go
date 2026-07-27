@@ -125,6 +125,14 @@ type sourceSearch struct {
 // coneMatchingEffect for the within-owner tie-break). BFS distance orders
 // nothing: the parent map exists SOLELY to reconstruct a deterministic shortest
 // path to whatever the cone order selected.
+//
+// DISCLOSED CARVE-OUT: the function scan is cone[1:], so the SOURCE ITSELF is
+// never matched as its own target. A source that reaches itself through a cycle
+// therefore yields no path here, and the absence is reported as if none existed.
+// This is inherited fitness behavior, kept for exact parity; it is a known,
+// disclosed gap pending a separately reviewed correction, not an argument that
+// self-reach is uninteresting. Boundary effects are unaffected: the source's own
+// effects ARE considered.
 func searchFrom(
 	ix *graph.Index,
 	source string,

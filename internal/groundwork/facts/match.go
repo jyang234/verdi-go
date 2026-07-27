@@ -15,7 +15,22 @@ func MatchesAny(value string, selectors []string) bool {
 	return matchesAny(value, selectors)
 }
 
-// matchesAny is the only facts helper that invokes policy.MatchPrefix.
+// matchesAny reports whether value equals any selector or is bound by one as a
+// prefix AT AN IDENTIFIER BOUNDARY. It is the only facts helper that invokes
+// policy.MatchPrefix — the ONE boundary-aware matcher shared by every gate,
+// ratchet, and layer assignment — so the selector matcher every fact family and
+// claim binds through can never diverge from the matcher the gates use.
+//
+// A prefix binds only when the byte of value immediately after the selector is a
+// non-identifier byte (e.g. '.', '$', '/', '[', ' '), so a selector can name a
+// function, a receiver type, a whole package, or a boundary system and bind all
+// its members — `(*pkg.T)` → `(*pkg.T).M`, `pkg` → `pkg.Fn`, `Fn` → its generated
+// closures `Fn$1`, `boundary:bus PUBLISH` → `... orders` — without a textual
+// prefix that splits an identifier and binds an UNRELATED symbol. The bare-
+// HasPrefix form let `GetUser` bind the distinct route `GetUserAvatar` (and a
+// package `app` bind `apps`): the prefix-collision that let init's read-only
+// proposal sweep in a sibling route's writes and mis-attribute its effects (R7
+// review). An exact match always binds.
 func matchesAny(value string, selectors []string) bool {
 	for _, selector := range selectors {
 		if policy.MatchPrefix(value, selector) {

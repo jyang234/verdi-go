@@ -71,9 +71,11 @@ const (
 	// into first-party code and reach a forbidden sink, so reach must abstain) this
 	// has a known external target that is the SAME leaf the reachability index
 	// already stops at (graph.Index drops external edges). So it is DISCLOSURE-ONLY:
-	// reach.frontierBlindSiteWith deliberately skips it, leaving every must_not_reach
-	// verdict unchanged — it discloses the accepted external-leaf boundary, it does
-	// not redefine it.
+	// the facts layer deliberately skips it when selecting a blind frontier
+	// (facts.blindSpotsAt filters on IsDisclosureOnlyFrontier, so it is skipped for
+	// every reach, pass-through, concurrent, and claim verdict, not just the one
+	// fitness wrapper), leaving every must_not_reach verdict unchanged — it
+	// discloses the accepted external-leaf boundary, it does not redefine it.
 	ExternalBoundaryCall Kind = "ExternalBoundaryCall"
 	// Reflect is reflective code, invisible to the call graph.
 	Reflect Kind = "reflect"
@@ -214,7 +216,8 @@ func (k Kind) Boundary() bool {
 // IsDisclosureOnlyFrontier reports whether a blind spot of this kind discloses a
 // KNOWN out-of-module leaf the analysis already stops at — so it must NOT act as a
 // reachability or severance frontier. Such a kind neither blinds a must_not_reach
-// proof (fitness.firstReachBlinding skips it) nor enters the frontier marker set /
+// proof (facts.blindSpotsAt skips it, for every fact family that selects a blind
+// witness through facts.blindForCone) nor enters the frontier marker set /
 // ReclaimableShare (frontier.Classify skips it): the effect it names is the same
 // leaf the call graph already terminates at, hiding no in-scope path and severing
 // nothing. ExternalBoundaryCall and UnresolvedSpecOperation are the such kinds today.

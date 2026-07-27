@@ -11,7 +11,11 @@ const (
 	ReachUnbound ReachState = iota
 	// ReachFound means a deterministic shortest source-to-target path exists.
 	ReachFound
-	// ReachAbsent means no path exists over the fully visible frontier.
+	// ReachAbsent means no path exists over the fully visible frontier, with one
+	// disclosed carve-out: a source is excluded from its own target set (reach.go
+	// scans cone[1:]), so a source that reaches ITSELF through a cycle is still
+	// ReachAbsent. That is inherited fitness behavior kept for exact parity, and a
+	// known gap pending a separately reviewed correction — not part of the proof.
 	ReachAbsent
 	// ReachBlind means no path was found, but the reachable frontier is incomplete.
 	ReachBlind
@@ -105,7 +109,12 @@ const (
 	PassThroughUnbound PassThroughState = iota
 	// PassThroughBypassed means at least one unallowed path avoids the waypoint.
 	PassThroughBypassed
-	// PassThroughGuarded means no bypass exists over a fully visible frontier.
+	// PassThroughGuarded means no bypass exists over a fully visible frontier, with
+	// the same disclosed carve-out as ReachAbsent: passthrough.go skips `fn ==
+	// source` when scanning the guarded cone, so a source that is itself a target
+	// and reaches itself through a cycle yields no bypass witness. Inherited
+	// fitness behavior, kept for exact parity, disclosed pending a separately
+	// reviewed correction.
 	PassThroughGuarded
 	// PassThroughBlind means no bypass was found, but the frontier is incomplete.
 	PassThroughBlind
