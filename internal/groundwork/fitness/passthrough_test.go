@@ -183,6 +183,12 @@ func TestPassThroughCharacterization(t *testing.T) {
 		audit    = "boundary:db UPDATE users_audit"
 		missing  = "svc.Missing"
 		ruleName = "guarded"
+		// Two boundary labels whose punctuation ShortName would mangle: it strips
+		// everything before the last "/", deletes "*" and ")", and trims a leading
+		// "(" — so these would render "{id}" and "count(" if a summary shortened a
+		// boundary target the way it shortens an FQN.
+		peerCharge = "boundary:peer POST /charge/{id}"
+		dbCount    = "boundary:db SELECT count(*)"
 	)
 	nodes := func(fqns ...string) []graph.Node {
 		result := make([]graph.Node, len(fqns))
@@ -196,11 +202,18 @@ func TestPassThroughCharacterization(t *testing.T) {
 			Name: ruleName, From: from, To: to, Through: through,
 		}
 	}
+	// violation spells the expected summary from the case's OWN constants and
+	// never recomputes it through ShortName: an expectation derived from the
+	// implementation it grades cannot catch a drift in that implementation (the
+	// tautological pin that let the boundary-label mangling through). Every
+	// constant this helper is called with is a ShortName no-op, so the assembled
+	// string is a literal in all but syntax; the boundary-punctuation case below
+	// pins the labels ShortName would actually change.
 	violation := func(from, to, through, detail string) Finding {
 		return Finding{
 			Rule:     "must_pass_through",
 			Severity: Violation,
-			Summary:  ruleName + ": " + ShortName(from) + " reaches " + ShortName(to) + " without passing " + ShortName(through),
+			Summary:  ruleName + ": " + from + " reaches " + to + " without passing " + through,
 			From:     from,
 			To:       to,
 			Detail:   detail,
@@ -236,6 +249,47 @@ func TestPassThroughCharacterization(t *testing.T) {
 				sourceA, users, guard,
 				sourceA+" → "+users,
 			)},
+		},
+		{
+			// Base-parity pin (F6). A boundary label is a canonical string a human
+			// must read verbatim to act on it — the route template and the SQL
+			// statement ARE the evidence. ShortName is an FQN shortener; applied to
+			// a label it silently rewrites "boundary:peer POST /charge/{id}" to
+			// "{id}" and "boundary:db SELECT count(*)" to "count(". Summary is part
+			// of Finding.Key(), so that rewrite also churns the base-vs-branch diff
+			// and can reorder Result.sort(). These literals are the bytes the
+			// pre-extraction evaluator emitted.
+			name: "boundary targets keep their punctuation in the summary",
+			g: &graph.Graph{
+				Nodes: nodes(sourceA, guard),
+				Edges: []graph.Edge{
+					{From: sourceA, To: peerCharge, Boundary: "outbound-sync"},
+					{From: sourceA, To: dbCount, Boundary: "outbound-sync"},
+				},
+			},
+			rule: pass(
+				[]string{sourceA},
+				[]string{"boundary:db", "boundary:peer"},
+				[]string{guard},
+			),
+			want: []Finding{
+				{
+					Rule:     "must_pass_through",
+					Severity: Violation,
+					Summary:  "guarded: svc.ASource reaches boundary:db SELECT count(*) without passing svc.Guard",
+					From:     "svc.ASource",
+					To:       "boundary:db SELECT count(*)",
+					Detail:   "svc.ASource → boundary:db SELECT count(*)",
+				},
+				{
+					Rule:     "must_pass_through",
+					Severity: Violation,
+					Summary:  "guarded: svc.ASource reaches boundary:peer POST /charge/{id} without passing svc.Guard",
+					From:     "svc.ASource",
+					To:       "boundary:peer POST /charge/{id}",
+					Detail:   "svc.ASource → boundary:peer POST /charge/{id}",
+				},
+			},
 		},
 		{
 			name: "multiple bypass pairs",

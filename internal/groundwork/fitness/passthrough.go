@@ -51,7 +51,7 @@ func checkMustPassThrough(p *policy.Policy, ix *graph.Index, r *Result) {
 			r.add(Finding{
 				Rule:     "must_pass_through",
 				Severity: Violation,
-				Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(bypass.From), ShortName(bypass.To), throughLabel),
+				Summary:  fmt.Sprintf("%s: %s reaches %s without passing %s", rule.Name, ShortName(bypass.From), shortTarget(bypass.To), throughLabel),
 				From:     bypass.From,
 				To:       bypass.To,
 				Detail:   renderBypassPath(bypass.Path),
@@ -78,14 +78,14 @@ func guardedWalk(ix *graph.Index, from string, through []string) (cone []string,
 	return facts.GuardedWalk(ix, from, through)
 }
 
+// renderBypassPath renders the witness path a reviewer reads to see HOW the
+// guard is skipped. Each hop goes through shortTarget, the single owner of the
+// FQN-vs-boundary-label distinction, so the path and the summary cannot drift
+// apart on how they spell the same effect.
 func renderBypassPath(path []string) string {
 	parts := make([]string, len(path))
 	for i, value := range path {
-		if strings.HasPrefix(value, "boundary:") {
-			parts[i] = value
-		} else {
-			parts[i] = ShortName(value)
-		}
+		parts[i] = shortTarget(value)
 	}
 	return strings.Join(parts, " → ")
 }

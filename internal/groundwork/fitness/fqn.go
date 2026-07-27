@@ -8,6 +8,7 @@ package fitness
 import (
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 )
@@ -34,6 +35,24 @@ func ShortName(fqn string) string {
 		s = s[i+1:]
 	}
 	return strings.ReplaceAll(s, ")", "")
+}
+
+// shortTarget renders a must-not-reach/must-pass-through TARGET for a summary.
+// A target is either a function FQN or a boundary-effect label, and the two need
+// opposite treatment: an FQN is shortened, a boundary label is printed verbatim.
+// The label is a canonical string the reader acts on — the route template and the
+// SQL statement ARE the evidence — and ShortName is an FQN shortener, so applying
+// it to a label truncates at the last "/" and deletes "*" and ")":
+// "boundary:peer POST /charge/{id}" would become "{id}", "boundary:db SELECT
+// count(*)" would become "count(". Summary is part of Finding.Key(), so that
+// rewrite would also churn the base-vs-branch diff and can reorder Result.sort().
+// The prefix test lives here once (boundarylabel owns the literal) so no caller
+// re-types it; renderBypassPath renders the same distinction through this helper.
+func shortTarget(value string) string {
+	if strings.HasPrefix(value, boundarylabel.Prefix) {
+		return value
+	}
+	return ShortName(value)
 }
 
 // MatchesAny is the compatibility form of facts.MatchesAny for surfaces that
