@@ -119,3 +119,28 @@ func TestRollupCountsDistinctFunctionsPerPackage(t *testing.T) {
 		t.Errorf("component nodes = %d, want 5 (distinct FQNs; 7 records collapse to 5 functions)", got)
 	}
 }
+
+// TestMermaidFocusPinNoteCountsDistinctFunctions pins the --focus rescue note against the
+// same duplicate records. The note both COUNTS and LISTS the pinned-into-view nodes, and
+// a reader checks it against the boxes on screen: three records behind one plumbing-tier
+// display FQN draw exactly ONE box, so a per-record note reports "3 pinned node(s) …
+// result]; result]; result]" for the single function actually rescued.
+func TestMermaidFocusPinNoteCountsDistinctFunctions(t *testing.T) {
+	const dup = "example.com/dupsvc.report[example.com/dupsvc.result]"
+	g := duplicateFQNGraph()
+	// MaxTier 2 with the tier-3 dup focused: it is kept ONLY by the pin, which is exactly
+	// the condition the rescue note discloses.
+	out, err := g.MermaidFocus([]string{dup}, MermaidOptions{MaxTier: 2})
+	if err != nil {
+		t.Fatalf("MermaidFocus(%q): %v", dup, err)
+	}
+	assertValidMermaid(t, out)
+
+	if got := declaredNodeIDs(out); len(got) != 1 {
+		t.Fatalf("focus render declared %d node ids %v, want 1 (three records, one box)\n%s", len(got), got, out)
+	}
+	const want = "%% 1 pinned node(s) above tier 2 (plumbing); pinned into view: dupsvc.result]"
+	if !strings.Contains(out, want) {
+		t.Errorf("rescue note must count and list the distinct rescued function once (%q)\n%s", want, out)
+	}
+}

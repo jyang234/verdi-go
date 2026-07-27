@@ -383,12 +383,22 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// with no hint it is normally collapsed as plumbing. Disclose it, same keepNode(..., nil)
 	// "would this be kept anyway" test the root note uses (one source of truth). pinRoot is
 	// EXCLUDED — it keeps the root wording above. Sorted by FQN and capped (determinism).
+	//
+	// Deduped by display FQN, like the declaration loop below and for the same reason: this
+	// note's COUNT and LIST are read straight against the boxes on screen, and several node
+	// records of one display FQN (a generic instantiated at two function-local types) draw
+	// ONE box. Per-record entries claim "3 pinned node(s) … result]; result]; result]" for
+	// the single function rescued. First occurrence in g.Nodes' canonical order decides —
+	// the same record the declaration loop declares the box from, so should two records of
+	// one FQN ever disagree on tier, the note still describes the box that is drawn.
 	if len(opts.pinNodes) > 0 {
 		var rescued []string
+		seenPin := make(map[string]bool, len(g.Nodes))
 		for _, n := range g.Nodes {
-			if n.FQN == opts.pinRoot {
+			if n.FQN == opts.pinRoot || seenPin[n.FQN] {
 				continue
 			}
+			seenPin[n.FQN] = true
 			if opts.pinNodes[n.FQN] && !keepNode(n, opts.MaxTier, emitsEffect, nil) {
 				rescued = append(rescued, n.FQN)
 			}
