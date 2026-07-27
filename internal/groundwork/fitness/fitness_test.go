@@ -287,6 +287,131 @@ func TestReachCharacterization(t *testing.T) {
 			}},
 		},
 		{
+			// Base-parity pin (F7). Two owners carry a matching effect at different
+			// BFS depths. Precedence across owners is CONE order — the source, then
+			// the reachable functions lexicographically — so svc.ADeep wins even
+			// though svc.ZNear is one hop nearer. The labels are chosen so cone
+			// order, BFS-level order and a global label sort all disagree: a
+			// level-first walk answers "alpha", a global (To, From) sort answers
+			// "alpha", only cone order answers "zeta". The cone is sorted, so this
+			// precedence is already independent of the graph's input order and
+			// nothing about shuffle-invariance licensed changing it.
+			name: "cone owner order decides between boundary effects at different depths",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source}, {FQN: "svc.ZNear"}, {FQN: "svc.ADeep"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.ZNear"},
+						{From: "svc.ZNear", To: "boundary:db UPDATE alpha", Boundary: "outbound-sync"},
+						{From: "svc.ZNear", To: "svc.ADeep"},
+						{From: "svc.ADeep", To: "boundary:db UPDATE zeta", Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE zeta",
+				From:     source,
+				To:       "boundary:db UPDATE zeta",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately. graph.Load does not
+			// sort the edge list, so the pre-extraction walk named whichever of one
+			// owner's matching effects the PRODUCER happened to emit first (zeta
+			// here) — the witness moved with input order for a graph that is
+			// semantically identical, which the plan's shuffle-invariance
+			// requirement forbids. Within one owner the canonical (To, From)
+			// minimum is taken instead, so the witness is a pure function of the
+			// graph's content. Cross-owner precedence is untouched (see above).
+			name: "canonical effect within one owner over reversed declaration order",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{{FQN: source}, {FQN: mid}},
+					Edges: []graph.Edge{
+						{From: source, To: mid},
+						{From: mid, To: "boundary:db UPDATE zeta", Boundary: "outbound-sync"},
+						{From: mid, To: "boundary:db UPDATE alpha", Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE alpha",
+				From:     source,
+				To:       "boundary:db UPDATE alpha",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately — the same input-order
+			// dependence as above, on the blind-spot manifest. graph.Load does not
+			// sort BlindSpots, so the pre-extraction probe named the first
+			// non-disclosure spot the PRODUCER emitted at the site ("unsafe" here).
+			// Selection within one site is now the canonical (Kind, Site, Detail,
+			// Location) minimum, matching the precedent the concurrent path already
+			// declared. Which SITE is chosen still follows cone order.
+			name: "canonical blind spot within one site over adversarial manifest order",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{
+					{Kind: "unsafe", Site: mid, Detail: "zeta"},
+					{Kind: "reflect", Site: mid, Detail: "alpha"},
+				}
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			// Base-parity pin (F7/F8). With every function and package site visible,
+			// the dynamic-effect fallback picks the FIRST owner in cone order that
+			// makes one — the source before any callee — not the globally smallest
+			// (Site, Detail). The source sorts LAST here, so a global sort would
+			// name svc.AMid's effect instead.
+			name: "source dynamic effect precedes a callee's",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: "svc.ZSrc"}, {FQN: "svc.AMid"}, {FQN: other},
+					},
+					Edges: []graph.Edge{
+						{From: "svc.ZSrc", To: "svc.AMid"},
+						{From: "svc.ZSrc", To: "boundary:db Exec <dynamic>", Boundary: "outbound-sync"},
+						{From: "svc.AMid", To: "boundary:db Scan <dynamic>", Boundary: "outbound-sync"},
+						{From: other, To: target, Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.From = []string{"svc.ZSrc"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (unresolved boundary effect boundary:db Exec <dynamic>) — cannot prove absence",
+				From:     "svc.ZSrc",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
 			name: "proven absence",
 			g:    baseGraph,
 			rule: rule,

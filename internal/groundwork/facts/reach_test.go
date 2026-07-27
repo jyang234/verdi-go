@@ -252,7 +252,15 @@ func TestEvaluateReachDeterministicCandidatePrecedence(t *testing.T) {
 			want: PathWitness{From: source, To: fnTargetA, Path: []string{source, right, fnTargetA}},
 		},
 		{
-			name: "boundary label precedes owner for equal length effects",
+			// Cone OWNER order decides across owners, not the boundary label: both
+			// effects are one hop from the source, and svc.Left carries the label
+			// that sorts LAST, so a label-first tie-break would answer effectA.
+			// The pre-extraction evaluator answered effectB (verified against
+			// codex/approved-specs-base); the cone is sorted, so this precedence is
+			// already shuffle-invariant and nothing licensed changing it. The
+			// canonical-minimum tie-break applies only WITHIN one owner, which this
+			// case does not exercise.
+			name: "cone owner order precedes boundary label for equal length effects",
 			g: &graph.Graph{
 				Nodes: []graph.Node{{FQN: source}, {FQN: left}, {FQN: right}},
 				Edges: []graph.Edge{
@@ -264,7 +272,26 @@ func TestEvaluateReachDeterministicCandidatePrecedence(t *testing.T) {
 			},
 			from: []string{source},
 			to:   []string{"boundary:db UPDATE"},
-			want: PathWitness{From: source, To: effectA, Path: []string{source, right, effectA}},
+			want: PathWitness{From: source, To: effectB, Path: []string{source, left, effectB}},
+		},
+		{
+			// The within-owner half, declared: one owner, two matching effects in
+			// reverse-canonical declaration order. Post-extraction correction,
+			// pinned deliberately — graph.Load does not sort the edge list, so the
+			// pre-extraction walk answered effectB (producer emission order); the
+			// canonical (To, From) minimum is effectA.
+			name: "canonical effect within one owner over reversed declaration order",
+			g: &graph.Graph{
+				Nodes: []graph.Node{{FQN: source}, {FQN: left}},
+				Edges: []graph.Edge{
+					{From: source, To: left},
+					{From: left, To: effectB, Boundary: "outbound-sync"},
+					{From: left, To: effectA, Boundary: "outbound-sync"},
+				},
+			},
+			from: []string{source},
+			to:   []string{"boundary:db UPDATE"},
+			want: PathWitness{From: source, To: effectA, Path: []string{source, left, effectA}},
 		},
 		{
 			name: "source fqn has priority",

@@ -117,11 +117,14 @@ type sourceSearch struct {
 	blind *BlindWitness
 }
 
-// searchFrom walks one source exactly once. It preserves legacy evidence
-// precedence by considering every reachable function in canonical FQN order
-// before boundary targets; the BFS parent map still reconstructs a deterministic
-// shortest path to the selected function. With no function hit, boundary
-// targets retain distance order and their canonical label/owner tie-break.
+// searchFrom walks one source exactly once and selects its witness in CONE
+// order — the source, then every reachable function in canonical FQN order.
+// Every reachable function is considered before any boundary target; only when
+// no function matches does the effect surface decide, and there the first owner
+// in that same cone order that carries a matching effect wins (see
+// coneMatchingEffect for the within-owner tie-break). BFS distance orders
+// nothing: the parent map exists SOLELY to reconstruct a deterministic shortest
+// path to whatever the cone order selected.
 func searchFrom(
 	ix *graph.Index,
 	source string,
@@ -129,15 +132,9 @@ func searchFrom(
 	effects map[string][]boundaryEffect,
 ) sourceSearch {
 	parent := map[string]string{source: ""}
-	levels := [][]string{{source}}
 	current := []string{source}
-
 	for len(current) > 0 {
-		next := nextLevel(ix, current, parent)
-		if len(next) > 0 {
-			levels = append(levels, next)
-		}
-		current = next
+		current = nextLevel(ix, current, parent)
 	}
 
 	cone := canonicalCone(source, parent)
@@ -150,16 +147,14 @@ func searchFrom(
 			}}
 		}
 	}
-	for _, owners := range levels {
-		if effect, ok := firstMatchingEffect(owners, targets, effects); ok {
-			path := reconstructPath(parent, source, effect.From)
-			path = append(path, effect.To)
-			return sourceSearch{path: &PathWitness{
-				From: source,
-				To:   effect.To,
-				Path: path,
-			}}
-		}
+	if effect, ok := coneMatchingEffect(cone, targets, effects); ok {
+		path := reconstructPath(parent, source, effect.From)
+		path = append(path, effect.To)
+		return sourceSearch{path: &PathWitness{
+			From: source,
+			To:   effect.To,
+			Path: path,
+		}}
 	}
 
 	return sourceSearch{blind: blindForCone(ix, source, cone, effects)}
@@ -190,24 +185,31 @@ func canonicalCone(source string, parent map[string]string) []string {
 	return append([]string{source}, reachable...)
 }
 
-func firstMatchingEffect(
-	owners []string,
+// coneMatchingEffect picks the boundary effect that witnesses a source's reach.
+// Owners are visited in cone order and the FIRST owner carrying a match wins:
+// the cone is already sorted, so that cross-owner precedence is a pure function
+// of the graph's content and needs no further canonicalization.
+//
+// Within one owner the choice IS input-sensitive — graph.Load sorts neither the
+// node list nor the edge list — so "the first matching edge" would move with
+// producer emission order. Each owner's slice arrives sorted by (To, From) from
+// canonicalBoundaryEffectValues, so the first match in it is that owner's
+// canonical minimum. This within-owner canonicalization is a deliberate
+// post-extraction correction, pinned by the fitness characterization subtest
+// "canonical effect within one owner over reversed declaration order".
+func coneMatchingEffect(
+	cone []string,
 	targets map[string]bool,
 	effects map[string][]boundaryEffect,
 ) (boundaryEffect, bool) {
-	var candidates []boundaryEffect
-	for _, owner := range owners {
+	for _, owner := range cone {
 		for _, effect := range effects[owner] {
 			if targets[effect.To] {
-				candidates = append(candidates, effect)
+				return effect, true
 			}
 		}
 	}
-	sortBoundaryEffects(candidates)
-	if len(candidates) == 0 {
-		return boundaryEffect{}, false
-	}
-	return candidates[0], true
+	return boundaryEffect{}, false
 }
 
 func reconstructPath(parent map[string]string, source, target string) []string {
@@ -258,10 +260,20 @@ func BlindFrontier(
 	return blindForCone(ix, from, coneValues, byOwner)
 }
 
-// blindForCone preserves the legacy structural precedence: source then
-// lexicographic reachable functions, function-site evidence before package-site
-// evidence at each function, and dynamic effects only after every function and
-// package site is visible.
+// blindForCone preserves the legacy precedence ACROSS sites: the cone is walked
+// source-first then lexicographically, function-site evidence beats package-site
+// evidence at each function, and dynamic effects are consulted only after every
+// function and package site in the cone is visible — including the dynamic
+// effects of the source itself before any callee's.
+//
+// What it deliberately does NOT preserve is the choice WITHIN one site. The
+// legacy probe returned the first non-disclosure spot in the manifest and the
+// first dynamic edge in the edge list; graph.Load sorts neither, so both moved
+// with producer emission order for a graph that is semantically identical. Both
+// are now the canonical minimum over that site's candidates — a declared
+// post-extraction correction required by the shuffle-invariance contract, on the
+// precedent the concurrent path already set. blindSpotsAt owns the first;
+// the dynamic loop below owns the second.
 func blindForCone(
 	ix *graph.Index,
 	from string,
@@ -285,8 +297,13 @@ func blindForCone(
 		}
 	}
 
-	var dynamic []BlindWitness
+	// Cone order across owners: the FIRST function in the cone that makes a
+	// dynamic effect is the site, and only its own effects are ranked. Collecting
+	// every dynamic effect in the cone and sorting them globally would let a
+	// callee outrank the source purely on its FQN, which is not the precedence
+	// this walk is documented (and relied on) to have.
 	for _, fn := range cone {
+		var dynamic []BlindWitness
 		for _, effect := range effects[fn] {
 			if effect.Dynamic {
 				dynamic = append(dynamic, BlindWitness{
@@ -298,11 +315,12 @@ func blindForCone(
 				})
 			}
 		}
-	}
-	dynamic = canonicalBlindWitnesses(dynamic)
-	if len(dynamic) > 0 {
-		witness := dynamic[0]
-		return &witness
+		// Within the site, the canonical minimum — see the declared correction in
+		// this function's doc.
+		if dynamic = canonicalBlindWitnesses(dynamic); len(dynamic) > 0 {
+			witness := dynamic[0]
+			return &witness
+		}
 	}
 	return nil
 }
@@ -323,6 +341,20 @@ func canonicalBlindWitnesses(witnesses []BlindWitness) []BlindWitness {
 	return witnesses[:n]
 }
 
+// blindSpotsAt returns one site's non-disclosure blind spots in canonical
+// (Kind, Site, Detail, Location) order, so a caller taking [0] takes the site's
+// canonical minimum.
+//
+// That minimum is a DECLARED post-extraction correction, not the legacy
+// behavior: the pre-extraction probe returned the first non-disclosure spot in
+// the manifest, and graph.Load does not sort BlindSpots, so the named spot
+// tracked producer emission order and churned the base-vs-branch diff for a
+// graph that is semantically identical. The shuffle-invariance contract (equal
+// ReachResult values over shuffled nodes, edges and blind spots) requires an
+// intrinsic key here; the concurrent path declared and pinned the same
+// correction first. Pinned by the fitness characterization subtest "canonical
+// blind spot within one site over adversarial manifest order". Which SITE is
+// selected is untouched — that stays cone order, see blindForCone.
 func blindSpotsAt(
 	ix *graph.Index,
 	from string,
