@@ -66,10 +66,14 @@ type BlindWitness struct {
 // Consumers proving something about the family (fitness) read State; consumers
 // requiring every named selector to bind (claims) read these fields.
 type ReachResult struct {
-	State       ReachState
-	From        []string
-	To          []string
-	Paths       []PathWitness
+	State ReachState
+	From  []string
+	To    []string
+	Paths []PathWitness
+	// Blind is non-nil if and only if State == ReachBlind: a blind state without
+	// its witness would be an undisclosed disclosure, and a witness without the
+	// state would be evidence for a verdict nobody reached. Consumers guard the
+	// nil anyway (claims.evalReach) so a future producer bug fails closed.
 	Blind       *BlindWitness
 	UnboundFrom []string
 	UnboundTo   []string
@@ -125,8 +129,10 @@ type PassThroughResult struct {
 	// fitness consumes this field to preserve its existing per-boundary-edge
 	// finding multiplicity without owning a second traversal.
 	BypassOccurrences []PathWitness
-	Blind             *BlindWitness
-	UnboundFrom       []string
-	UnboundTo         []string
-	UnboundThrough    []string
+	// Blind is non-nil if and only if State == PassThroughBlind, with the same
+	// reasoning as ReachResult.Blind.
+	Blind          *BlindWitness
+	UnboundFrom    []string
+	UnboundTo      []string
+	UnboundThrough []string
 }

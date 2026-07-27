@@ -687,6 +687,15 @@ func (m *model) evalReach(c Claim) Result {
 		result.Bindings = bindings
 		return result
 	case facts.ReachBlind:
+		if fact.Blind == nil {
+			// Defensive, mirroring evalNoConcurrentReach: the fact type's invariant is
+			// that Blind is set exactly when the state is the blind one. If that ever
+			// breaks, refuse with a claim-level ERROR rather than panicking mid-report
+			// or, worse, rendering a blind frontier with an empty site as if the
+			// disclosure were complete.
+			return withBindings(errored(c, ReasonMalformedClaim,
+				"reach evaluator returned blind state without evidence"), bindings)
+		}
 		result := withBindings(errored(c, ReasonBlindFrontier,
 			"no path found, but the frontier is blind at "+fact.Blind.Site), bindings)
 		result.Witnesses = []Witness{{
@@ -745,6 +754,12 @@ func (m *model) evalPassThrough(c Claim) Result {
 	case facts.PassThroughGuarded:
 		return withBindings(passWithDetail(c, "all visible paths pass through the waypoint"), bindings)
 	case facts.PassThroughBlind:
+		if fact.Blind == nil {
+			// Defensive, mirroring evalNoConcurrentReach: see the ReachBlind guard in
+			// evalReach for why an empty-site disclosure must not be rendered.
+			return withBindings(errored(c, ReasonMalformedClaim,
+				"pass_through evaluator returned blind state without evidence"), bindings)
+		}
 		result := withBindings(errored(c, ReasonBlindFrontier,
 			"no bypass found, but the frontier is blind at "+fact.Blind.Site), bindings)
 		result.Witnesses = []Witness{{

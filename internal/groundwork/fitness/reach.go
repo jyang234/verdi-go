@@ -14,8 +14,12 @@ type verdict int
 
 const (
 	provenAbsent verdict = iota // no path, and the frontier is fully resolved — a real proof
-	noPathFound                 // no path found, but the frontier is blind — cannot prove
-	reachable                   // a path exists — the invariant is broken
+	// noPathFound is the abstention: no path was found AND the absence is not
+	// proven. Two inputs reach it — a blind frontier (evidence names the blind
+	// site) and a source or target family that bound nothing (evidence is empty,
+	// because there is nothing to point at). Both are "cannot prove", never a pass.
+	noPathFound
+	reachable // a path exists — the invariant is broken
 )
 
 // checkMustNotReach evaluates each negative reachability invariant: no function
@@ -117,6 +121,13 @@ type evidence struct {
 // evalReach is the compatibility wrapper for proposer tests and later-migrated
 // fitness code. The supplied source identities are already bound; facts owns the
 // traversal, target binding, and blind-frontier classification.
+//
+// Every ReachState is mapped explicitly. ReachUnbound must NOT reach the proof
+// pole: a family that bound nothing produced a zero-seed or zero-target walk, and
+// calling that "no path exists" is a fabricated proof over a surface the caller
+// never actually named (tenet 4). It abstains as noPathFound with empty evidence
+// — the standing fitness path discloses the same condition through
+// inertRuleFinding/unbindableTargetFinding before it ever gets here.
 func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, evidence) {
 	fact := facts.EvaluateReachBoundSources(ix, froms, toPatterns)
 	switch fact.State {
@@ -125,8 +136,14 @@ func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, e
 		return reachable, evidence{from: witness.From, target: witness.To}
 	case facts.ReachBlind:
 		return noPathFound, evidence{from: fact.Blind.From, target: blindDescription(fact.Blind)}
-	default:
+	case facts.ReachUnbound:
+		return noPathFound, evidence{}
+	case facts.ReachAbsent:
 		return provenAbsent, evidence{}
+	default:
+		// A ReachState this wrapper has never seen cannot be folded into a pole:
+		// the unknown could be either, and guessing is how a false proof ships.
+		panic(fmt.Sprintf("fitness: unhandled facts.ReachState %d in evalReach", fact.State))
 	}
 }
 

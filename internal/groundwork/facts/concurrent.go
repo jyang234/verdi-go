@@ -39,9 +39,11 @@ type ConcurrentWitness struct {
 // sorted and de-duplicated. State == ConcurrentUnbound still means the whole
 // target family bound nothing.
 type ConcurrentResult struct {
-	State     ConcurrentState
-	To        []string
-	Hits      []ConcurrentWitness
+	State ConcurrentState
+	To    []string
+	Hits  []ConcurrentWitness
+	// Blind is non-nil if and only if State == ConcurrentBlind, with the same
+	// reasoning as ReachResult.Blind.
 	Blind     *BlindWitness
 	UnboundTo []string
 }
