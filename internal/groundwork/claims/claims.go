@@ -44,6 +44,8 @@
 //	            [, entry_kind]         the resolved fn
 //	reach       from, to, expect        reachability matches expectation     ERROR
 //	pass_through from, to, through      every visible path enters waypoint  ERROR
+//	no_concurrent_reach to              target is absent from the visible    ERROR
+//	                                   concurrent surface
 //
 // entrypoint has its own two-poled polarity, distinct from the absence kinds:
 // ZERO records matching the route/topic name is a FAIL (not an ERROR) — existence
@@ -345,12 +347,13 @@ func Evaluate(g *graph.Graph, cf *File) Report {
 
 // model is the once-per-run graph view every claim shares.
 type model struct {
-	reachIndex       *graph.Index // shared typed-fact substrate
-	nodeUniverse     []string     // sorted declared node FQNs
-	endpointUniverse []string     // sorted node FQNs ∪ edge endpoints
-	pairs            map[[2]string]bool
-	callers          map[string][]string // to → sorted distinct froms
-	callees          map[string][]string // from → sorted distinct tos
+	reachIndex        *graph.Index // shared typed-fact substrate
+	concurrentSurface *facts.ConcurrentSurface
+	nodeUniverse      []string // sorted declared node FQNs
+	endpointUniverse  []string // sorted node FQNs ∪ edge endpoints
+	pairs             map[[2]string]bool
+	callers           map[string][]string // to → sorted distinct froms
+	callees           map[string][]string // from → sorted distinct tos
 	// nodeTiers maps an FQN to the sorted DISTINCT tiers its node records carry.
 	// graph.Load does not guarantee node-FQN uniqueness (a generic instance's
 	// display FQN is documented non-unique — see graphio.sortGraph), so a single
@@ -444,6 +447,7 @@ var allowedFields = map[string][]string{
 	"pass_through": {
 		"from", "to", "through",
 	},
+	"no_concurrent_reach": {"to"},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -475,9 +479,61 @@ func (m *model) eval(c Claim) Result {
 		return m.evalReach(c)
 	case "pass_through":
 		return m.evalPassThrough(c)
+	case "no_concurrent_reach":
+		return m.evalNoConcurrentReach(c)
 	default:
 		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
+}
+
+func (m *model) evalNoConcurrentReach(c Claim) Result {
+	if !c.To.Present() {
+		return errored(c, ReasonMalformedClaim, "no_concurrent_reach requires 'to'")
+	}
+
+	fact := m.concurrentFacts().Evaluate(c.To.Values())
+	bindings := Bindings{To: append([]string(nil), fact.To...)}
+	switch fact.State {
+	case facts.ConcurrentUnbound:
+		return withBindings(errored(c, ReasonUnboundSelector,
+			"to selector(s) bind nothing: "+strings.Join(fact.UnboundTo, ", ")), bindings)
+	case facts.ConcurrentHit:
+		witnesses := make([]Witness, len(fact.Hits))
+		for i, hit := range fact.Hits {
+			witnesses[i] = Witness{From: hit.From, To: hit.To}
+		}
+		result := withBindings(fail(c, "target reachable on a concurrent path"), bindings)
+		result.Witnesses = witnesses
+		return result
+	case facts.ConcurrentClean:
+		return withBindings(passWithDetail(c, "no concurrent path found"), bindings)
+	case facts.ConcurrentBlind:
+		if fact.Blind == nil {
+			return withBindings(errored(c, ReasonMalformedClaim,
+				"concurrent evaluator returned blind state without evidence"), bindings)
+		}
+		// Unlike reach and pass_through, the witness carries no From. This kind has
+		// no from selector: the fact's Blind.From is the cone's lexicographically
+		// first member, an internal traversal detail the claim never named. Emitting
+		// it would read as a caller-supplied source the author can act on.
+		result := withBindings(errored(c, ReasonBlindFrontier,
+			"no concurrent path found, but the frontier is blind at "+fact.Blind.Site), bindings)
+		result.Witnesses = []Witness{{BlindSite: fact.Blind.Site}}
+		return result
+	default:
+		return errored(c, ReasonMalformedClaim, "concurrent evaluator returned an unknown state")
+	}
+}
+
+// concurrentFacts lazily builds the rule-independent surface once per model.
+// A model belongs to one Evaluate call, so the cache is file-local and carries
+// no package-global state across graphs or claims files.
+func (m *model) concurrentFacts() facts.ConcurrentSurface {
+	if m.concurrentSurface == nil {
+		surface := facts.BuildConcurrentSurface(m.reachIndex)
+		m.concurrentSurface = &surface
+	}
+	return *m.concurrentSurface
 }
 
 func (m *model) evalReach(c Claim) Result {
@@ -1173,6 +1229,8 @@ func label(c Claim) string {
 		return selectorLabel(c.From) + " -> " + selectorLabel(c.To)
 	case "pass_through":
 		return selectorLabel(c.From) + " -> " + selectorLabel(c.Through) + " -> " + selectorLabel(c.To)
+	case "no_concurrent_reach":
+		return "concurrent -> " + selectorLabel(c.To)
 	default:
 		return strings.TrimSpace(selectorLabel(c.From) + selectorLabel(c.To) +
 			selectorLabel(c.Through) + c.Expect + c.FQN + c.Of + c.Fn + c.Name)

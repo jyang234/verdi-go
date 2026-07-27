@@ -36,6 +36,13 @@ const (
 	BlindInPackage
 	// BlindAtDynamicEffect is a dynamically named boundary effect made by Site.
 	BlindAtDynamicEffect
+	// BlindAtConcurrentBoundary is a dynamically named boundary effect entered
+	// directly through a concurrent edge.
+	BlindAtConcurrentBoundary
+	// BlindAtConcurrentDispatch is an unresolved graph-wide concurrent dispatch
+	// at Site. It blinds the complete concurrent surface because no edge or seed
+	// exists for the spawned body.
+	BlindAtConcurrentDispatch
 )
 
 // BlindWitness identifies the canonical blind frontier selected for a source.

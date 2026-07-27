@@ -155,6 +155,10 @@ func blindDescription(witness *facts.BlindWitness) string {
 		return fmt.Sprintf("%s in %s", witness.Kind, witness.Site)
 	case facts.BlindAtDynamicEffect:
 		return "unresolved boundary effect " + witness.Detail
+	case facts.BlindAtConcurrentBoundary:
+		return "unresolved concurrent boundary effect " + witness.Detail
+	case facts.BlindAtConcurrentDispatch:
+		return fmt.Sprintf("%s at %s", witness.Kind, ShortName(witness.Site))
 	default:
 		return witness.Kind
 	}
