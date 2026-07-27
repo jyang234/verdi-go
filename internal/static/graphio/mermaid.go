@@ -26,6 +26,7 @@ import (
 
 	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
 	"github.com/jyang234/golang-code-graph/internal/fqnres"
+	"github.com/jyang234/golang-code-graph/internal/nodecount"
 	"github.com/jyang234/golang-code-graph/internal/render"
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
@@ -353,6 +354,32 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 		}
 	}
 
+	// Counting FUNCTIONS is right, but a count that silently folded records away is a
+	// laundered unknown (tenet 3): a reader comparing "5 boxes" against the graph's 7
+	// nodes[] entries has no way to learn where the other two went. So carry the RECORD
+	// totals beside the function counts and disclose them through the shared
+	// nodecount phrasing wherever a count is emitted. Slice iteration in g.Nodes'
+	// canonical order — no map iteration reaches these numbers.
+	shownRecords, hiddenRecords := 0, 0
+	for _, n := range g.Nodes {
+		if shown[n.FQN] {
+			shownRecords++
+			continue
+		}
+		hiddenRecords++
+	}
+	// The declaration loop below emits ONE box per display FQN, so a duplicate-record FQN
+	// loses its multiplicity at the exact moment the diagram is built and no other number
+	// mentions it. This is the diagram's own disclosure of that fold. It says "kept" and
+	// "render as one box" — never "drawn" — because it also rides the over-cap OVERVIEW,
+	// which draws an entry-point index and no node boxes at all; a note claiming boxes
+	// were drawn would be false there. Silent for every duplicate-free graph (RecordSuffix
+	// is empty when nothing collapsed), so no existing diagram gains a byte.
+	if suffix := nodecount.RecordSuffix(len(shown), shownRecords); suffix != "" {
+		notes = append(notes, plural(len(shown), "first-party node")+suffix+
+			" kept: several node records share one display FQN (a generic instantiated at function-local types) and render as one box")
+	}
+
 	// Disclose the pin only when it actually RESCUED the root from collapse — i.e. the
 	// root would have been hidden WITHOUT the pin (above tier AND not an effect emitter).
 	// keepNode(..., nil) is exactly that "would this be kept" test, reused so the
@@ -393,6 +420,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// one FQN ever disagree on tier, the note still describes the box that is drawn.
 	if len(opts.pinNodes) > 0 {
 		var rescued []string
+		rescuedFQN := make(map[string]bool, len(g.Nodes))
 		seenPin := make(map[string]bool, len(g.Nodes))
 		for _, n := range g.Nodes {
 			if n.FQN == opts.pinRoot || seenPin[n.FQN] {
@@ -401,6 +429,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 			seenPin[n.FQN] = true
 			if opts.pinNodes[n.FQN] && !keepNode(n, opts.MaxTier, emitsEffect, nil) {
 				rescued = append(rescued, n.FQN)
+				rescuedFQN[n.FQN] = true
 			}
 		}
 		if len(rescued) > 0 {
@@ -409,8 +438,18 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 			for i, fqn := range rescued {
 				short[i] = frontier.ShortName(fqn)
 			}
-			notes = append(notes, fmt.Sprintf("%d pinned node(s) above tier %d (plumbing); pinned into view: %s",
-				len(rescued), opts.MaxTier, fqnres.CapList(short, maxPinnedList)))
+			// The count and the list are per FUNCTION (one entry per drawn box); the record
+			// multiplicity behind them rides the shared suffix so the fold is disclosed
+			// rather than inferred from a name that appears once for three instances.
+			rescuedRecords := 0
+			for _, n := range g.Nodes {
+				if rescuedFQN[n.FQN] {
+					rescuedRecords++
+				}
+			}
+			notes = append(notes, fmt.Sprintf("%d pinned node(s)%s above tier %d (plumbing); pinned into view: %s",
+				len(rescued), nodecount.RecordSuffix(len(rescued), rescuedRecords), opts.MaxTier,
+				fqnres.CapList(short, maxPinnedList)))
 		}
 	}
 
@@ -468,6 +507,7 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	writeFlowchartHeader(&b, g.Entrypoint, g.Algo)
 	if hidden > 0 {
 		b.WriteString("    %% " + plural(hidden, "first-party node") +
+			nodecount.RecordSuffix(hidden, hiddenRecords) +
 			" above tier " + strconv.Itoa(opts.MaxTier) + " hidden as plumbing; pass --show-plumbing to include\n")
 	}
 	for _, n := range notes {
@@ -486,6 +526,10 @@ func (g *Graph) mermaid(opts MermaidOptions, notes []string) string {
 	// identical across the instances, and g.Nodes arrives in sortGraph's canonical order,
 	// so which record declares cannot change the emitted bytes. `declared` exists to
 	// prevent re-declaration, not to adjudicate between records.
+	//
+	// The fold is not silent: the header note built in pass A discloses "N first-party
+	// nodes (M instance records) kept" whenever this loop collapses anything, so a reader
+	// counting boxes against the graph's nodes[] array is told where the difference went.
 	declared := make(map[string]bool, len(nodeID))
 	for _, n := range g.Nodes {
 		id, ok := nodeID[n.FQN]

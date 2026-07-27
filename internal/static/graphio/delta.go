@@ -23,8 +23,9 @@ package graphio
 // register as a change; a single-record comparison would silently call it unchanged.
 //
 // Determinism: the node/edge lists are sorted on intrinsic keys (fqn; from,to,field), and
-// Caveats is deterministic by construction (provenanceCaveats appends in a fixed order), so
-// the artifact is byte-identical across runs regardless of graph edge/node order.
+// Caveats is deterministic by construction (diffCaveats appends in a fixed order, and each
+// caveat's own list is sorted), so the artifact is byte-identical across runs regardless of
+// graph edge/node order.
 //
 // Relationship to groundwork review's own delta: `internal/groundwork/review`'s
 // graphDelta (review/delta.go) is deliberately set-based and stays separate — it feeds a
@@ -57,9 +58,13 @@ type GraphDelta struct {
 	EdgesRemoved []EdgeEndpoints `json:"edges_removed"`
 	EdgesChanged []EdgeChange    `json:"edges_changed"`
 
-	// Caveats discloses a base↔branch SUBSTRATE skew (empty base, --algo/tool/reclaimer
-	// mismatch) so a reader never mistakes a substrate difference for a code change — the
-	// same honesty channel the mermaid diff carries (provenanceCaveats), reused verbatim.
+	// Caveats discloses (a) a base↔branch SUBSTRATE skew (empty base, --algo/tool/reclaimer
+	// mismatch) so a reader never mistakes a substrate difference for a code change, and
+	// (b) a same-FQN COLLAPSE whose records disagreed — the delta keys on display FQN, so
+	// where several node records share one FQN and differ, one canonical representative was
+	// compared and the others' attributes were not. The same honesty channel the mermaid
+	// diff carries (diffCaveats), reused verbatim so the two views cannot disclose
+	// different things.
 	Caveats []string `json:"caveats"`
 }
 
@@ -132,7 +137,7 @@ func Delta(base, branch *Graph) GraphDelta {
 		EdgesAdded:   []EdgeEndpoints{},
 		EdgesRemoved: []EdgeEndpoints{},
 		EdgesChanged: []EdgeChange{},
-		Caveats:      provenanceCaveats(base, branch),
+		Caveats:      diffCaveats(base, branch),
 	}
 	if d.Caveats == nil {
 		d.Caveats = []string{}

@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/fqnres"
+	"github.com/jyang234/golang-code-graph/internal/nodecount"
 	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 )
 
@@ -84,6 +86,21 @@ type PackageRollup struct {
 	// the Mermaid render abbreviates them for the footnote. Sorted and omitted when
 	// empty. Disclosure-only — never an edge, a node, or a verdict input.
 	Omitted []string `json:"omitted,omitempty"`
+	// Caveats discloses where Component.Nodes COLLAPSED node records: a package whose
+	// distinct-function count is smaller than the number of node records the graph
+	// carries for it (several records sharing one display FQN — a generic instantiated
+	// at function-local types). Without it a consumer summing `nodes` against the
+	// graph's own nodes[] array reads an unexplainable discrepancy and cannot tell a
+	// collapse from a bug (tenet 3).
+	//
+	// The caveats channel, not a per-component field: it is the shape every sibling
+	// artifact already carries for exactly this purpose (Graph.Caveats,
+	// GraphDelta.Caveats, PackageRollupDiff.Caveats), so a consumer that already reads
+	// caveats needs no schema knowledge, and `omitempty` keeps a duplicate-free rollup
+	// byte-identical to one produced before this field existed. Sorted by construction
+	// (built from the package-sorted component list), disclosure-only — no verdict
+	// reads it.
+	Caveats []string `json:"caveats,omitempty"`
 }
 
 // Component is one first-party Go package and how many graph nodes rolled up into it.
@@ -186,22 +203,32 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	// read as "this package declares N functions" — the record count would report 7 for a
 	// package declaring 5, a number a human acts on that does not mean what it says.
 	//
-	// Disclosed scope, not an oversight: node counters OUTSIDE graphio still count RECORDS
-	// — reviewtriage's BaseNodes/BranchNodes, the groundwork claims report's numNodes,
-	// cmd/flowmap's "wrote N node(s)" log line, and cmd/groundwork's "it has N nodes"
-	// not-found error. INSIDE graphio every count and render path — this rollup, the
-	// mermaid declaration loop, the hidden-plumbing note, and the --focus pin-rescue note
-	// — keys on the distinct display FQN. Until the outside counters are aligned, a rollup
-	// `nodes` and a triage `base_nodes` over the SAME graph can legitimately differ by the
-	// duplicate-record count.
+	// The fold is DISCLOSED, not silent: records[pkg] carries the raw record total beside
+	// the distinct count, and any package where the two differ is named in Caveats below,
+	// so a consumer summing `nodes` against the graph's nodes[] array is told why they
+	// disagree instead of having to guess (tenet 3).
+	//
+	// Disclosed scope, not an oversight: two node counters OUTSIDE graphio still count
+	// RECORDS — reviewtriage's BaseNodes/BranchNodes (a raw graph-size stat that drops
+	// nothing) and, through it, the triage markdown's "graph N → M nodes" line. Every
+	// other counter is aligned: inside graphio this rollup, the mermaid declaration loop,
+	// the hidden-plumbing note and the --focus pin-rescue note all key on the distinct
+	// display FQN and disclose the record multiplicity; outside it the groundwork claims
+	// summary and cmd/groundwork's "it has N nodes" not-found error do the same.
+	// (cmd/flowmap's "wrote N node(s)" line counts a syscontext graph, not this one — it
+	// has no display-FQN collapse and is not in scope.) So a rollup `nodes` and a triage
+	// `base_nodes` over the SAME graph can still legitimately differ by the duplicate-
+	// record count, and the caveats here name it.
 	pkgOf := make(map[string]string, len(g.Nodes))
 	counts := map[string]int{}
+	records := map[string]int{}
 	counted := make(map[string]bool, len(g.Nodes))
 	for _, n := range g.Nodes {
 		if n.Package == "" {
 			continue
 		}
 		pkgOf[n.FQN] = n.Package
+		records[n.Package]++
 		if counted[n.FQN] {
 			continue
 		}
@@ -221,6 +248,7 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 		components = append(components, comp)
 	}
 	sort.Slice(components, func(i, j int) bool { return components[i].Package < components[j].Package })
+	caveats := collapsedRecordCaveats(components, records)
 
 	type edgeKey struct{ from, to, kind string }
 	seen := map[edgeKey]bool{}
@@ -292,7 +320,37 @@ func (g *Graph) RollupByPackage() *PackageRollup {
 	// build already computed them, sorted); slices.Clone keeps the rollup from aliasing
 	// the graph's slice and returns nil for a nil input, so an empty set stays nil and
 	// omitempty drops the field.
-	return &PackageRollup{Components: components, Edges: edges, Omitted: slices.Clone(g.OmittedPackages)}
+	return &PackageRollup{Components: components, Edges: edges, Omitted: slices.Clone(g.OmittedPackages), Caveats: caveats}
+}
+
+// maxCollapsedList caps the per-package list the record-collapse caveat prints,
+// disclosing truncation with " (+N more)" via fqnres.CapList so a capped list never
+// reads as the whole affected set (tenet 3).
+const maxCollapsedList = 8
+
+// collapsedRecordCaveats names every component whose `nodes` count folded several node
+// records of one display FQN into one function — the disclosure that keeps a smaller-
+// than-the-graph count from reading as a lost node. Returns nil when nothing collapsed
+// (the duplicate-free case), so an unaffected rollup omits the field entirely and stays
+// byte-identical to one produced before the disclosure existed.
+//
+// Deterministic: components arrives sorted by package path and this walks it in order,
+// so the caveat's package list is intrinsically ordered and no map iteration reaches the
+// text.
+func collapsedRecordCaveats(components []Component, records map[string]int) []string {
+	var collapsed []string
+	for _, c := range components {
+		if records[c.Package] > c.Nodes {
+			collapsed = append(collapsed,
+				c.Package+" "+plural(c.Nodes, "node")+nodecount.RecordSuffix(c.Nodes, records[c.Package]))
+		}
+	}
+	if len(collapsed) == 0 {
+		return nil
+	}
+	return []string{"`nodes` counts DISTINCT functions, not node records — " +
+		fqnres.CapList(collapsed, maxCollapsedList) +
+		"; several records share one display FQN (a generic instantiated at function-local types) and the graph keeps every instance"}
 }
 
 // rollupEdgeLess is the total intrinsic order for component edges: From, then To, then
