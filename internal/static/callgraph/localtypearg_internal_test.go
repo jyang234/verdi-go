@@ -113,7 +113,8 @@ func TestFinalizePanicsOnEverySurvivingKeyCollision(t *testing.T) {
 
 // TestPanicOnDuplicateSortKeyScansSortedNodes pins the guard's independence from the
 // sort: it feeds an ALREADY-sorted node slice straight to the scan, so the panic is
-// derived from sort.Slice's documented postcondition (equal keys land adjacent) rather
+// derived from sort.Slice's documented postcondition (equal keys land in one contiguous
+// run, so a group of two lands adjacent) rather
 // than from the undocumented question of which pairs the comparator happens to visit.
 func TestPanicOnDuplicateSortKeyScansSortedNodes(t *testing.T) {
 	roots := buildCallGraphRoots(t, swappedLocalTypeArgsSrc)
@@ -155,6 +156,102 @@ func TestPanicOnDuplicateSortKeyScansSortedNodes(t *testing.T) {
 		}
 	}()
 	panicOnDuplicateSortKey(nodes)
+}
+
+// collidingSortKeyPair returns the two DISTINCT *ssa.Functions of swappedLocalTypeArgsSrc
+// that share one (FQN, InstanceDiscriminator) sort key, failing if the fixture stops
+// reproducing the collision the guard exists for.
+func collidingSortKeyPair(t *testing.T) (*ssa.Function, *ssa.Function) {
+	t.Helper()
+	roots := buildCallGraphRoots(t, swappedLocalTypeArgsSrc)
+	raw := rta.Analyze(roots, true).CallGraph
+
+	var colliding []*ssa.Function
+	for fn := range raw.Nodes {
+		if fn != nil && strings.Contains(fn.RelString(nil), ".pair[") {
+			colliding = append(colliding, fn)
+		}
+	}
+	if len(colliding) != 2 {
+		t.Fatalf("raw graph has %d pair instances; want 2", len(colliding))
+	}
+	if colliding[0].RelString(nil) != colliding[1].RelString(nil) ||
+		features.InstanceDiscriminator(colliding[0]) != features.InstanceDiscriminator(colliding[1]) {
+		t.Fatalf("fixture did not reproduce the sort-key collision")
+	}
+	return colliding[0], colliding[1]
+}
+
+// TestPanicOnDuplicateSortKeyScansDuplicateGroups pins the property the scan actually
+// rests on for duplicate groups LARGER than a pair. Sortedness makes each group
+// contiguous; it does NOT make every duplicate pair adjacent, so in a run of three the
+// outer two are never compared. The scan is complete anyway because a run holding two
+// distinct functions must hold an adjacent distinct pair. The teeth are the trailing_
+// distinct case: its only distinct adjacency is (1,2), so a scan weakened to compare
+// just nodes[0] against nodes[1] misses it and the test fails. all_same is the negative
+// direction — a legitimately equal run of three must not panic.
+func TestPanicOnDuplicateSortKeyScansDuplicateGroups(t *testing.T) {
+	left, right := collidingSortKeyPair(t)
+	fqn := left.RelString(nil)
+	node := func(fn *ssa.Function) *Node { return &Node{FQN: fqn, Func: fn} }
+
+	tests := []struct {
+		name      string
+		nodes     []*Node
+		wantPanic bool
+	}{
+		{
+			name:      "trailing_distinct",
+			nodes:     []*Node{node(left), node(left), node(right)},
+			wantPanic: true,
+		},
+		{
+			name:      "leading_distinct",
+			nodes:     []*Node{node(left), node(right), node(right)},
+			wantPanic: true,
+		},
+		{
+			name:      "outer_distinct",
+			nodes:     []*Node{node(left), node(right), node(left)},
+			wantPanic: true,
+		},
+		{
+			name:      "all_same",
+			nodes:     []*Node{node(left), node(left), node(left)},
+			wantPanic: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Every node shares one key, so any permutation is a legal sorted slice;
+			// assert it rather than assume it, since the scan's contract requires it.
+			if !sort.SliceIsSorted(test.nodes, func(i, j int) bool {
+				if test.nodes[i].FQN != test.nodes[j].FQN {
+					return test.nodes[i].FQN < test.nodes[j].FQN
+				}
+				return features.InstanceDiscriminator(test.nodes[i].Func) <
+					features.InstanceDiscriminator(test.nodes[j].Func)
+			}) {
+				t.Fatalf("group is not in finalize's sorted order")
+			}
+			defer func() {
+				got := recover()
+				if !test.wantPanic {
+					if got != nil {
+						t.Fatalf("panicOnDuplicateSortKey panicked on a legal group of three: %v", got)
+					}
+					return
+				}
+				if got == nil {
+					t.Fatal("panicOnDuplicateSortKey accepted a group of three holding two distinct functions")
+				}
+				if message := fmt.Sprint(got); !strings.Contains(message, "share sort key") {
+					t.Fatalf("panic = %q, want the duplicate sort-key diagnostic", message)
+				}
+			}()
+			panicOnDuplicateSortKey(test.nodes)
+		})
+	}
 }
 
 // TestPanicOnDuplicateSortKeyAcceptsDistinctKeys is the negative path: adjacent nodes

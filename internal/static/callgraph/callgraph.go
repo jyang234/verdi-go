@@ -262,8 +262,8 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // inside the comparator. sort.Slice guarantees only that the result is sorted; it never
 // promises the comparator is invoked on every equal pair, so a comparator-resident
 // guard rests on an implementation detail rather than on the documented contract.
-// Equal keys are adjacent in any correctly sorted slice, so the adjacency scan derives
-// the same panic from the postcondition alone.
+// Equal keys form one contiguous run in any correctly sorted slice, so the adjacency
+// scan derives the same panic from the postcondition alone.
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
@@ -281,8 +281,14 @@ func (g *Graph) finalize() {
 
 // panicOnDuplicateSortKey refuses a node slice in which two DISTINCT functions carry
 // the same (FQN, InstanceDiscriminator) sort key. nodes must already be sorted on that
-// key, which puts every duplicate pair in adjacent slots, so one linear scan sees all
-// of them; the caller is finalize, immediately after its sort.
+// key, which puts each duplicate GROUP in one contiguous run. That is NOT the stronger
+// claim that every duplicate PAIR is adjacent — in a run of three sharing one key the
+// outer two are never compared — and the scan does not need it. It needs only one
+// witness per group: if a contiguous run holds two distinct functions then some ADJACENT
+// pair inside that run is distinct (were every adjacent pair the same *ssa.Function,
+// transitivity would make the whole run one function), and the scan panics on it. So a
+// group is caught whenever it should be, though not necessarily on the pair a reader of
+// the diagnostic first suspects. The caller is finalize, immediately after its sort.
 //
 // A surviving duplicate is NOT necessarily a producer bug. InstanceDiscriminator is
 // known incomplete, and the residual classes below are DEFERRED: separating them needs
