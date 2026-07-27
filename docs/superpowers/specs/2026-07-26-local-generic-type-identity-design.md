@@ -236,6 +236,15 @@ Encoding rules, all normative:
    function-local predicate**, and `site` is defined in "Physical position". The
    `<pkgpath>.<name>` component is present on every `Named` and `Alias`, local or
    not.
+
+   **Type parameters are encoded too**, as a further id list on `Named` and
+   `Alias` (`named:<qualified name>[@<site>]:<type-param ids>:<targ ids>:><underlying id>`).
+   They are reachable neither through a node's underlying type nor through its
+   type arguments, and a function-local type can hide inside a constraint — which
+   the shipped walker already reached and a permanent test already pins. Encoding
+   them is a deliberate superset of the minimum the witnesses need: it can only
+   split an equivalence class, never merge one, and omitting it would
+   under-collect, which costs a refused program.
 6. Every variable-length token is length-framed exactly as `local-sites/v1`
    framed its sites, so no legal filename, package path, field name, struct tag,
    or method name byte can create an ambiguous concatenation. This applies to the
@@ -570,6 +579,25 @@ site. When the local's structure varies with the type parameter
 When it does not (`type L struct{ A int }`, witness `n1b`), position and
 structure are both identical and no refinement of either can help.
 
+### The `cha` sub-case — same class, one instantiation
+
+Under `--algo cha` the analyzed set is the whole program, which includes the
+**uninstantiated** body of every generic function alongside its instantiations.
+`go/ssa` builds `sink[L]` from the uninstantiated body of `gen[X]` *and* from each
+instantiation, and those are distinct `*ssa.Function` produced from the same one
+declaration of `L` with the same structure. So under `cha` the class is reached
+with a generic instantiated only **once** — witness `n1`, which graphs cleanly
+under `rta` and `vta` and is refused under `cha`.
+
+This is the same undecidable class, reached through a different door, and it is
+refused with the same diagnostic. Two consequences the diagnostic's own text does
+not yet carry, recorded here rather than silently: its "instantiates more than
+once" phrasing under-describes the `cha` case, and its third remediation
+("instantiate the enclosing generic function only once") does not apply there.
+The message's closing escape hatch — report anything that does not match the
+described shape — keeps it honest in the meantime. Correcting the wording is a
+change to ratified text and is left for the next ratification.
+
 ### Decision: fail closed
 
 The class **panics**, deliberately and permanently until a different decision is
@@ -674,7 +702,11 @@ determinism guard must never be removed as a rollback mechanism.
 - `make verify` passes.
 - Every witness of the 2026-07-27 revision graphs successfully under `rta`,
   `vta`, and `cha`, except the declared residual (`n1b`), which must still exit
-  non-zero with the specified diagnostic.
+  non-zero with the specified diagnostic — **and except `n1` under `cha`**, which
+  falls into the same declared residual class through the uninstantiated generic
+  body (see "The `cha` sub-case"). `n1` under `rta` and `vta` must exit 0. This
+  exception is a disclosed unmet criterion, not a relaxation: the shape is
+  undecidable by the ratified vocabulary, and it fails closed.
 - The pooled-sorted-deduplicated site set no longer appears anywhere, and the
   string `local-sites/v1` no longer appears in code, tests, or comments.
 - `loader.Tests` is still `false`, or "Physical position" has been revisited.
