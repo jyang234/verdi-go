@@ -327,6 +327,13 @@ program. **A change to `loader.Tests` must not be made without revisiting this
 section**; under `Tests: true` that class would be a genuine collision the key
 cannot decide, and would correctly fail closed.
 
+The tripwire must fire on its **own** assertion. It reads a fixture that holds an
+**in-package** test file — the only kind that yields the same-`PkgPath` variant —
+and that declares no dependencies, so flipping the field fails on "this path was
+loaded twice", not on a module-resolution error from a fixture whose test
+dependencies `go list -test` cannot satisfy. A tripwire that fires by accident
+misdirects whoever trips it.
+
 If a function-local declaration lacks a valid physical token file or offset,
 `InstanceDiscriminator` must fail loudly with a deterministic diagnostic. It
 must not fabricate an identity and continue.

@@ -55,6 +55,10 @@ func Load(dir string) (*Service, error) {
 	// declaration site by package PATH). Flipping this admits a collision class
 	// that would correctly, but newly, fail closed — see "Physical position" in
 	// docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+	// TestLoadExcludesInPackageTestVariants is the tripwire, over the
+	// inpkgtestsvc fixture: it holds an in-package test file and declares no
+	// dependencies, so the flip fails on the duplicate PkgPath itself rather than
+	// on a fixture whose test dependencies do not resolve.
 	cfg := &packages.Config{
 		Mode:  loadMode,
 		Dir:   dir,

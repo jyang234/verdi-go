@@ -1,6 +1,9 @@
 package loader_test
 
 import (
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -164,8 +167,20 @@ func TestLoadExcludesTestOnlyPackages(t *testing.T) {
 // the flip must be a deliberate decision with the design revisited, never a
 // drive-by. See "Physical position" in
 // docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+//
+// It reads inpkgtestsvc, NOT loansvc, so that flipping the field fails on the
+// assertions below rather than on something incidental. loansvc's behavioral-gate
+// tests pull dependencies its go.mod does not declare for test loading, so
+// `go list -test` there can fail with "updates to go.mod needed" — a tripwire that
+// fires, but with a message pointing at the wrong thing. inpkgtestsvc declares no
+// dependencies and its test file imports only "testing", and — unlike every other
+// fixture — its test file is IN-PACKAGE, which is what produces the same-PkgPath
+// variant this test is actually about.
 func TestLoadExcludesInPackageTestVariants(t *testing.T) {
-	svc, err := loader.Load(fixtureDir())
+	dir := inPkgTestFixtureDir()
+	assertInPackageTestFile(t, dir)
+
+	svc, err := loader.Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -178,5 +193,48 @@ func TestLoadExcludesInPackageTestVariants(t *testing.T) {
 			t.Errorf("package path %q loaded twice, as %q and %q", p.PkgPath, prev, p.ID)
 		}
 		byPath[p.PkgPath] = p.ID
+	}
+}
+
+func inPkgTestFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "testdata", "fixtures", "inpkgtestsvc")
+}
+
+// assertInPackageTestFile keeps the tripwire ARMED. Its whole mechanism is that
+// the fixture holds a test file in the PRODUCTION package: only that yields the
+// `pkg [pkg.test]` variant whose PkgPath duplicates the real one. Moving the file
+// to an external `_test` package, or deleting it, would leave a fixture that
+// still loads, still passes, and proves nothing — a silently disarmed guard.
+func assertInPackageTestFile(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	var prod, inPkg []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".go" {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.PackageClauseOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if !strings.HasSuffix(name, "_test.go") {
+			prod = append(prod, f.Name.Name)
+			continue
+		}
+		if !strings.HasSuffix(f.Name.Name, "_test") {
+			inPkg = append(inPkg, name)
+		}
+	}
+	if len(prod) == 0 {
+		t.Fatalf("fixture %s has no production package", dir)
+	}
+	if len(inPkg) == 0 {
+		t.Fatalf("fixture %s has no IN-PACKAGE test file; the Tests tripwire is disarmed", dir)
 	}
 }
