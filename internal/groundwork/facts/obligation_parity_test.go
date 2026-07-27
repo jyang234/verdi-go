@@ -17,8 +17,9 @@ import (
 // test (the schemadrift TestVerbParity pattern), not left to an indirect fixture
 // golden: a producer that renamed "CANT-PROVE" to "CANT_PROVE" would silently turn
 // every consumer match into a fall-through, and a golden might not exercise that
-// verdict. This test is the tripwire — it imports the producer constant ONLY here,
-// in a test, keeping the production decoupling.
+// verdict. This test is that tripwire for RENAMES — see the closing note for what
+// it does not catch. It imports the producer constant ONLY here, in a test,
+// keeping the production decoupling.
 //
 // It lives beside the constants rather than beside checkObligations because the
 // vocabulary moved here: facts is now the single owner both judges read.
@@ -38,17 +39,12 @@ func TestObligationVerdictParity(t *testing.T) {
 		}
 	}
 
-	// Completeness: every producer status must classify to a named state. Adding a
-	// new producer Status without teaching ClassifyObligationStatus must fail here
-	// rather than fall through to ObligationUnknown, where it would read as
-	// vocabulary drift — a true disclosure, but the wrong one, and one that hides
-	// the real cause behind a "not understood by this groundwork" caution.
-	for _, s := range []obligations.Status{
-		obligations.Satisfied, obligations.Violated,
-		obligations.CantProve, obligations.Unmatched,
-	} {
-		if got := ClassifyObligationStatus(string(s)); got == ObligationUnknown {
-			t.Errorf("producer status %q classifies as ObligationUnknown — facts cannot interpret it", s)
-		}
-	}
+	// The cases above are a HAND-MAINTAINED enumeration, and this test cannot
+	// close that gap: the producer package exports its statuses as loose constants
+	// with no list to range over, so a newly added Status is invisible here until
+	// someone adds a row. What the tripwire does catch is the likelier failure — a
+	// RENAMED status, where the consumer constant silently stops matching and every
+	// verdict falls through to the "not understood" caution. Widening it to true
+	// completeness needs an exported status list on the producer side; that is a
+	// change to internal/static/obligations, not to this test.
 }

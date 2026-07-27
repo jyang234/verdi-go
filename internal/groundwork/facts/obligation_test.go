@@ -189,3 +189,34 @@ func TestEvaluateObligationCanonicalRecordsOverShuffledInput(t *testing.T) {
 		t.Fatalf("duplicate records collapsed: %v", dup.Records)
 	}
 }
+
+// TestEvaluateObligationEmptySectionIsMissingData pins the deliberate fold of the
+// two empty-section shapes the decoder DOES distinguish. Both are missing data:
+// ObligationUnresolved means "the section names other rules but not this one",
+// evidence an empty section cannot carry. The probe below asserts the decoder
+// distinction itself, so this test fails loudly if the premise ever stops holding.
+func TestEvaluateObligationEmptySectionIsMissingData(t *testing.T) {
+	omitted := graph.NewIndex(&graph.Graph{Nodes: []graph.Node{{FQN: "svc.Fn"}}})
+	present := graph.NewIndex(&graph.Graph{
+		Nodes:       []graph.Node{{FQN: "svc.Fn"}},
+		Obligations: []graph.Obligation{},
+	})
+	if omitted.Obligations() != nil {
+		t.Fatal("premise broken: an omitted section no longer decodes to nil")
+	}
+	if present.Obligations() == nil {
+		t.Fatal("premise broken: a present empty section no longer decodes to non-nil")
+	}
+
+	for name, ix := range map[string]*graph.Index{"omitted": omitted, "present but empty": present} {
+		t.Run(name, func(t *testing.T) {
+			got := EvaluateObligation(ix, "tx-must-close")
+			if got.State != ObligationMissingData {
+				t.Fatalf("state = %v, want ObligationMissingData", got.State)
+			}
+			if len(got.Records) != 0 {
+				t.Fatalf("records = %v, want none", got.Records)
+			}
+		})
+	}
+}

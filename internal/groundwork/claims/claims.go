@@ -519,9 +519,11 @@ func (m *model) evalNoConcurrentReach(c Claim) Result {
 				"concurrent evaluator returned blind state without evidence"), bindings)
 		}
 		// Unlike reach and pass_through, the witness carries no From. This kind has
-		// no from selector: the fact's Blind.From is the cone's lexicographically
-		// first member, an internal traversal detail the claim never named. Emitting
-		// it would read as a caller-supplied source the author can act on.
+		// no from selector, and the fact's Blind.From is never one: it is the cone's
+		// first member for a cone-frontier witness and empty for the dynamic-boundary
+		// and ConcurrentDispatch layers. Either way it is an internal traversal
+		// detail the claim never named, and emitting it would read as a
+		// caller-supplied source the author can act on.
 		result := withBindings(errored(c, ReasonBlindFrontier,
 			"no concurrent path found, but the frontier is blind at "+fact.Blind.Site), bindings)
 		result.Witnesses = []Witness{{BlindSite: fact.Blind.Site}}

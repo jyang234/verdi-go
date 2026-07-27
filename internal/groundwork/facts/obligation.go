@@ -87,9 +87,17 @@ func ClassifyObligationStatus(status string) ObligationState {
 // known abstention because its meaning is unavailable, not merely unproven; and
 // SATISFIED is reachable only when every matched record proved it.
 //
-// An empty obligations section — omitted or present-but-empty, a distinction the
-// graph decoder does not preserve — is ObligationMissingData, never a proof of
-// absence. Records are copied before sorting; the caller's graph is not mutated.
+// An empty obligations section is ObligationMissingData whether it was omitted
+// or present-but-empty. The decoder DOES preserve that difference (an omitted
+// section decodes to a nil slice, "obligations": [] to an empty non-nil one), so
+// the fold is a deliberate choice, not a limitation: ObligationUnresolved is
+// defined as "the section names other rules but not this one", which carries the
+// real information that the producer evaluated obligations and this rule was not
+// among them. An empty section carries no such evidence, so it reads as missing
+// data. Both are ERRORs either way — neither can be mistaken for a proof of
+// absence. Pinned by TestEvaluateObligationEmptySectionIsMissingData.
+//
+// Records are copied before sorting; the caller's graph is not mutated.
 func EvaluateObligation(ix *graph.Index, name string) ObligationResult {
 	result := ObligationResult{State: ObligationMissingData, Name: name}
 	if ix == nil || len(ix.Obligations()) == 0 {
