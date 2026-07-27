@@ -1070,6 +1070,7 @@ func TestLocalTypeGraphEncodesSharedDAGInBoundedSize(t *testing.T) {
 	got := localTypeGraph(fn, []types.Type{root})
 	elapsed := time.Since(start)
 
+	t.Logf("depth-%d shared DAG: %d bytes in %v", depth, len(got), elapsed)
 	if len(got) >= 4<<10 {
 		t.Fatalf("depth-%d shared DAG encoded to %d bytes, want under 4 KiB; the encoding is not sharing nodes", depth, len(got))
 	}

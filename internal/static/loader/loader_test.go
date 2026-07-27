@@ -3,6 +3,7 @@ package loader_test
 import (
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/static/loader"
@@ -151,5 +152,31 @@ func TestLoadExcludesTestOnlyPackages(t *testing.T) {
 		if len(p.CompiledGoFiles) == 0 {
 			t.Errorf("package %q has no production Go files and should have been filtered", p.PkgPath)
 		}
+	}
+}
+
+// TestLoadExcludesInPackageTestVariants pins Load's Tests: false behaviorally,
+// not by reading the field. Under Tests: true go/packages also returns the
+// in-package test variant, which reports the SAME PkgPath over the SAME files at
+// the SAME byte offsets as the real package — a pair the function-local type
+// discriminator cannot separate, because its declaration sites are qualified by
+// package PATH. That would be a new, correctly fail-closed collision class, so
+// the flip must be a deliberate decision with the design revisited, never a
+// drive-by. See "Physical position" in
+// docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+func TestLoadExcludesInPackageTestVariants(t *testing.T) {
+	svc, err := loader.Load(fixtureDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	byPath := make(map[string]string, len(svc.Packages))
+	for _, p := range svc.Packages {
+		if strings.Contains(p.ID, ".test") || strings.Contains(p.ID, "[") {
+			t.Errorf("loaded test-variant package %q; Load must set Tests: false", p.ID)
+		}
+		if prev, ok := byPath[p.PkgPath]; ok {
+			t.Errorf("package path %q loaded twice, as %q and %q", p.PkgPath, prev, p.ID)
+		}
+		byPath[p.PkgPath] = p.ID
 	}
 }
