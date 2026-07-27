@@ -83,10 +83,23 @@ func prefixFor(s diffState) string {
 
 type ekey struct{ from, to string }
 
+// nodeIndex maps each display FQN to ONE representative Node for the diff's presence
+// check and its tier comparison. An FQN can carry several records (a generic instantiated
+// at two function-local types collapses to one display FQN, and every instance is kept);
+// the representative is the FQN's canonical MAXIMUM under nodeLess — a deterministic
+// choice (never the arrival-order last writer, so the delta and the render are identical
+// under node reordering), mirroring edgeIndex below so the two indexes cannot drift.
+//
+// This is determinism, not adjudication: a genuinely divergent same-FQN pair (records that
+// disagree on tier) still collapses to a single silent representative, so one instance's
+// tier is the one the diff reports. That is a disclosed limitation of FQN-keyed diffing,
+// not a claim that the records agreed.
 func nodeIndex(g *Graph) map[string]Node {
 	m := make(map[string]Node, len(g.Nodes))
 	for _, n := range g.Nodes {
-		m[n.FQN] = n
+		if cur, ok := m[n.FQN]; !ok || nodeLess(cur, n) {
+			m[n.FQN] = n
+		}
 	}
 	return m
 }
