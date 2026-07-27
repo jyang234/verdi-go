@@ -596,25 +596,38 @@ func (m *model) evalObligation(c Claim) Result {
 			Detail: record.Detail,
 		}
 	}
-	// Human detail names the dominant status and how many records were weighed.
-	// The per-record producer prose stays in the witnesses, so no machine consumer
-	// has to read this string to learn what happened.
-	summary := func(status string) string {
-		return fmt.Sprintf("%s across %d matched record(s)", status, len(fact.Records))
+	// Human detail names the dominant status, how many of the matched records
+	// actually carry it, and how many were weighed in total. Both counts are needed:
+	// dominance is not a majority vote (one VIOLATED among ten SATISFIED decides the
+	// verdict), so "<status> across N records" would read as if all N said it — the
+	// worst misreading for the two negative poles. Text mode carries no witnesses,
+	// so this string is the only place the split is visible there. The per-record
+	// producer prose stays in the witnesses, so no machine consumer has to read this
+	// string to learn what happened.
+	summary := func(status string, state facts.ObligationState) string {
+		matching := 0
+		for _, record := range fact.Records {
+			if facts.ClassifyObligationStatus(record.Status) == state {
+				matching++
+			}
+		}
+		return fmt.Sprintf("%s in %d of %d matched record(s)", status, matching, len(fact.Records))
 	}
 
 	var result Result
 	switch fact.State {
 	case facts.ObligationViolated:
-		result = fail(c, summary(facts.ObligationStatusViolated))
+		result = fail(c, summary(facts.ObligationStatusViolated, facts.ObligationViolated))
 	case facts.ObligationSatisfied:
-		result = passWithDetail(c, summary(facts.ObligationStatusSatisfied))
+		result = passWithDetail(c, summary(facts.ObligationStatusSatisfied, facts.ObligationSatisfied))
 	case facts.ObligationUnknown:
-		result = errored(c, ReasonUnknownStatus, summary("unrecognized producer status"))
+		// The unrecognized statuses are the records that classify as Unknown; the
+		// count names how many carried a vocabulary this groundwork cannot read.
+		result = errored(c, ReasonUnknownStatus, summary("unrecognized producer status", facts.ObligationUnknown))
 	case facts.ObligationCantProve:
-		result = errored(c, ReasonCantProve, summary(facts.ObligationStatusCantProve))
+		result = errored(c, ReasonCantProve, summary(facts.ObligationStatusCantProve, facts.ObligationCantProve))
 	case facts.ObligationUnmatched:
-		result = errored(c, ReasonUnmatched, summary(facts.ObligationStatusUnmatched))
+		result = errored(c, ReasonUnmatched, summary(facts.ObligationStatusUnmatched, facts.ObligationUnmatched))
 	default:
 		return errored(c, ReasonMalformedClaim, "obligation evaluator returned an unknown state")
 	}

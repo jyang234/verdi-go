@@ -51,7 +51,7 @@ func TestObligationClaimStates(t *testing.T) {
 			obs:  []graph.Obligation{obligationOf(obligationRule, "SATISFIED", "closed on every path")},
 			want: Result{
 				ID: "tx", Kind: "obligation", Label: "tx", Outcome: Pass,
-				Detail:    "SATISFIED across 1 matched record(s)",
+				Detail:    "SATISFIED in 1 of 1 matched record(s)",
 				Bindings:  bound,
 				Witnesses: []Witness{obligationWitness("SATISFIED", "closed on every path")},
 			},
@@ -66,10 +66,53 @@ func TestObligationClaimStates(t *testing.T) {
 			},
 			want: Result{
 				ID: "tx", Kind: "obligation", Label: "tx", Outcome: Fail,
-				Detail:   "VIOLATED across 2 matched record(s)",
+				Detail:   "VIOLATED in 1 of 2 matched record(s)",
 				Bindings: bound,
 				Witnesses: []Witness{
 					obligationWitness("CANT-PROVE", "unprovable handoff"),
+					obligationWitness("VIOLATED", "leaks on the error path"),
+				},
+			},
+		},
+		{
+			// The detail must not read as if every weighed record abstained: exactly
+			// one of the three did, and dominance — not a count — is what decided the
+			// verdict. Text mode has no witnesses, so this string is the only place
+			// the split is visible.
+			name: "cant-prove among satisfied names its own share",
+			obs: []graph.Obligation{
+				obligationOf(obligationRule, "SATISFIED", "closed on the happy path"),
+				obligationOf(obligationRule, "CANT-PROVE", "unprovable handoff"),
+				obligationOf(obligationRule, "SATISFIED", "closed on the retry path"),
+			},
+			want: Result{
+				ID: "tx", Kind: "obligation", Label: "tx",
+				Outcome: Errored, Reason: ReasonCantProve,
+				Detail:   "CANT-PROVE in 1 of 3 matched record(s)",
+				Bindings: bound,
+				Witnesses: []Witness{
+					obligationWitness("CANT-PROVE", "unprovable handoff"),
+					obligationWitness("SATISFIED", "closed on the happy path"),
+					obligationWitness("SATISFIED", "closed on the retry path"),
+				},
+			},
+		},
+		{
+			// Same shape for the worst misreading: one violation among three records
+			// must not print as "VIOLATED across 3".
+			name: "violated among satisfied names its own share",
+			obs: []graph.Obligation{
+				obligationOf(obligationRule, "SATISFIED", "closed on the happy path"),
+				obligationOf(obligationRule, "VIOLATED", "leaks on the error path"),
+				obligationOf(obligationRule, "SATISFIED", "closed on the retry path"),
+			},
+			want: Result{
+				ID: "tx", Kind: "obligation", Label: "tx", Outcome: Fail,
+				Detail:   "VIOLATED in 1 of 3 matched record(s)",
+				Bindings: bound,
+				Witnesses: []Witness{
+					obligationWitness("SATISFIED", "closed on the happy path"),
+					obligationWitness("SATISFIED", "closed on the retry path"),
 					obligationWitness("VIOLATED", "leaks on the error path"),
 				},
 			},
@@ -98,7 +141,7 @@ func TestObligationClaimStates(t *testing.T) {
 			want: Result{
 				ID: "tx", Kind: "obligation", Label: "tx",
 				Outcome: Errored, Reason: ReasonUnknownStatus,
-				Detail:    "unrecognized producer status across 1 matched record(s)",
+				Detail:    "unrecognized producer status in 1 of 1 matched record(s)",
 				Bindings:  bound,
 				Witnesses: []Witness{obligationWitness("CANT-PROVE-OWNERSHIP", "a future refinement")},
 			},
@@ -109,7 +152,7 @@ func TestObligationClaimStates(t *testing.T) {
 			want: Result{
 				ID: "tx", Kind: "obligation", Label: "tx",
 				Outcome: Errored, Reason: ReasonCantProve,
-				Detail:    "CANT-PROVE across 1 matched record(s)",
+				Detail:    "CANT-PROVE in 1 of 1 matched record(s)",
 				Bindings:  bound,
 				Witnesses: []Witness{obligationWitness("CANT-PROVE", "unprovable handoff")},
 			},
@@ -120,7 +163,7 @@ func TestObligationClaimStates(t *testing.T) {
 			want: Result{
 				ID: "tx", Kind: "obligation", Label: "tx",
 				Outcome: Errored, Reason: ReasonUnmatched,
-				Detail:    "UNMATCHED across 1 matched record(s)",
+				Detail:    "UNMATCHED in 1 of 1 matched record(s)",
 				Bindings:  bound,
 				Witnesses: []Witness{obligationWitness("UNMATCHED", "no acquire site")},
 			},
@@ -232,7 +275,7 @@ func TestObligationClaimMachineEvidence(t *testing.T) {
       "id": "tx",
       "kind": "obligation",
       "outcome": "FAIL",
-      "detail": "VIOLATED across 2 matched record(s)",
+      "detail": "VIOLATED in 1 of 2 matched record(s)",
       "bindings": {
         "obligation": [
           "tx-must-close"
