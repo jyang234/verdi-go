@@ -97,6 +97,151 @@ func TestInstanceDiscriminatorSeparatesFunctionLocalTypes(t *testing.T) {
 	}
 }
 
+// multiSiteLocalTypes reaches TWO distinct local declarations from one type
+// argument: the local alias `alias`, and the recursive local named type `node`
+// nested inside its RHS. Byte offsets in the pinned key below are offsets into
+// this source, so the two must be edited together.
+//
+//	offset 66 -> `node` in `type node struct{ Next *node }`
+//	offset 98 -> `alias` in `type alias = []node`
+const multiSiteLocalTypes = `package localtypes
+func instantiate[T any]() {}
+func use() { type node struct{ Next *node }; type alias = []node; instantiate[alias]() }
+`
+
+// localSitesPrefix separates the compatibility-sensitive type-string prefix from
+// the framed local-site suffix.
+const localSitesPrefix = "\x00local-sites/v1\x00"
+
+// parseLocalSites unframes key's local-site suffix, requiring the exact
+// `<decimal len>:<site>` framing on every entry. Length framing is what keeps a
+// colon or comma inside a filename from producing an ambiguous concatenation, so
+// the framing is asserted here rather than assumed.
+func parseLocalSites(t *testing.T, key string) []string {
+	t.Helper()
+	index := strings.Index(key, localSitesPrefix)
+	if index < 0 {
+		t.Fatalf("discriminator %q has no local-site suffix", key)
+	}
+	if strings.Count(key, localSitesPrefix) != 1 {
+		t.Fatalf("discriminator %q has more than one local-site suffix", key)
+	}
+	var sites []string
+	for _, framed := range strings.Split(key[index+len(localSitesPrefix):], "\x00") {
+		colon := strings.Index(framed, ":")
+		if colon < 0 {
+			t.Fatalf("framed site %q has no length delimiter", framed)
+		}
+		length, err := strconv.Atoi(framed[:colon])
+		if err != nil {
+			t.Fatalf("framed site %q has a non-decimal length: %v", framed, err)
+		}
+		site := framed[colon+1:]
+		if length != len(site) {
+			t.Fatalf("framed site %q declares length %d, but %q is %d bytes", framed, length, site, len(site))
+		}
+		sites = append(sites, site)
+	}
+	return sites
+}
+
+// TestInstanceDiscriminatorFramesMultipleSortedSites pins the parts of the
+// local-sites/v1 suffix that only a MULTI-site key can exercise: the ascending
+// sort, and the per-site length framing. Every other fixture yields exactly one
+// site, which leaves sort.Strings unpinned — a key built from an unsorted map
+// range varies within a single process, so the loop below re-derives the key and
+// requires byte-equality every time rather than trusting one lucky call.
+func TestInstanceDiscriminatorFramesMultipleSortedSites(t *testing.T) {
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", multiSiteLocalTypes), "example.com/localtypes.instantiate[")
+	if len(instances) != 1 {
+		t.Fatalf("instantiate instances = %d, want 1", len(instances))
+	}
+
+	const want = "example.com/localtypes\x00example.com/localtypes.alias" +
+		"\x00local-sites/v1\x0011:local.go:66\x0011:local.go:98"
+	got := InstanceDiscriminator(instances[0])
+	if got != want {
+		t.Fatalf("InstanceDiscriminator() = %q, want %q", got, want)
+	}
+
+	sites := parseLocalSites(t, got)
+	if len(sites) != 2 {
+		t.Fatalf("local sites = %v, want the alias and the recursive named type", sites)
+	}
+	if sites[0] == sites[1] {
+		t.Errorf("local sites = %v, want two distinct declarations", sites)
+	}
+	if !sort.StringsAreSorted(sites) {
+		t.Errorf("local sites = %v, want ascending order", sites)
+	}
+	for _, site := range []string{"local.go:66", "local.go:98"} {
+		if n := countSites(sites, site); n != 1 {
+			t.Errorf("site %q appears %d times in %v, want exactly 1", site, n, sites)
+		}
+	}
+
+	for call := 0; call < 20; call++ {
+		if repeat := InstanceDiscriminator(instances[0]); repeat != want {
+			t.Fatalf("call %d discriminator = %q, want %q", call, repeat, want)
+		}
+	}
+}
+
+func countSites(sites []string, want string) int {
+	n := 0
+	for _, site := range sites {
+		if site == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestInstanceDiscriminatorDeduplicatesOneDeclaration pins the site SET semantics
+// against a genuine duplicate: box[int] and box[string] are separate *types.Named
+// values sharing one *types.TypeName, so both walks reach the same declaration
+// through distinct types and the seenTypes cycle guard cannot mask it. Reaching
+// one local type twice through the identical types.Type (map[inner]inner) would
+// short-circuit before the site set is consulted and prove nothing.
+func TestInstanceDiscriminatorDeduplicatesOneDeclaration(t *testing.T) {
+	const src = `package localtypes
+func instantiate[T any]() {}
+func use() { type box[T any] struct{ V T }; instantiate[struct{ A box[int]; B box[string] }]() }
+`
+	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src), "example.com/localtypes.instantiate[")
+	if len(instances) != 1 {
+		t.Fatalf("instantiate instances = %d, want 1", len(instances))
+	}
+
+	args := instances[0].TypeArgs()
+	if len(args) != 1 {
+		t.Fatalf("type arguments = %d, want 1", len(args))
+	}
+	fields, ok := args[0].Underlying().(*types.Struct)
+	if !ok || fields.NumFields() != 2 {
+		t.Fatalf("type argument underlying = %v, want a two-field struct", args[0].Underlying())
+	}
+	left, leftOK := fields.Field(0).Type().(*types.Named)
+	right, rightOK := fields.Field(1).Type().(*types.Named)
+	if !leftOK || !rightOK {
+		t.Fatalf("struct fields = %v and %v, want two *types.Named instantiations", fields.Field(0).Type(), fields.Field(1).Type())
+	}
+	if left == right {
+		t.Fatal("fixture reached one declaration through a single types.Type; the cycle guard, not the site set, would deduplicate")
+	}
+	if left.Obj() != right.Obj() {
+		t.Fatalf("instantiations resolve to different TypeNames %v and %v, want one shared declaration", left.Obj(), right.Obj())
+	}
+
+	sites := parseLocalSites(t, InstanceDiscriminator(instances[0]))
+	if len(sites) != 1 {
+		t.Fatalf("local sites = %v, want one deduplicated declaration site", sites)
+	}
+	if !strings.HasPrefix(sites[0], "local.go:") {
+		t.Errorf("local site = %q, want the physical declaration of box", sites[0])
+	}
+}
+
 func TestInstanceDiscriminatorPackageTypeBytesUnchanged(t *testing.T) {
 	const src = `package localtypes
 type result struct{ A int }
@@ -553,26 +698,39 @@ func TestInstanceDiscriminatorFailsClosedOnUntrustworthyLocalIdentity(t *testing
 	})
 }
 
+// TestInstanceDiscriminatorRepeatable covers both the colliding single-site
+// source and the multi-site source, so the rebuild loop also exercises the
+// suffix's intra-key ordering and not just its per-instance stability.
 func TestInstanceDiscriminatorRepeatable(t *testing.T) {
-	instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", collidingLocalTypes), "example.com/localtypes.instantiate[")
-	want := make([]string, len(instances))
-	for i, fn := range instances {
-		want[i] = InstanceDiscriminator(fn)
-		for call := 0; call < 20; call++ {
-			if got := InstanceDiscriminator(fn); got != want[i] {
-				t.Fatalf("same-instance call %d discriminator = %q, want %q", call, got, want[i])
+	for _, src := range []struct {
+		name   string
+		source string
+	}{
+		{name: "single_site_per_instance", source: collidingLocalTypes},
+		{name: "multiple_sites_per_instance", source: multiSiteLocalTypes},
+	} {
+		t.Run(src.name, func(t *testing.T) {
+			instances := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src.source), "example.com/localtypes.instantiate[")
+			want := make([]string, len(instances))
+			for i, fn := range instances {
+				want[i] = InstanceDiscriminator(fn)
+				for call := 0; call < 20; call++ {
+					if got := InstanceDiscriminator(fn); got != want[i] {
+						t.Fatalf("same-instance call %d discriminator = %q, want %q", call, got, want[i])
+					}
+				}
 			}
-		}
-	}
 
-	for run := 0; run < 20; run++ {
-		rebuilt := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", collidingLocalTypes), "example.com/localtypes.instantiate[")
-		got := make([]string, len(rebuilt))
-		for i, fn := range rebuilt {
-			got[i] = InstanceDiscriminator(fn)
-		}
-		if strings.Join(got, "\n") != strings.Join(want, "\n") {
-			t.Errorf("run %d discriminators = %q, want %q", run, got, want)
-		}
+			for run := 0; run < 20; run++ {
+				rebuilt := localInstances(t, buildLocalTypeProgram(t, "/checkout/root/local.go", src.source), "example.com/localtypes.instantiate[")
+				got := make([]string, len(rebuilt))
+				for i, fn := range rebuilt {
+					got[i] = InstanceDiscriminator(fn)
+				}
+				if strings.Join(got, "\n") != strings.Join(want, "\n") {
+					t.Errorf("run %d discriminators = %q, want %q", run, got, want)
+				}
+			}
+		})
 	}
 }
