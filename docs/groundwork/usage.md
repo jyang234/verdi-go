@@ -272,8 +272,13 @@ It declares seven invariant families:
   path entered via a concurrent edge (a go/defer call site): "no DB writes
   from goroutines" — the agent pattern of "make it async" introducing
   unsupervised effects. Same three-valued discipline and `require_proof`
-  escalation. Disclosed v1 limit: the concurrent flag conflates `go` and
-  `defer` sites.
+  escalation. Disclosed v1 limits: the concurrent flag conflates `go` and
+  `defer` sites; and a concurrent edge whose target is neither a boundary label
+  nor a declared node (`graph.json` validates an edge's `from` against the node
+  table, but not its `to`) is dropped from the surface with **no** seed and
+  **no** blind spot — so whatever that target spawns is outside the check, and
+  the rule can hold without covering it. The fail-closed correction is deferred
+  pending review.
 - **`io_budget`** — caps external *writes* reachable from a route (the
   side-effect-blowout guard); reads don't count, and the composition root is
   exempt.
@@ -1312,7 +1317,7 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 | `entrypoint` | `name`, `fn` [, `entry_kind`] | a record whose route/topic `name` matches carries a handler equal to the resolved `fn` |
 | `reach` | `from`, `to`, `expect` | reachability matches `expect` (`present` or `absent`) |
 | `pass_through` | `from`, `to`, `through` | every visible path from a source to a target enters the waypoint |
-| `no_concurrent_reach` | `to` | no target sits on the graph's concurrent surface |
+| `no_concurrent_reach` | `to` | no target sits on the graph's concurrent surface (with one disclosed gap — see "What a PASS on an absence kind does and does not prove") |
 | `obligation` | `name`, `expect` | every obligation record the graph carries for `name` is `SATISFIED` |
 
 The first eight are **structural** — they read the node/edge/entrypoint universe
@@ -1490,7 +1495,7 @@ vacuous proof:
 | Kind | Fact | Outcome |
 |---|---|---|
 | `reach` | path found | PASS if `expect: present`, FAIL if `absent` |
-| `reach` | proven absent | FAIL if `expect: present`, PASS if `absent` |
+| `reach` | absent over the visible frontier | FAIL if `expect: present`, PASS if `absent` |
 | `reach` | no path, blind frontier | ERROR `BLIND_FRONTIER` (either `expect`) |
 | `reach` | source or target unbound | ERROR `UNBOUND_SELECTOR` |
 | `pass_through` | ≥1 bypass path | FAIL |
@@ -1498,7 +1503,7 @@ vacuous proof:
 | `pass_through` | no bypass, blind frontier | ERROR `BLIND_FRONTIER` |
 | `pass_through` | any selector family unbound | ERROR `UNBOUND_SELECTOR` |
 | `no_concurrent_reach` | target on the concurrent surface | FAIL |
-| `no_concurrent_reach` | no hit, visible surface | PASS |
+| `no_concurrent_reach` | no hit, no blind witness | PASS |
 | `no_concurrent_reach` | no hit, blind surface | ERROR `BLIND_FRONTIER` |
 | `no_concurrent_reach` | target unbound | ERROR `UNBOUND_SELECTOR` |
 | `obligation` | any record `VIOLATED` | FAIL |
@@ -1511,8 +1516,22 @@ vacuous proof:
 
 A found path **dominates** blindness on `reach`: a concrete witness already
 settles the expectation, so the frontier no longer matters. Everywhere else
-blindness dominates a proven absence. On `obligation`, a concrete `VIOLATED`
+blindness dominates an absence. On `obligation`, a concrete `VIOLATED`
 dominates a sibling abstention for the same reason.
+
+**What a PASS on an absence kind does and does not prove.** The absence PASSes
+above (`reach`/`absent`, `pass_through`, `no_concurrent_reach`) are proofs over
+the *visible* frontier, minus two disclosed carve-outs. Both are recorded here so
+a green run is never mistaken for a claim the evaluator does not make.
+
+- `reach` with `expect: absent` (and `pass_through`'s guarded PASS) exclude a
+  source from its own target set, so a source that reaches **itself** through a
+  cycle still reads as absent. Inherited behavior, kept for exact parity with the
+  standing `must_not_reach` gate; a separately reviewed correction is pending.
+- `no_concurrent_reach`'s PASS does not cover a concurrent edge whose target is
+  neither a boundary label nor a declared node — see the disclosed v1 limits
+  listed with the `no_concurrent_reach` invariant family under
+  [The policy](#the-policy).
 
 **`pass_through` is vacuously true when no source-to-target path exists.** That
 is the mathematical all-paths property, and it is deliberate: the claim asserts

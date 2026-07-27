@@ -30,11 +30,21 @@ import (
 // none of these is treated as prose (intent/context) and never flagged — that
 // keeps the signal high and the false-alarm rate near zero, the same bar the
 // project's CI gates hold ("neither lets an AI judge").
+// "complete", "fully" and "exhaustive" are the COVERAGE claims — "the complete
+// surface", "a fully visible frontier". They are checkable in the same way
+// "every" and "cannot" are, and they are the exact form a soundness claim takes
+// in this codebase (CLAUDE.md, "collect functions completely"), so a body that
+// narrows what a pass covers while the doc still says "complete" is precisely
+// the drift this nudge exists to catch. "complete" is matched as a substring, so
+// it also covers "completely" — and "incomplete", which is a disclosure rather
+// than an assertion; that direction only over-flags, and over-flagging an
+// advisory nudge costs a re-read, while under-flagging costs a false proof.
 var assertionWords = []string{
 	"always", "never", "must", "guarantee", "guaranteed", "sorted", "deterministic",
 	"byte-identical", "invariant", "idempotent", "exactly", "every", "cannot",
 	"in order", "before", "precede", "non-nil", "total order", "race", "stable",
 	"deduplicate", "dedupe", "canonical", "fail closed", "fail-closed",
+	"complete", "fully", "exhaustive",
 }
 
 type fnInfo struct {

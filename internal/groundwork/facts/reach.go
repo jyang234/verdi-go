@@ -123,8 +123,9 @@ type sourceSearch struct {
 // no function matches does the effect surface decide, and there the first owner
 // in that same cone order that carries a matching effect wins (see
 // coneMatchingEffect for the within-owner tie-break). BFS distance orders
-// nothing: the parent map exists SOLELY to reconstruct a deterministic shortest
-// path to whatever the cone order selected.
+// NOTHING: the parent map's keys are the reachable set canonicalCone sorts, and
+// its edges reconstruct a deterministic shortest path to whatever that cone
+// order selected. Discovery order decides membership, never precedence.
 //
 // DISCLOSED CARVE-OUT: the function scan is cone[1:], so the SOURCE ITSELF is
 // never matched as its own target. A source that reaches itself through a cycle
@@ -205,6 +206,12 @@ func canonicalCone(source string, parent map[string]string) []string {
 // canonical minimum. This within-owner canonicalization is a deliberate
 // post-extraction correction, pinned by the fitness characterization subtest
 // "canonical effect within one owner over reversed declaration order".
+//
+// Only WHICH matching effect is named changes. An owner that carries a match
+// carries one either way, so the state stays ReachFound and the finding stays a
+// Violation: the correction cannot flip a verdict. Confirmed empirically — zero
+// severity and zero presence differences across a 1210-case differential against
+// the pre-extraction evaluator.
 func coneMatchingEffect(
 	cone []string,
 	targets map[string]bool,
@@ -282,6 +289,12 @@ func BlindFrontier(
 // post-extraction correction required by the shuffle-invariance contract, on the
 // precedent the concurrent path already set. blindSpotsAt owns the first;
 // the dynamic loop below owns the second.
+//
+// Only the representative changes. A cone that is blind at a site stays blind
+// whichever of that site's candidates is named, so the state stays ReachBlind
+// and the finding stays a Caution (or a require_proof Violation): the correction
+// cannot flip a verdict. Confirmed empirically — zero severity and zero presence
+// differences across a 1210-case differential against the pre-extraction probe.
 func blindForCone(
 	ix *graph.Index,
 	from string,
@@ -365,6 +378,12 @@ func canonicalBlindWitnesses(witnesses []BlindWitness) []BlindWitness {
 // correction first. Pinned by the fitness characterization subtest "canonical
 // blind spot within one site over adversarial manifest order". Which SITE is
 // selected is untouched — that stays cone order, see blindForCone.
+//
+// Only the representative changes. A site with any non-disclosure spot is blind
+// whichever of them is named, so the state stays ReachBlind and the finding
+// stays a Caution (or a require_proof Violation): the correction cannot flip a
+// verdict. Confirmed empirically — zero severity and zero presence differences
+// across a 1210-case differential against the pre-extraction probe.
 func blindSpotsAt(
 	ix *graph.Index,
 	from string,

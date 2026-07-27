@@ -18,7 +18,16 @@ const (
 	ConcurrentUnbound ConcurrentState = iota
 	// ConcurrentHit means at least one target is on the concurrent surface.
 	ConcurrentHit
-	// ConcurrentClean means no target is on a fully visible concurrent surface.
+	// ConcurrentClean means no target is on the concurrent surface and no blind
+	// witness was found — with one disclosed carve-out, so it is NOT "the surface
+	// is fully visible". BuildConcurrentSurface drops a concurrent edge whose To is
+	// neither a boundary label nor a declared graph node (graph.Load validates an
+	// edge's From against the node table but not its To), recording no seed AND no
+	// blind spot for it, so whatever that target spawns is outside this state's
+	// coverage. Inherited pre-extraction behavior kept for exact parity; the
+	// fail-closed correction is deferred pending review. Consumers switch on this
+	// constant (claims.evalNoConcurrentReach, fitness.checkNoConcurrentReach) and
+	// read this doc rather than the algorithm, so the carve-out is stated here too.
 	ConcurrentClean
 	// ConcurrentBlind means no target was found, but the concurrent surface is
 	// incomplete.
@@ -59,9 +68,15 @@ type ConcurrentSurface struct {
 	blind   *BlindWitness
 }
 
-// BuildConcurrentSurface constructs the complete rule-independent concurrent
-// surface once. Only concurrent internal targets that are graph nodes become
-// seeds; direct concurrent boundary edges remain terminal targets.
+// BuildConcurrentSurface constructs the rule-independent concurrent surface
+// once. Only concurrent internal targets that are graph nodes become seeds;
+// direct concurrent boundary edges remain terminal targets.
+//
+// The surface is NOT complete over the graph's concurrent edges: the seed loop's
+// DISCLOSED GAP below drops an edge whose To is neither a boundary label nor a
+// declared node, with no seed and no blind spot, so ConcurrentClean does not
+// cover what such a target spawns. That gap is stated on ConcurrentClean as well
+// — consumers switch on the state and never read this body.
 func BuildConcurrentSurface(ix *graph.Index) ConcurrentSurface {
 	if ix == nil {
 		return ConcurrentSurface{}
