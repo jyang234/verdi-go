@@ -46,6 +46,9 @@
 //	pass_through from, to, through      every visible path enters waypoint  ERROR
 //	no_concurrent_reach to              target is absent from the visible    ERROR
 //	                                   concurrent surface
+//	obligation  name, expect            the graph's own obligation verdicts  ERROR
+//	                                   prove the named rule (expect:
+//	                                   "satisfied" only)
 //
 // entrypoint has its own two-poled polarity, distinct from the absence kinds:
 // ZERO records matching the route/topic name is a FAIL (not an ERROR) — existence
@@ -448,6 +451,7 @@ var allowedFields = map[string][]string{
 		"from", "to", "through",
 	},
 	"no_concurrent_reach": {"to"},
+	"obligation":          {"name", "expect"},
 }
 
 func (m *model) eval(c Claim) Result {
@@ -481,6 +485,8 @@ func (m *model) eval(c Claim) Result {
 		return m.evalPassThrough(c)
 	case "no_concurrent_reach":
 		return m.evalNoConcurrentReach(c)
+	case "obligation":
+		return m.evalObligation(c)
 	default:
 		return errored(c, ReasonMalformedClaim, "unknown claim kind "+strconv.Quote(c.Kind))
 	}
@@ -534,6 +540,75 @@ func (m *model) concurrentFacts() facts.ConcurrentSurface {
 		m.concurrentSurface = &surface
 	}
 	return *m.concurrentSurface
+}
+
+// evalObligation reads the obligation verdicts the graph already carries; it
+// cannot author a rule. Only `satisfied` is accepted in v1 — the inverse
+// ("prove this obligation is broken") is not something a caller may assert from
+// the outside, and the four abstaining states below have no negative pole to map
+// it onto.
+//
+// Every abstention is an ERROR with its own reason rather than a FAIL: the claim
+// asks whether the obligation is proven, and "the producer could not say" is not
+// a disproof (tenet 2). Only a concrete VIOLATED fails.
+func (m *model) evalObligation(c Claim) Result {
+	if c.Name == "" {
+		return errored(c, ReasonMalformedClaim, "obligation requires 'name'")
+	}
+	if c.Expect != "satisfied" {
+		return errored(c, ReasonMalformedClaim, `obligation requires expect "satisfied"`)
+	}
+
+	fact := facts.EvaluateObligation(m.reachIndex, c.Name)
+	switch fact.State {
+	case facts.ObligationMissingData:
+		return errored(c, ReasonMissingGraphData, "graph carries no obligations section")
+	case facts.ObligationUnresolved:
+		// The section exists and does not name this rule. Do NOT bind
+		// Bindings.Obligation: no rule matched, and a fabricated binding would read
+		// as a resolved identity the graph never carried.
+		return errored(c, ReasonUnresolved, "no obligation rule named "+strconv.Quote(c.Name))
+	}
+
+	// Past this point a rule matched, so the bindings and the complete witness set
+	// are the same whatever the dominant status is: a FAIL exposes exactly the
+	// evidence a PASS would.
+	bindings := Bindings{Obligation: []string{c.Name}}
+	witnesses := make([]Witness, len(fact.Records))
+	for i, record := range fact.Records {
+		witnesses[i] = Witness{
+			Rule:   record.Rule,
+			Fn:     record.Fn,
+			Site:   record.Site,
+			Status: record.Status,
+			Detail: record.Detail,
+		}
+	}
+	// Human detail names the dominant status and how many records were weighed.
+	// The per-record producer prose stays in the witnesses, so no machine consumer
+	// has to read this string to learn what happened.
+	summary := func(status string) string {
+		return fmt.Sprintf("%s across %d matched record(s)", status, len(fact.Records))
+	}
+
+	var result Result
+	switch fact.State {
+	case facts.ObligationViolated:
+		result = fail(c, summary(facts.ObligationStatusViolated))
+	case facts.ObligationSatisfied:
+		result = passWithDetail(c, summary(facts.ObligationStatusSatisfied))
+	case facts.ObligationUnknown:
+		result = errored(c, ReasonUnknownStatus, summary("unrecognized producer status"))
+	case facts.ObligationCantProve:
+		result = errored(c, ReasonCantProve, summary(facts.ObligationStatusCantProve))
+	case facts.ObligationUnmatched:
+		result = errored(c, ReasonUnmatched, summary(facts.ObligationStatusUnmatched))
+	default:
+		return errored(c, ReasonMalformedClaim, "obligation evaluator returned an unknown state")
+	}
+	result = withBindings(result, bindings)
+	result.Witnesses = witnesses
+	return result
 }
 
 func (m *model) evalReach(c Claim) Result {
@@ -1231,6 +1306,8 @@ func label(c Claim) string {
 		return selectorLabel(c.From) + " -> " + selectorLabel(c.Through) + " -> " + selectorLabel(c.To)
 	case "no_concurrent_reach":
 		return "concurrent -> " + selectorLabel(c.To)
+	case "obligation":
+		return c.Name
 	default:
 		return strings.TrimSpace(selectorLabel(c.From) + selectorLabel(c.To) +
 			selectorLabel(c.Through) + c.Expect + c.FQN + c.Of + c.Fn + c.Name)

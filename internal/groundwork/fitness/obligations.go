@@ -3,18 +3,9 @@ package fitness
 import (
 	"fmt"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
-)
-
-// Obligation statuses as flowmap emits them (the obligations section of
-// graph.json). Kept as string constants here rather than imported: the graph
-// JSON is the interface between the two programs, decoded independently.
-const (
-	obligationViolated  = "VIOLATED"
-	obligationCantProve = "CANT-PROVE"
-	obligationUnmatched = "UNMATCHED"
-	obligationSatisfied = "SATISFIED"
 )
 
 // checkObligations judges the path-obligation verdicts flowmap computed from
@@ -25,10 +16,20 @@ const (
 // the desired state and produces no finding. Finding identity is (rule, fn,
 // site) — summaries are built from those fields only, so re-worded detail
 // prose never makes an old finding look new.
+//
+// The status vocabulary is owned by facts.ClassifyObligationStatus, shared with
+// the assert `obligation` claim so the two judges cannot drift on what a
+// producer verdict means. Only the vocabulary is shared, NOT
+// facts.EvaluateObligation: that aggregates per rule name and returns canonically
+// sorted records, while fitness owes ONE finding PER RECORD in the graph's own
+// order. Findings tie in Result.sort on everything but Detail, so re-driving this
+// loop from sorted per-rule records would silently reorder two findings differing
+// only in Detail — an output change with no verdict behind it. Dominance is a
+// claims-side question; fitness discloses every record.
 func checkObligations(_ *policy.Policy, ix *graph.Index, r *Result) {
 	for _, o := range ix.Obligations() {
-		switch o.Status {
-		case obligationViolated:
+		switch facts.ClassifyObligationStatus(o.Status) {
+		case facts.ObligationViolated:
 			r.add(Finding{
 				Rule:     "obligation",
 				Severity: Violation,
@@ -37,7 +38,7 @@ func checkObligations(_ *policy.Policy, ix *graph.Index, r *Result) {
 				To:       o.Site,
 				Detail:   o.Detail,
 			})
-		case obligationCantProve:
+		case facts.ObligationCantProve:
 			r.add(Finding{
 				Rule:     "obligation",
 				Severity: Caution,
@@ -46,21 +47,24 @@ func checkObligations(_ *policy.Policy, ix *graph.Index, r *Result) {
 				To:       o.Site,
 				Detail:   o.Detail,
 			})
-		case obligationUnmatched:
+		case facts.ObligationUnmatched:
 			r.add(Finding{
 				Rule:     "obligation",
 				Severity: Caution,
 				Summary:  fmt.Sprintf("%s: rule matches nothing — inert guardrail", o.Rule),
 				Detail:   o.Detail,
 			})
-		case obligationSatisfied:
+		case facts.ObligationSatisfied:
 			// The desired state: the universal proof. No finding.
 		default:
+			// facts.ObligationUnknown, and any state a later facts release adds.
 			// Fail closed on vocabulary drift: a status this judge does not
 			// recognize must never read as a pass. flowmap and groundwork decode
 			// the graph independently (deliberately, across the trust boundary),
 			// so a renamed or added status on the producer side arrives here as
-			// an arbitrary string — surface it instead of falling through.
+			// an arbitrary string — surface it instead of falling through. Staying
+			// a default, not an ObligationUnknown case, keeps that true for a state
+			// this switch has not been taught yet.
 			r.add(Finding{
 				Rule:     "obligation",
 				Severity: Caution,
