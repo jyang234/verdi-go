@@ -324,7 +324,9 @@ func blindForCone(
 			}
 		}
 		// Within the site, the canonical minimum — see the declared correction in
-		// this function's doc.
+		// this function's doc. Pinned by the fitness characterization subtest
+		// "canonical dynamic effect within one owner over reversed declaration
+		// order"; taking the maximum here fails exactly that case and nothing else.
 		if dynamic = canonicalBlindWitnesses(dynamic); len(dynamic) > 0 {
 			witness := dynamic[0]
 			return &witness

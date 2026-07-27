@@ -942,6 +942,15 @@ func TestAssertRichMixedFixture(t *testing.T) {
 // over a set the author believed was larger than it is (a vacuous proof, tenet
 // 2). The claim must ERROR with UNBOUND_SELECTOR naming the dead selector, and a
 // file whose only claims are these must exit 2 (errored, no FAIL).
+//
+// The table covers EVERY per-selector guard in the claims adapter, one case
+// each: reach's from and to, pass_through's from, to and through, and
+// no_concurrent_reach's to. Three of them (reach/to, pass_through/to,
+// pass_through/through) had no case at all and survived reversion to the
+// family-level `&& len(fact.X) == 0` form with the whole suite green — an
+// unpinned behavior is one refactor from being an unnoticed one. Each case is
+// built so the reverted guard PASSES: the live selector alone proves the claim,
+// which is precisely the vacuous proof the per-selector rule exists to refuse.
 func TestAssertPartiallyUnboundRichSelectorsError(t *testing.T) {
 	const dead = "example.com/svc/internal/handler.Typo"
 	dir := t.TempDir()
@@ -964,11 +973,37 @@ func TestAssertPartiallyUnboundRichSelectorsError(t *testing.T) {
 			  "to":["example.com/svc/internal/store.Store.Update"],"expect":"present"}`,
 		},
 		{
+			// The F1 witness's own family, on the OTHER side of the claim. A partial
+			// `from` is covered twice above; the `to` guard beside it had no case at
+			// all, so reverting it left the whole suite green.
+			name: "reach partial to",
+			claim: `{"id":"partial","kind":"reach",
+			  "from":["example.com/svc/internal/handler.Handle"],
+			  "to":["example.com/svc/internal/store.Store.Update","` + dead + `"],"expect":"present"}`,
+		},
+		{
 			name: "pass_through",
 			claim: `{"id":"partial","kind":"pass_through",
 			  "from":["example.com/svc/internal/handler.Handle","` + dead + `"],
 			  "to":["boundary:bus PUBLISH"],
 			  "through":["example.com/svc/internal/outbox.Lifecycle.Publish"]}`,
+		},
+		{
+			name: "pass_through partial to",
+			claim: `{"id":"partial","kind":"pass_through",
+			  "from":["example.com/svc/internal/handler.Handle"],
+			  "to":["boundary:bus PUBLISH","` + dead + `"],
+			  "through":["example.com/svc/internal/outbox.Lifecycle.Publish"]}`,
+		},
+		{
+			// The waypoint standing fitness deliberately tolerates. A claim may not:
+			// grading over a waypoint set smaller than the author named is the same
+			// vacuous proof as grading over a smaller source or target family.
+			name: "pass_through partial through",
+			claim: `{"id":"partial","kind":"pass_through",
+			  "from":["example.com/svc/internal/handler.Handle"],
+			  "to":["boundary:bus PUBLISH"],
+			  "through":["example.com/svc/internal/outbox.Lifecycle.Publish","` + dead + `"]}`,
 		},
 		{
 			name: "no_concurrent_reach",

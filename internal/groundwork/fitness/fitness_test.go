@@ -169,6 +169,12 @@ func TestMustNotReachProvenAbsentIsSilent(t *testing.T) {
 // TestReachCharacterization pins every Finding field emitted by must_not_reach
 // before its binding, traversal, and blind-frontier facts move to the shared
 // facts package. Presentation changes require an explicit compatibility review.
+//
+// The three "canonical ... within one owner/site" cases are the deliberate
+// exceptions and therefore FAIL against the pre-extraction probe: each pins a
+// declared post-extraction correction that the shuffle-invariance contract
+// required (an intrinsic key where the old probe read producer emission order).
+// See their case comments. Every other case is base parity.
 func TestReachCharacterization(t *testing.T) {
 	const (
 		source = "svc.A"
@@ -372,6 +378,36 @@ func TestReachCharacterization(t *testing.T) {
 				Rule:     "must_not_reach",
 				Severity: Caution,
 				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately — the third and last
+			// site the shuffle-invariance contract required an intrinsic key at, and
+			// the only one that had no case. blindForCone's doc declares it ("the
+			// dynamic loop below owns the second"), but nothing enforced it: replacing
+			// the dynamic witness selection with the site's MAXIMUM left the whole
+			// ./internal/groundwork/... suite green. Two dynamic effects at ONE owner,
+			// declared largest-first: the pre-extraction probe returned the first
+			// dynamic edge in an unsorted edge list, so the disclosed site moved with
+			// producer emission order on a semantically identical graph. WHICH owner is
+			// chosen is untouched — that stays cone order, pinned by the case below.
+			name: "canonical dynamic effect within one owner over reversed declaration order",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.Edges = append(g.Edges,
+					graph.Edge{From: mid, To: "boundary:db Exec <dynamic>", Boundary: "outbound-sync"},
+					graph.Edge{From: mid, To: "boundary:db Call <dynamic>", Boundary: "outbound-sync"},
+				)
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (unresolved boundary effect boundary:db Call <dynamic>) — cannot prove absence",
 				From:     source,
 				To:       "",
 				Detail:   "",
