@@ -37,6 +37,13 @@ import (
 //	f26    two packages, equal file basenames, offset-aligned local declarations
 //	rec    a recursive function-local named type
 //
+// Two of them are NEGATIVE witnesses: they hold the residual's shape yet graph
+// cleanly, and they exist to bound the disclosed blast radius so it cannot be
+// restated too widely (see "The uninstantiated-body sub-case" in the design):
+//
+//	n1zeroinst      the residual's shape with ZERO instantiations — one sink[L], no pair
+//	n1nongencallee  the residual's shape with a NON-GENERIC callee — no sink[L] at all
+//
 // They are driven through the BUILT BINARY in separate processes: the residual
 // refusal is a panic, which an in-process call cannot observe without unwinding
 // the test, and the determinism evidence is only worth anything across processes.
@@ -221,6 +228,10 @@ func countFQN(t *testing.T, stdout, fqn string) int {
 // shared a sort key would reach callgraph.finalize's guard and panic. The node
 // counts are the second half — they prove neither instance was quietly merged
 // away, which would be the one failure mode worse than the panic.
+//
+// The n1zeroinst and n1nongencallee rows read the other way round: they are
+// shapes the design must NOT refuse, and their counts are what proves the clean
+// exit came from an absent collision rather than an absent subject.
 func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -244,6 +255,31 @@ func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 		{name: "n1c_wholeprogram", algos: []string{"cha"}, fqn: "example.com/n1c.sink[example.com/n1c.L]", want: 3},
 		{name: "f26", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/f26/mm.P[example.com/f26/q1.L example.com/f26/q2.L]", want: 2},
 		{name: "rec", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/rec.sink[example.com/rec.R]", want: 1},
+
+		// The two NEGATIVE witnesses. Both carry n1b's shape — one generic
+		// function, one function-local type whose structure does not mention X —
+		// and both graph cleanly under every algorithm. They pin the two
+		// preconditions the refusal actually needs, so the disclosed blast radius
+		// cannot be widened back into a claim that "any program containing this
+		// shape is refused under cha". Each was falsified by execution once.
+
+		// Zero instantiations. Under rta and vta gen is unreachable from main, so
+		// nothing at all is analyzed; under cha the uninstantiated body IS analyzed
+		// and does build sink[L] — but it is the only one, and one instance is not a
+		// collision. want 1 (not 0) under cha is the armed half: a fixture where the
+		// door were merely shut would prove nothing about the threshold.
+		{name: "n1zeroinst", algos: []string{"rta", "vta"}, fqn: "example.com/n1zeroinst.sink[example.com/n1zeroinst.L]", want: 0},
+		{name: "n1zeroinst_wholeprogram", algos: []string{"cha"}, fqn: "example.com/n1zeroinst.sink[example.com/n1zeroinst.L]", want: 1},
+
+		// A non-generic callee, with the generic instantiated once. Passing L to
+		// `func sink(v any)` instantiates nothing at L, so there is exactly one sink
+		// node and no pair to order — the refusal needs a GENERIC callee.
+		{name: "n1nongencallee", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1nongencallee.sink", want: 1},
+		// The armed half of that witness: under cha both the uninstantiated body and
+		// the one instantiation are in the analyzed set, so the door n1 walks through
+		// is open here too and only the non-generic callee explains the clean graph.
+		{name: "n1nongencallee_uninstbody", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen", want: 1},
+		{name: "n1nongencallee_instance", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen[int]", want: 1},
 	}
 
 	for _, test := range tests {

@@ -571,6 +571,17 @@ keys and *no panic* unless stated:
   instantiation count, or offering "instantiate it only once" as a remedy, is
   false here under every algorithm, and the test asserts those phrasings are
   absent.
+- two **negative** witnesses that bound the disclosed blast radius, both holding
+  `n1b`'s shape yet asserted to exit 0 under `rta`, `vta` **and** `cha`:
+  `n1zeroinst`, whose generic is never instantiated, and `n1nongencallee`, whose
+  callee is not generic. Each also asserts the node counts that keep it armed —
+  `n1zeroinst` must show **exactly one** `sink[L]` under `cha` (the
+  uninstantiated body's, so the door is demonstrably open), and
+  `n1nongencallee` must show both `gen` and `gen[int]` under `cha`. Without those
+  counts a fixture whose subject was simply never analyzed would pass, and the
+  witnesses would prove nothing. They exist because the blast-radius sentence in
+  "The uninstantiated-body sub-case" was once written as an unbounded "ANY
+  program containing this shape", which execution falsified twice.
 
 ### Guard regression
 
@@ -619,12 +630,31 @@ distinguishes them, so nothing in the diagnostic may assert which occurred.
 
 ### The uninstantiated-body sub-case — same class, one instantiation
 
-**Blast radius, plainly: under `--algo cha`, ANY program containing
-`func f[X any]() { type L struct{ …no X… }; g(L{}) }` is refused — even when `f`
-is instantiated exactly once, and even when it is never instantiated at all.**
-That is an ordinary Go idiom, not a pathological one, so the refusal is not a
-corner case; it is the price of failing closed, and it is paid by whole-program
-analysis of any unit written that way.
+**Blast radius, plainly: under `--algo cha`, a program that instantiates
+`func f[X any]() { type L struct{ …no X… }; g(L{}) }` AT LEAST ONCE, where `g` is
+itself generic so that `L` becomes a type argument, is refused — one
+instantiation is enough, because the whole-program set also holds `f`'s
+uninstantiated body.** That is an ordinary Go idiom, not a pathological one, so
+the refusal is not a corner case; it is the price of failing closed, and it is
+paid by whole-program analysis of any unit written that way.
+
+Both halves of that antecedent are load-bearing, and the earlier wording — "ANY
+program containing the shape is refused, even when `f` is never instantiated at
+all" — was false on both counts. Neither of these is refused, under any of the
+three algorithms:
+
+- **zero instantiations** (witness `n1zeroinst`). Under `cha` the uninstantiated
+  body is analyzed and does build `g[L]`, but it is then the *only* `g[L]`, and
+  one instance is not a collision. Zero instantiations is precisely the case that
+  cannot trip the guard.
+- **a non-generic `g`** (witness `n1nongencallee`), with `f` instantiated once.
+  Passing `L` to `func g(v any)` instantiates nothing at `L`, so there is one `g`
+  node and no pair to order. The refusal needs a *generic* callee, so that two
+  `g[L]` exist.
+
+Both witnesses graph cleanly under `rta`, `vta` and `cha`, and both are asserted
+to — including the node counts that keep them armed, so a fixture whose door was
+merely shut could not pass for a fixture whose guard did not fire.
 
 The mechanism: under `cha` the analyzed set is the whole program, which includes
 the **uninstantiated** body of every generic function alongside its
