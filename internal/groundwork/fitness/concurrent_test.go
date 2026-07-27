@@ -17,9 +17,11 @@ func concurrentPolicy(rule policy.ConcurrentRule) *policy.Policy {
 // no_concurrent_reach before its rule-independent surface moves to the shared
 // facts package. Presentation changes require an explicit compatibility review.
 //
-// The two "canonical ... over shuffled input" cases are the ONE deliberate
-// exception: they pin a post-extraction correction and therefore FAIL against
-// the pre-extraction probe. See their case comments.
+// Three cases are the deliberate exceptions and FAIL against the pre-extraction
+// probe: the two "canonical ... over shuffled input" cases pin post-extraction
+// canonicalization corrections, and "boundary targets keep their punctuation in
+// the summary" pins a declared correction to the summary renderer. See their
+// case comments.
 func TestConcurrentCharacterization(t *testing.T) {
 	const (
 		launcher = "svc.Launcher"
@@ -28,6 +30,11 @@ func TestConcurrentCharacterization(t *testing.T) {
 		update   = "boundary:db UPDATE users"
 		publish  = "boundary:bus PUBLISH user.updated"
 		dynamic  = "boundary:bus PUBLISH <dynamic>"
+		// The two labels whose punctuation ShortName destroys — the same pair the
+		// pass-through characterization uses, so the two rules are pinned against
+		// one shared example of what a boundary label must survive.
+		peerCharge = "boundary:peer POST /charge/{id}"
+		dbCount    = "boundary:db SELECT count(*)"
 	)
 	nodes := func(fqns ...string) []graph.Node {
 		result := make([]graph.Node, len(fqns))
@@ -39,11 +46,18 @@ func TestConcurrentCharacterization(t *testing.T) {
 	rule := func(to string) policy.ConcurrentRule {
 		return policy.ConcurrentRule{Name: "no-async", To: []string{to}}
 	}
-	hit := func(from, to string) Finding {
+	// summary is a LITERAL, never re-derived from the production renderer. The
+	// earlier helper built it as "no-async: "+ShortName(to)+" reachable on a
+	// concurrent path", which made the expectation a copy of the code under test:
+	// whatever ShortName did to the target, the want did too, so no case here could
+	// observe a mangled summary. That is how the boundary-label defect the last two
+	// cases pin survived in this file after cedb802 fixed the same class one file
+	// over. An expectation computed from the production helper proves nothing.
+	hit := func(from, to, summary string) Finding {
 		return Finding{
 			Rule:     "no_concurrent_reach",
 			Severity: Violation,
-			Summary:  "no-async: " + ShortName(to) + " reachable on a concurrent path",
+			Summary:  summary,
 			From:     from,
 			To:       to,
 		}
@@ -64,7 +78,7 @@ func TestConcurrentCharacterization(t *testing.T) {
 				}},
 			},
 			rule: rule("boundary:bus PUBLISH"),
-			want: []Finding{hit(launcher, publish)},
+			want: []Finding{hit(launcher, publish, "no-async: boundary:bus PUBLISH user.updated reachable on a concurrent path")},
 		},
 		{
 			name: "spawned function hit",
@@ -73,7 +87,7 @@ func TestConcurrentCharacterization(t *testing.T) {
 				Edges: []graph.Edge{{From: launcher, To: worker, Concurrent: true}},
 			},
 			rule: rule(worker),
-			want: []Finding{hit("", worker)},
+			want: []Finding{hit("", worker, "no-async: svc.Worker reachable on a concurrent path")},
 		},
 		{
 			name: "concurrent cone effect hit",
@@ -85,7 +99,7 @@ func TestConcurrentCharacterization(t *testing.T) {
 				},
 			},
 			rule: rule("boundary:db UPDATE"),
-			want: []Finding{hit(worker, update)},
+			want: []Finding{hit(worker, update, "no-async: boundary:db UPDATE users reachable on a concurrent path")},
 		},
 		{
 			name: "duplicate hit collapse",
@@ -98,7 +112,38 @@ func TestConcurrentCharacterization(t *testing.T) {
 				},
 			},
 			rule: rule("boundary:bus PUBLISH"),
-			want: []Finding{hit(worker, publish)},
+			want: []Finding{hit(worker, publish, "no-async: boundary:bus PUBLISH user.updated reachable on a concurrent path")},
+		},
+		{
+			// DECLARED CORRECTION, pinned deliberately — it FAILS against
+			// codex/approved-specs-base, which mangles these labels exactly as the
+			// pre-cedb802 pass-through evaluator did. A concurrent target is either a
+			// function FQN or a boundary label, and a label is a canonical string the
+			// reader acts on: the route template and the SQL statement ARE the
+			// evidence. ShortName is an FQN shortener — it truncates at the last "/"
+			// and deletes "*" and ")" — so it rewrote "boundary:peer POST
+			// /charge/{id}" to "{id}" and "boundary:db SELECT count(*)" to "count(",
+			// leaving a reader with a summary naming nothing they can act on.
+			// shortTarget is the single owner of the FQN-vs-label distinction; routing
+			// through it makes this rule spell an effect the way must_pass_through
+			// already does. The literals below are the bytes a human must read.
+			name: "boundary targets keep their punctuation in the summary",
+			g: &graph.Graph{
+				Nodes: nodes(launcher),
+				Edges: []graph.Edge{
+					{From: launcher, To: peerCharge, Boundary: "outbound-sync", Concurrent: true},
+					{From: launcher, To: dbCount, Boundary: "outbound-sync", Concurrent: true},
+				},
+			},
+			rule: policy.ConcurrentRule{
+				Name: "no-async", To: []string{"boundary:db", "boundary:peer"},
+			},
+			want: []Finding{
+				hit(launcher, dbCount,
+					"no-async: boundary:db SELECT count(*) reachable on a concurrent path"),
+				hit(launcher, peerCharge,
+					"no-async: boundary:peer POST /charge/{id} reachable on a concurrent path"),
+			},
 		},
 		{
 			name: "clean visible surface",

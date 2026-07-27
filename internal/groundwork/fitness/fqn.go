@@ -47,7 +47,9 @@ func ShortName(fqn string) string {
 // count(*)" would become "count(". Summary is part of Finding.Key(), so that
 // rewrite would also churn the base-vs-branch diff and can reorder Result.sort().
 // The prefix test lives here once (boundarylabel owns the literal) so no caller
-// re-types it; renderBypassPath renders the same distinction through this helper.
+// re-types it. Every target renderer goes through it: must_pass_through's summary
+// and renderBypassPath, and no_concurrent_reach's hit summary — so the three
+// cannot drift apart on how they spell the same effect.
 func shortTarget(value string) string {
 	if strings.HasPrefix(value, boundarylabel.Prefix) {
 		return value

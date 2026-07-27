@@ -40,10 +40,14 @@ func checkNoConcurrentReach(p *policy.Policy, surface facts.ConcurrentSurface, r
 			r.add(unbindableTargetFinding("no_concurrent_reach", rule.Name, "to", rule.RequireProof))
 		case facts.ConcurrentHit:
 			for _, hit := range fact.Hits {
+				// shortTarget, NOT ShortName: a concurrent target is a function FQN or a
+				// boundary label, and only the FQN may be shortened. See shortTarget's
+				// doc for what ShortName does to a label, and why Summary being part of
+				// Finding.Key() makes that more than a cosmetic problem.
 				r.add(Finding{
 					Rule:     "no_concurrent_reach",
 					Severity: Violation,
-					Summary:  fmt.Sprintf("%s: %s reachable on a concurrent path", rule.Name, ShortName(hit.To)),
+					Summary:  fmt.Sprintf("%s: %s reachable on a concurrent path", rule.Name, shortTarget(hit.To)),
 					From:     hit.From,
 					To:       hit.To,
 				})
