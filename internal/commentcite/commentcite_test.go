@@ -37,8 +37,12 @@ import (
 // limitations of the pattern, not defects, and widening onto them turns CORRECT
 // comments red:
 //
-//   - internal/fqnres and internal/static/schemadrift are genuinely stale: each
-//     names a test that was later renamed to a longer name it is now a prefix of.
+//   - internal/fqnres and internal/static/schemadrift are genuinely stale, but NOT
+//     in the same way. schemadrift cites a PREFIX of the name its test now carries
+//     (`TestCodeTablesLabelFormat`). fqnres cites a name that is neither a prefix
+//     nor a suffix of the test it means (`TestPlainNormalizedSuffix`) — a rename,
+//     not a lengthening. So a stale citation is not generally recoverable by prefix
+//     search, and a widening change must not assume it is.
 //   - internal/groundwork/fitness has two, both correct as written. One cites a
 //     `go test -run` PREFIX GLOB (a real name plus a trailing star); the other
 //     HYPHEN-WRAPS a name across two comment lines. Long names plus dense prose
