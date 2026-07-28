@@ -262,9 +262,13 @@ func countFQN(t *testing.T, stdout, fqn string) int {
 // counts are the second half — they prove neither instance was quietly merged
 // away, which would be the one failure mode worse than the panic.
 //
-// The n1zeroinst, n1nongencallee and n1typeonly rows read the other way round:
-// they are shapes the design must NOT refuse, and their counts are what proves
-// the clean exit came from an absent collision rather than an absent subject.
+// The n1zeroinst, n1nongencallee, n1typeonly, n1fqndiffers and n1twodecls rows
+// read the other way round: they are shapes the design must NOT refuse, and
+// their counts are what proves the clean exit came from an absent collision
+// rather than an absent subject. n1twodecls is the sharpest of them — want 2 on
+// ONE display FQN is the pair a refusal would need, present in the graph and
+// told apart by the discriminator instead, which is why "the two share an FQN"
+// cannot be the criterion.
 //
 // The n1method, n1methodnocall and n1recv rows are the rta/vta half of subjects
 // cha refuses: exactly one function is built at the local type here, and the
