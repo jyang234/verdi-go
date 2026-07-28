@@ -714,9 +714,10 @@ jointly **sufficient**:
 
 1. a function-local type `L` is declared inside a body the analyzer builds **more
    than once** — a generic function (`n1b`), a **closure nested in** one
-   (`n1closure`), or a **method of a generic type** (`n1typemethod`, where `Show`
-   declares no type parameters of its own and the program contains no generic
-   function at all);
+   (`n1closure`), or a **method of a generic type** (`n1typemethod`, where the
+   declaring body is `func (Box[T]) Show()`, which declares no type parameters of
+   its own; the program's one generic function, `sink`, is the CALLEE and declares
+   nothing);
 2. `L` is **reachable in the type graph** from the **discriminator roots** of some
    SSA function `F` — `F`'s type arguments in order, then **the type `F`
    dispatches on**, which is `features.receiverType` and NOT `Signature.Recv()`
@@ -785,7 +786,8 @@ pair.
 **"Generic function" is shorthand elsewhere in this document**, including in the
 frozen diagnostic text ("inside a generic function"), for what conjunct 1
 actually needs: a body the analyzer builds more than once. `n1typemethod` is
-refused with that wording and contains no generic function. The shorthand is
+refused with that wording though no generic function declares its local. The
+shorthand is
 disclosed here rather than corrected there, because the diagnostic's exact text
 is ratified and byte-identical to the block under "Diagnostic"; widening it is a
 separate spec change.
@@ -811,7 +813,7 @@ indexed by the conjunct it exercises, and the table's exit codes are asserted.
 | `n1` | two *different* generic functions declare `L`, so conjunct 3 is met only via the uninstantiated body | 0 | 0 | refused |
 | `n1lib` | an exported generic in a **library** unit, instantiated once; root discovery supplies its uninstantiated body | refused | refused | refused |
 | `n1closure` | conjunct 1 — `L` is declared in a **closure** nested in the generic function, which has no type parameters of its own | refused | refused | refused |
-| `n1typemethod` | conjunct 1 — `L` is declared in a **method of a generic type**; no generic *function* appears in the program | refused | refused | refused |
+| `n1typemethod` | conjunct 1 — `L` is declared in a **method of a generic type**; no generic *function* declares it (the program's `sink[T]` is the callee) | refused | refused | refused |
 | `n1method` | `L` is a type argument of a generic **type**; the refused pair is that type's method, `(Box[L]).Show[L]` | 0 | 0 | refused |
 | `n1methodnocall` | the same with the method **never called** | 0 | 0 | refused |
 | `n1recv` | `L` reaches a promotion wrapper's **receiver**; the refused function carries no type arguments at all | 0 | 0 | refused |
@@ -831,9 +833,13 @@ invited, and each was confirmed by execution:
 - **"a generic function declares `L`."** Too narrow, twice over. `n1closure`
   declares it in a closure whose own signature has no type parameters, and
   `n1typemethod` declares it in `func (Box[T]) Show()`, which declares none
-  either — in a program with no generic function anywhere. What conjunct 1 needs
-  is a body the analyzer **builds more than once**; "generic function" names only
-  the commonest way to get one.
+  either — and in `n1typemethod` no `func f[X]` encloses the declaration at any
+  depth, since `Box`'s parameter, not a function's, is what makes the analyzer
+  build `Show` twice. Both fixtures do contain a generic function, `sink[T]`, but
+  it is the CALLEE at `L`, never the declaring body; a reading of conjunct 1 that
+  looks for `func f[X]` syntax finds the wrong function in `n1closure` and none at
+  all in `n1typemethod`. What conjunct 1 needs is a body the analyzer **builds
+  more than once**; "generic function" names only the commonest way to get one.
 - **"`L` IS one of the type arguments, or the receiver."** Too narrow.
   `n1nestedroot` passes `[]L`; `L` is one edge below the root and the refusal
   fires all the same, because `localTypeGraph` walks the graph under each root

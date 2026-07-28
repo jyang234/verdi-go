@@ -62,7 +62,7 @@ import (
 //
 //	n1closure       L is declared in a CLOSURE nested in a generic function
 //	n1typemethod    L is declared in a METHOD OF A GENERIC TYPE; no generic function
-//	                appears in the program at all
+//	                DECLARES it (sink[T] is the callee, not the declaring body)
 //	n1nestedroot    L is not a root — the type argument is []L, and the encoding walks
 //	                the graph BELOW each root
 //
@@ -552,9 +552,9 @@ func edgePairs(t *testing.T, stdout string) []string {
 //
 //   - the ENCLOSING BODY (conjunct 1). n1b/n1/n1lib: a generic function.
 //     n1closure: a closure nested in one, with no type parameters of its own.
-//     n1typemethod: a method of a generic TYPE, in a program with no generic
-//     function at all. A conjunct 1 written as "a generic function declares L"
-//     contains only the first three.
+//     n1typemethod: a method of a generic TYPE. No generic function DECLARES its
+//     local — the program's sink[T] is the callee — so a conjunct 1 written as
+//     "a generic function declares L" contains only the first three.
 //   - the ROOT POSITION (conjunct 2). n1method/n1methodnocall: a type argument
 //     of a generic type's method. n1recv: a promotion wrapper's RECEIVER, with
 //     no type arguments anywhere. n1thunk: a $thunk's receiver, which is not
@@ -608,9 +608,10 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 		// instantiation of gen, which is all conjunct 1 requires.
 		{name: "n1closure", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1closure.sink[example.com/n1closure.L]", file: "main.go", local: "L"},
 		// L declared in a METHOD OF A GENERIC TYPE. Show declares no type
-		// parameters and the program contains no generic function whatsoever, so a
-		// conjunct 1 written as "a generic function declares L" excludes this
-		// program and flowmap refuses it under every algorithm.
+		// parameters, and no generic function declares L either — the program's
+		// sink[T] is the CALLEE that carries L into its roots. So a conjunct 1
+		// written as "a generic function declares L" excludes this program and
+		// flowmap refuses it under every algorithm.
 		{name: "n1typemethod", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1typemethod.sink[example.com/n1typemethod.L]", file: "main.go", local: "L"},
 		// L is NOT a discriminator root: sink's one type argument is []L. The
 		// encoding walks the graph below each root, so a conjunct 2 written as "L
