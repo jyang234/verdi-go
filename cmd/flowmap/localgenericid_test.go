@@ -48,7 +48,17 @@ import (
 //	n1recv          the local reaches the RECEIVER root of a promotion wrapper, which
 //	                carries no type arguments at all
 //
-// Three are NEGATIVE witnesses: they hold the residual's shape yet graph
+// Three more are the enclosing bodies and root positions a blast radius written
+// as "a GENERIC FUNCTION declares L, and L IS one of the callee's type
+// arguments" leaves out, each confirmed by execution:
+//
+//	n1closure       L is declared in a CLOSURE nested in a generic function
+//	n1typemethod    L is declared in a METHOD OF A GENERIC TYPE; no generic function
+//	                appears in the program at all
+//	n1nestedroot    L is not a root — the type argument is []L, and the encoding walks
+//	                the graph BELOW each root
+//
+// Five are NEGATIVE witnesses: they hold the residual's shape yet graph
 // cleanly, and they exist to bound the disclosed blast radius so it cannot be
 // restated too widely (see "The uninstantiated-body sub-case" in the design):
 //
@@ -56,6 +66,14 @@ import (
 //	n1nongencallee  the residual's shape with a NON-GENERIC callee — no sink[L] at all
 //	n1typeonly      L IS a type argument of a twice-instantiated generic TYPE, but that
 //	                type has no methods, so no ssa.Function is built at L
+//	n1fqndiffers    all four of the earlier conjuncts hold, but the enclosing type
+//	                parameter also reaches the callee's roots, so the FQNs DIFFER and
+//	                panicOnDuplicateSortKey short-circuits before the discriminator
+//	n1twodecls      the same with the FQNs EQUAL — two locals that render identically —
+//	                separated because they come from two DECLARATIONS
+//
+// n1onedecl is n1twodecls' minimal pair on the refusing side: the two
+// declarations collapsed into one generic instantiated twice.
 //
 // They are driven through the BUILT BINARY in separate processes: the residual
 // refusal is a panic, which an in-process call cannot observe without unwinding
@@ -316,6 +334,31 @@ func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 		{name: "n1nongencallee_uninstbody", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen", want: 1},
 		{name: "n1nongencallee_instance", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen[int]", want: 1},
 
+		// All four of the conjuncts the third formulation listed hold here — gen
+		// declares L, L reaches sink's roots, cha builds sink from the
+		// uninstantiated body and from each instantiation, and L's structure does
+		// not mention X — yet nothing is refused, because `x` carries X's
+		// instantiation into sink's roots and the three sink instances therefore
+		// carry three DIFFERENT display FQNs. panicOnDuplicateSortKey compares FQNs
+		// first and returns before it ever reads the discriminator. Replacing `x`
+		// with `0` makes this program n1b's class again and it is refused.
+		{name: "n1fqndiffers", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1fqndiffers.sink[example.com/n1fqndiffers.L int]", want: 1},
+		{name: "n1fqndiffers_second", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1fqndiffers.sink[example.com/n1fqndiffers.L string]", want: 1},
+		// The armed half under cha: the uninstantiated body's sink[L X] is a third
+		// distinct instance, so the pair the refusal would need genuinely exists in
+		// the analyzed set and only the FQN keeps it apart.
+		{name: "n1fqndiffers_uninstbody", algos: []string{"cha"}, fqn: "example.com/n1fqndiffers.sink[example.com/n1fqndiffers.L X]", want: 1},
+
+		// n1twodecls closes the gap n1fqndiffers leaves: here the two instances DO
+		// share a display FQN — mkA's L and mkB's L are distinct types that render
+		// identically — and the program still graphs cleanly, because the second
+		// root's two locals come from two DECLARATIONS with different sites. want 2
+		// is the whole assertion: two node records under one FQN is exactly the pair
+		// a refusal needs, told apart by the discriminator instead. So "the two
+		// built functions share a display FQN" is necessary and NOT sufficient.
+		{name: "n1twodecls", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1twodecls.sink[example.com/n1twodecls.L example.com/n1twodecls.L]", want: 2},
+		{name: "n1twodecls_gen", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1twodecls.gen[example.com/n1twodecls.L]", want: 2},
+
 		// A generic TYPE instantiated at L twice, with NO methods. L is a type
 		// argument of something the analyzed set instantiates twice — the loose
 		// reading of the mechanism — and nothing is refused, because that
@@ -380,15 +423,25 @@ func TestLocalGenericIdentityWitnessN2Graphs(t *testing.T) {
 //
 // It asserts the TEXT, not merely the exit code, in both directions: the refusal
 // must carry the disclosed wording, and it must NOT claim an instantiation count.
-// Most of the subjects here (everything except n1b) instantiate their generic
-// exactly once.
+// n1, n1lib, n1method, n1methodnocall and n1recv all instantiate their generic
+// exactly ONCE and are refused anyway, which is what makes a count unassertable.
 //
-// The subject list is also what pins the blast-radius MECHANISM. n1b/n1/n1lib
-// reach the class through a call to a generic function; n1method and
-// n1methodnocall reach it through a method of a generic TYPE; n1recv reaches it
-// through a promotion wrapper's RECEIVER, with no type arguments anywhere. A
-// blast radius written as `g(L{})` with g a generic function contains only the
-// first three.
+// The subject list is also what pins the blast-radius MECHANISM, one subject per
+// clause of "The uninstantiated-body sub-case":
+//
+//   - the ENCLOSING BODY (conjunct 1). n1b/n1/n1lib: a generic function.
+//     n1closure: a closure nested in one, with no type parameters of its own.
+//     n1typemethod: a method of a generic TYPE, in a program with no generic
+//     function at all. A conjunct 1 written as "a generic function declares L"
+//     contains only the first three.
+//   - the ROOT POSITION (conjunct 2). n1method/n1methodnocall: a type argument
+//     of a generic type's method. n1recv: a promotion wrapper's RECEIVER, with
+//     no type arguments anywhere. n1nestedroot: []L, so L is not a root at all.
+//     A conjunct 2 written as "L IS one of the type arguments" contains none of
+//     the last two.
+//   - CONJUNCT 5, that nothing else reaching those roots separates the pair:
+//     n1onedecl is the refusing half of the minimal pair whose clean half is
+//     n1twodecls (see TestLocalGenericIdentityWitnessesGraph).
 func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -419,6 +472,23 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 		// declared inside a generic function. It carries no type arguments at all,
 		// so only the receiver root reaches the local declaration.
 		{name: "n1recv", algos: []string{"cha"}, fqn: "(*example.com/n1recv.result).QueryContext", file: "main.go", local: "result"},
+		// L declared in a CLOSURE nested in a generic function. The closure has no
+		// type parameters of its own; the analyzer builds one copy of it per
+		// instantiation of gen, which is all conjunct 1 requires.
+		{name: "n1closure", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1closure.sink[example.com/n1closure.L]", file: "main.go", local: "L"},
+		// L declared in a METHOD OF A GENERIC TYPE. Show declares no type
+		// parameters and the program contains no generic function whatsoever, so a
+		// conjunct 1 written as "a generic function declares L" excludes this
+		// program and flowmap refuses it under every algorithm.
+		{name: "n1typemethod", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1typemethod.sink[example.com/n1typemethod.L]", file: "main.go", local: "L"},
+		// L is NOT a discriminator root: sink's one type argument is []L. The
+		// encoding walks the graph below each root, so a conjunct 2 written as "L
+		// IS one of the type arguments, or the receiver" excludes this program too.
+		{name: "n1nestedroot", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1nestedroot.sink[[]example.com/n1nestedroot.L]", file: "main.go", local: "L"},
+		// The refusing half of the n1twodecls minimal pair: the two declarations
+		// behind the second root collapsed into ONE generic instantiated twice. The
+		// guard names gen[M], the first duplicate in sorted node order.
+		{name: "n1onedecl", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1onedecl.gen[example.com/n1onedecl.M]", file: "main.go", local: "M"},
 	}
 
 	for _, test := range tests {
