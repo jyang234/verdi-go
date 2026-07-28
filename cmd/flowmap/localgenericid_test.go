@@ -87,12 +87,14 @@ var (
 //
 // It is compiled with `go test -c`, i.e. WITHOUT whatever flags the outer run
 // carries, deliberately: `make verify` runs `go test -race ./...`, and a
-// race-instrumented child is roughly eight times slower per analysis, which put
-// this package within sight of the 10-minute per-package timeout on a slower
-// machine. The child's job is to re-run the loader -> SSA -> discriminator
-// pipeline in a fresh process; the race detector adds nothing to that and only
-// buys a timeout risk. os.Executable() would have been shorter and is what this
-// must not use.
+// race-instrumented child is several times slower per analysis — 2.01s against
+// 0.30s, 6.7x, measured at the 2026-07-27 revision — which put this package
+// within sight of the 10-minute per-package timeout on a slower machine. The
+// child's job is to re-run the loader -> SSA -> discriminator pipeline in a fresh
+// process; the race detector adds nothing to that and only buys a timeout risk.
+// os.Executable() would have been shorter and is what this must not use. The
+// remaining headroom, and why the run count is not the lever, are recorded on
+// TestLocalGenericIdentityDeterministicAcrossProcesses.
 func keyDumpBinary(t *testing.T) string {
 	t.Helper()
 	keyDumpBuildOnce.Do(func() {
@@ -458,6 +460,42 @@ func TestF26DeclarationOffsetsStayAligned(t *testing.T) {
 //     without ever colliding change no stdout at all. That is exactly the shape
 //     the disclosed types.Type pointer-identity dependency would take, and only
 //     this assertion sees it.
+//
+// COST, AND WHY THE 20 AND THE SUBJECT LIST ARE NOT THE KNOB TO TURN. This test
+// is the most expensive thing in the package: 4 subjects x 20 runs x 2 child
+// processes = 160 out-of-process analyses, of which the 80 key dumps are what the
+// multiset assertion added. Measured on an Apple-silicon laptop at the 2026-07-27
+// revision (go 1.25), so treat these as a dated snapshot, not an invariant:
+//
+//	go test -race ./cmd/flowmap -count=1   129s   (this test 38s of it)
+//	go test -race ./... -count=1           cmd/flowmap 251s, whole suite 4m12s
+//	one child analysis                     0.30s; 2.01s if race-instrumented (6.7x)
+//
+// Go's default per-package timeout is 600s, so the contended 251s leaves ~2.4x —
+// a machine ~2.4x slower than this one starts timing out. That is the risk, and
+// it is real. Cutting this test is nevertheless the wrong lever, for two reasons.
+//
+// It would not move the constraint. The 80 key dumps cost ~24s isolated and ~47s
+// contended; deleting them outright leaves cmd/flowmap around 204s, with
+// internal/static/graphio at 232s and static/rebind at 176s immediately behind.
+// Whatever machine times this package out times those out at nearly the same
+// slowdown, so the headroom is a property of the suite, not of this seam.
+//
+// And it would weaken the assertion. The mutation this test exists to catch —
+// appending a per-process value to every discriminator suffix, which collides
+// with nothing and changes no artifact — was re-run and fails at run 1 on every
+// subject, on the key multiset alone with the graph bytes still identical. So yes,
+// 2 runs of 1 subject would still catch that one. But the risk being policed is
+// that two independent loader -> SSA builds share go/types nodes to a DIFFERENT
+// degree, which is INTERMITTENT: 20 draws detect what 2 would not, and each
+// subject covers a distinct encoding shape (f3c repeated struct roles, f26
+// offset-aligned cross-package locals, n2 promoted-method wrappers,
+// localtypeargsvc the shipped fixture). Either cut buys time by lowering
+// detection probability.
+//
+// So if this package does start timing out: raise its -timeout, or make the
+// children cheaper (they are already built WITHOUT -race for exactly this reason
+// — see keyDumpBinary). Do not lower the 20 and do not shorten the subject list.
 func TestLocalGenericIdentityDeterministicAcrossProcesses(t *testing.T) {
 	// A slice, not a map: nothing in this repository iterates a map where the
 	// order is observable, and a subtest order that varies run to run is exactly
