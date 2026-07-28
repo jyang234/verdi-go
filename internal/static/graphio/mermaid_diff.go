@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/fqnres"
 	"github.com/jyang234/golang-code-graph/internal/static/frontier"
 )
 
@@ -83,10 +84,25 @@ func prefixFor(s diffState) string {
 
 type ekey struct{ from, to string }
 
+// nodeIndex maps each display FQN to ONE representative Node for the diff's presence
+// check and its tier comparison. An FQN can carry several records (a generic instantiated
+// at two function-local types collapses to one display FQN, and every instance is kept);
+// the representative is the FQN's canonical MAXIMUM under nodeLess — a deterministic
+// choice (never the arrival-order last writer, so the delta and the render are identical
+// under node reordering), mirroring edgeIndex below so the two indexes cannot drift.
+//
+// This is determinism, not adjudication: a genuinely divergent same-FQN pair (records that
+// disagree on tier) still collapses to a single representative, so one instance's tier is
+// the one the diff reports. That limitation is no longer implicit — divergentFQNs finds
+// exactly those FQNs and diffCaveats discloses them on the artifact, so a consumer reading
+// a nodes_changed list is told when a representative was picked among records that
+// disagreed. Records that are byte-identical get no caveat: nothing is discarded there.
 func nodeIndex(g *Graph) map[string]Node {
 	m := make(map[string]Node, len(g.Nodes))
 	for _, n := range g.Nodes {
-		m[n.FQN] = n
+		if cur, ok := m[n.FQN]; !ok || nodeLess(cur, n) {
+			m[n.FQN] = n
+		}
 	}
 	return m
 }
@@ -367,6 +383,83 @@ func provenanceCaveats(base, branch *Graph) []string {
 	return out
 }
 
+// maxDivergentList caps the FQN list the divergent-record caveat prints, disclosing
+// truncation with " (+N more)" via fqnres.CapList so a capped list never reads as the
+// whole affected set (tenet 3).
+const maxDivergentList = 8
+
+// divergentFQNs returns, sorted, the display FQNs of g whose node records do NOT all
+// agree — the FQNs where nodeIndex's per-FQN representative choice actually DISCARDS
+// something. Node is a comparable struct of scalars, so full-struct inequality is exactly
+// "these records do not serialize to the same bytes" (the same record identity dedupEdges
+// applies to edges, and the property nodeLess-equality is pinned to mean).
+//
+// The distinction is the point: an FQN whose records are byte-identical loses NOTHING when
+// one of them represents the group, so it earns no caveat — disclosing it would be noise
+// that trains a reader to skip the channel. An FQN whose records disagree loses the
+// non-representative records' attributes, and that is a real blind spot in the delta.
+//
+// One comparison per record against the group's FIRST record is complete: a group is
+// uniform exactly when every member equals the first, so any group holding two different
+// records has at least one member that differs from the first and is caught.
+//
+// Deterministic: the result is sorted, and the scan only fills a membership map.
+func divergentFQNs(g *Graph) []string {
+	first := make(map[string]Node, len(g.Nodes))
+	divergent := map[string]bool{}
+	for _, n := range g.Nodes {
+		prev, seen := first[n.FQN]
+		if !seen {
+			first[n.FQN] = n
+			continue
+		}
+		if prev != n {
+			divergent[n.FQN] = true
+		}
+	}
+	return sortedKeys(divergent)
+}
+
+// collapsedNodeCaveats discloses, per side, that the diff's FQN keying had to choose a
+// representative among node records that DISAGREE — so a consumer never reads
+// nodes_changed (or the flowchart's Δ tier labels) as a statement about every instance
+// behind a display FQN. Base first, then branch: a fixed order, so the caveat list is
+// byte-identical across runs.
+//
+// Silent when every duplicate-FQN group is internally identical, which is every graph the
+// analyzer produces today for a scope-lossy generic — the collapse there is lossless and a
+// warning would be a false alarm.
+func collapsedNodeCaveats(base, branch *Graph) []string {
+	var out []string
+	for _, side := range []struct {
+		name string
+		g    *Graph
+	}{{"base", base}, {"branch", branch}} {
+		fqns := divergentFQNs(side.g)
+		if len(fqns) == 0 {
+			continue
+		}
+		out = append(out, side.name+" graph: "+plural(len(fqns), "display FQN")+
+			" carries node records that DISAGREE ("+fqnres.CapList(fqns, maxDivergentList)+
+			"): the diff keys on FQN and compares ONE canonical representative per FQN, so the other records' attributes are not compared")
+	}
+	return out
+}
+
+// diffCaveats is the caveat list EVERY base→branch call-graph diff artifact carries: the
+// base↔branch substrate skew (provenanceCaveats) plus the same-FQN representative
+// disclosure (collapsedNodeCaveats). Delta puts it in GraphDelta.Caveats and
+// writeDiffHeader prints it above the flowchart, so the machine view and the human view
+// disclose the SAME set and cannot drift (CLAUDE.md: one source of truth).
+//
+// The component (C3) rollup diff deliberately keeps provenanceCaveats alone: it carries no
+// node count and picks no node representative, so the collapse disclosure would name a
+// limitation that artifact does not have. Its own count-side disclosure rides
+// PackageRollup.Caveats instead.
+func diffCaveats(base, branch *Graph) []string {
+	return append(provenanceCaveats(base, branch), collapsedNodeCaveats(base, branch)...)
+}
+
 // hasViaEdge reports whether any edge carries a reclaimer `via` tag — the footprint
 // of a --reclaim/--reclaim-sql build, used to flag a base↔branch reclaimer mismatch.
 func hasViaEdge(g *Graph) bool {
@@ -379,14 +472,14 @@ func hasViaEdge(g *Graph) bool {
 }
 
 // writeDiffHeader emits the shared diff header — the `flowchart LR` line, the
-// "base → branch" banner, and the provenance caveats — for both the full diff and the
-// over-cap summary, so the substrate-mismatch disclosure (the honesty channel for a
-// base↔branch skew) is emitted IDENTICALLY on both paths and cannot drift (CLAUDE.md:
-// one source of truth).
+// "base → branch" banner, and the diff caveats — for both the full diff and the over-cap
+// summary, so the honesty channel (the base↔branch substrate skew AND the same-FQN
+// representative disclosure) is emitted IDENTICALLY on both paths, and identically to the
+// JSON Delta's Caveats, and cannot drift (CLAUDE.md: one source of truth).
 func writeDiffHeader(b *strings.Builder, base, branch *Graph) {
 	b.WriteString("flowchart LR\n")
 	b.WriteString("    %% call-graph diff — base → branch (a view, never a gate)\n")
-	for _, c := range provenanceCaveats(base, branch) {
+	for _, c := range diffCaveats(base, branch) {
 		b.WriteString("    %% ⚠ " + comment(c) + "\n")
 	}
 }

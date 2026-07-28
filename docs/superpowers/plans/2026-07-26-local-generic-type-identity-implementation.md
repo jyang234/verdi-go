@@ -1,5 +1,14 @@
 # Function-local generic type identity implementation plan
 
+> **Superseded in part on 2026-07-27.** The design this plan implements was
+> revised — see "Revision 2026-07-27" in
+> `docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md`. The
+> `local-sites/v1` suffix this plan builds (a sorted, deduplicated site set) is
+> retired and replaced by the positional `local-type-graph/v1` serialization; the
+> local-ness predicate loses its `obj.Parent() != nil` conjunct; the root set
+> gains the receiver. Where this plan and the revised spec disagree, **the spec
+> wins**. The plan is retained as decision history, not as instructions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make valid Go programs with distinct, same-rendering function-local generic type arguments produce deterministic call graphs without weakening the collision guard or changing package-level instance keys.

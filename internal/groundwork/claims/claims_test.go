@@ -775,3 +775,38 @@ func TestReportFormat(t *testing.T) {
 		t.Errorf("report format:\n got %q\nwant %q", got, want)
 	}
 }
+
+// TestReportCountsDistinctNodesAndDisclosesRecords pins the summary's node count against
+// a graph whose display FQN carries several node records — legal and deliberate (a
+// generic instantiated at two function-local types; the local generic type identity
+// design keeps every instance). The count must be over the node UNIVERSE claims are
+// actually graded against (distinct FQNs), the basis its sibling "unique edges" already
+// used, and the raw record total must ride alongside it rather than vanish: a reader
+// differencing "5 nodes" against the graph's 7 nodes[] entries would otherwise have no
+// account of the other two.
+func TestReportCountsDistinctNodesAndDisclosesRecords(t *testing.T) {
+	const dup = "svc.report[svc.result]"
+	inst := graph.Node{FQN: dup, Tier: 3}
+	g := &graph.Graph{Nodes: []graph.Node{
+		{FQN: "svc.alpha", Tier: 3},
+		{FQN: "svc.beta", Tier: 3},
+		{FQN: "svc.gamma", Tier: 3},
+		{FQN: "svc.main", Tier: 1},
+		inst, inst, inst,
+	}}
+	rep := Evaluate(g, &File{})
+	if rep.NumNodes != 5 || rep.NumNodeRecords != 7 {
+		t.Fatalf("NumNodes/NumNodeRecords = %d/%d, want 5/7 (5 functions over 7 records)",
+			rep.NumNodes, rep.NumNodeRecords)
+	}
+	const want = "assert: 0 passed, 0 failed, 0 errored (graph: 5 nodes (7 instance records), 0 unique edges)\n"
+	if got := rep.String(); got != want {
+		t.Errorf("summary line:\n got %q\nwant %q", got, want)
+	}
+
+	// The duplicate-free control: nothing collapsed, so nothing is disclosed and the line
+	// is byte-identical to one produced before the disclosure existed.
+	if got := Evaluate(testGraph(), &File{}).String(); strings.Contains(got, "instance records") {
+		t.Errorf("a duplicate-free graph must carry no record disclosure: %q", got)
+	}
+}

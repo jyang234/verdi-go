@@ -19,8 +19,16 @@ build:
 # -race mirrors CI's `go test -race` exactly (gates.yml): a data race that would
 # fail CI must fail `make test`/`make verify` locally first, not cost a round-trip.
 # Trust parity outranks the slower run here (prime directive: speed loses).
+#
+# RACE_TIMEOUT replaces go's 600s default, which is PER PACKAGE and which the
+# static packages outgrew under -race. Observed on the CI runners: graphio 579s
+# and cmd/flowmap 571s against that 600s ceiling, so ONE commit passed on one
+# runner and timed out on its twin. A verdict that depends on runner speed is not
+# a verdict (tenet 1), which is why this is a ceiling raise and not a test cut.
+# Kept in parity with gates.yml by ciparity's TestRaceTimeoutParity.
+RACE_TIMEOUT ?= 30m
 test:
-	go test -race ./...
+	go test -race -timeout $(RACE_TIMEOUT) ./...
 
 vet:
 	go vet ./...

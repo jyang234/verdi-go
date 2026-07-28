@@ -117,7 +117,7 @@ func TestMermaidFocusFailsClosed(t *testing.T) {
 	}
 }
 
-// TestMermaidFocusOrderedCandidates pins that the ambiguous candidate list is SORTED
+// TestMermaidFocusAmbiguousSorted pins that the ambiguous candidate list is SORTED
 // (deterministic) — the error is a fail-closed disclosure, so its order must not vary.
 func TestMermaidFocusAmbiguousSorted(t *testing.T) {
 	g := loadFocusGraph(t)

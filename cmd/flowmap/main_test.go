@@ -175,6 +175,110 @@ func fixtureDir() string {
 	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "fixtures", "loansvc")
 }
 
+func localTypeArgFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(file),
+		"..", "..", "testdata", "fixtures", "localtypeargsvc",
+	)
+}
+
+func TestGraphFunctionLocalGenericTypesDeterministic(t *testing.T) {
+	const reportFQN = "example.com/localtypeargsvc.report[example.com/localtypeargsvc.result]"
+	dir := localTypeArgFixtureDir()
+	// The fixture is a standalone service module, not a repository workspace member.
+	t.Setenv("GOWORK", "off")
+	var want string
+	for i := 0; i < 20; i++ {
+		got := captureStdout(t, func() {
+			if err := run([]string{"graph", "--algo", "vta", dir}); err != nil {
+				t.Fatalf("run %d: %v", i, err)
+			}
+		})
+		if i == 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("run %d changed graph bytes", i)
+		}
+	}
+
+	var g graphio.Graph
+	if err := json.Unmarshal([]byte(want), &g); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	if g.Algo != "vta" {
+		t.Fatalf("graph algo = %q, want vta", g.Algo)
+	}
+	var instances int
+	for _, n := range g.Nodes {
+		if n.FQN == reportFQN {
+			instances++
+		}
+	}
+	if instances != 3 {
+		t.Fatalf("graph kept %d report instances; want 3", instances)
+	}
+
+	wantCallers := map[string]bool{
+		"example.com/localtypeargsvc.alpha": false,
+		"example.com/localtypeargsvc.beta":  false,
+		"example.com/localtypeargsvc.gamma": false,
+	}
+	for _, edge := range g.Edges {
+		if edge.To != reportFQN {
+			continue
+		}
+		seen, ok := wantCallers[edge.From]
+		if !ok {
+			t.Fatalf("unexpected edge to retained report instances: %q -> %q", edge.From, edge.To)
+		}
+		if seen {
+			t.Fatalf("duplicate edge to retained report instances: %q -> %q", edge.From, edge.To)
+		}
+		wantCallers[edge.From] = true
+	}
+	for caller, seen := range wantCallers {
+		if !seen {
+			t.Errorf("missing edge from %q to retained report instances", caller)
+		}
+	}
+}
+
+// TestGraphMermaidDeclaresCollidingFQNOnce is the end-to-end half of the duplicate-record
+// render pin: the fixture's generic is instantiated at three function-local types, so the
+// graph legally carries three node records for ONE display FQN (see
+// TestGraphFunctionLocalGenericTypesDeterministic). The diagram draws one box per FQN, so
+// `--mermaid --show-plumbing` must declare that id exactly once — a repeated declaration
+// is not a second box, it is a render that disagrees with the graph it claims to draw.
+func TestGraphMermaidDeclaresCollidingFQNOnce(t *testing.T) {
+	dir := localTypeArgFixtureDir()
+	// The fixture is a standalone service module, not a repository workspace member.
+	t.Setenv("GOWORK", "off")
+	out := captureStdout(t, func() {
+		if err := run([]string{"graph", "--algo", "vta", "--mermaid", "--show-plumbing", dir}); err != nil {
+			t.Fatalf("graph --mermaid: %v", err)
+		}
+	})
+	decls := map[string]int{}
+	for _, ln := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if !strings.Contains(trimmed, `["`) || strings.Contains(trimmed, "-->") {
+			continue
+		}
+		decls[trimmed[:strings.Index(trimmed, `["`)]]++
+	}
+	if len(decls) == 0 {
+		t.Fatalf("no node declarations in mermaid output:\n%s", out)
+	}
+	for id, n := range decls {
+		if n != 1 {
+			t.Errorf("node id %q declared %d times, want exactly 1:\n%s", id, n, out)
+		}
+	}
+}
+
 // TestTaintRendersPerSourceDecomposition pins the B1 CLI surface: `flowmap taint`
 // emits the additive "by source" block alongside the aggregate, so an aggregate FLOW
 // no longer masks the other declared sources. taintsvc declares a FLOW source, an

@@ -35,6 +35,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/reviewtriage"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/transcript"
 	"github.com/jyang234/golang-code-graph/internal/impeach"
+	"github.com/jyang234/golang-code-graph/internal/nodecount"
 	"github.com/jyang234/golang-code-graph/ir"
 )
 
@@ -424,7 +425,14 @@ func cmdReach(args []string) error {
 	ix := graph.NewIndex(g)
 	fqn := fs.Arg(1)
 	if !ix.Has(fqn) {
-		return fmt.Errorf("no function %q in graph (it has %d nodes)", fqn, len(g.Nodes))
+		// Count what the failed lookup was actually made against: ix is FQN-KEYED, so its
+		// universe is the distinct display FQNs, not the raw nodes[] records. Reporting
+		// len(g.Nodes) told a user "it has 7 nodes" about an index holding 5 — and the raw
+		// total is still worth having, so it rides the shared record suffix rather than
+		// being dropped for the distinct count (tenet 3).
+		known := len(ix.Nodes())
+		return fmt.Errorf("no function %q in graph (it has %d nodes%s)", fqn, known,
+			nodecount.RecordSuffix(known, len(g.Nodes)))
 	}
 
 	callers := ix.Reaching(fqn)

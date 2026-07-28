@@ -275,17 +275,36 @@ func EffectivePkgPath(fn *ssa.Function) string {
 
 // InstanceDiscriminator returns a run-independent secondary sort key that
 // distinguishes functions sharing a RelString display FQN — chiefly generic
-// INSTANCES, whose display name is documented non-unique. It is the effective
-// package path plus the canonical types.TypeString of each type argument, so two
-// instantiations of one generic (or same-named generics reached in different
-// packages) order deterministically instead of on map-iteration order (M-20).
-// Empty for a non-instance, whose FQN is already unique.
+// INSTANCES, whose display name is documented non-unique, and promoted-method
+// wrappers over function-local receivers. Its effective-package and type-string
+// prefix is compatibility-sensitive: package-only arguments stay byte-identical.
+// A reachable function-local declaration appends the framed, positional
+// local-type-graph/v1 serialization (see localTypeGraph), so same-rendering local
+// types remain distinct across checkout roots and //line directives. Unknown or
+// invalid local identity inputs fail closed by panicking rather than emitting a
+// plausible but untrustworthy key. Empty for a function whose FQN is already
+// unique.
+//
+// It separates every collision class the vocabulary of declaration position and
+// type structure can decide, and ONE class survives it: two instances produced
+// from one function-local declaration inside a generic function, structurally
+// identical in both. That class is refused, not merged, at callgraph.finalize —
+// see "Residual undecided classes" in the design.
 func InstanceDiscriminator(fn *ssa.Function) string {
 	if fn == nil {
 		return ""
 	}
+	roots := discriminatorRoots(fn)
+	if len(roots) == 0 {
+		return ""
+	}
 	targs := fn.TypeArgs()
-	if len(targs) == 0 {
+	suffix := localTypeGraph(fn, roots)
+	// A method that is not a generic instance had an empty discriminator before
+	// the receiver joined the root set, and keeps it unless its receiver actually
+	// reaches a function-local declaration. Only wrappers over local receivers
+	// change, and only from "" to something.
+	if len(targs) == 0 && suffix == "" {
 		return ""
 	}
 	var b strings.Builder
@@ -294,6 +313,7 @@ func InstanceDiscriminator(fn *ssa.Function) string {
 		b.WriteByte('\x00')
 		b.WriteString(types.TypeString(t, nil))
 	}
+	b.WriteString(suffix)
 	return b.String()
 }
 

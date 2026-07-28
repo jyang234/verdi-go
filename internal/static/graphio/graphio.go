@@ -1523,28 +1523,11 @@ func nodeTier(ext *features.Extractor, fn *ssa.Function, isRoot bool, outEdges [
 }
 
 func sortGraph(g *Graph) {
-	// Total order over the node's intrinsic fields, not FQN alone: a generic
-	// instance's display FQN (fn.RelString) is documented non-unique, so an
-	// FQN-only comparator left two same-named instances in build (map-iteration)
-	// order — a latent nondeterminism that went live the moment instances entered
-	// the rendered scope (C-1/M-20). Sig carries the instantiated signature (its
-	// concrete type args), so it disambiguates instances; Package/File/Line break
-	// any residual tie on run-independent data.
+	// nodeLess orders every serialized Node field on intrinsic data, so nodes that
+	// compare equal are byte-identical serialized records rather than a build-order
+	// tie. Generic instances can share display FQNs and signatures (C-1/M-20).
 	sort.Slice(g.Nodes, func(i, j int) bool {
-		a, b := g.Nodes[i], g.Nodes[j]
-		if a.FQN != b.FQN {
-			return a.FQN < b.FQN
-		}
-		if a.Sig != b.Sig {
-			return a.Sig < b.Sig
-		}
-		if a.Package != b.Package {
-			return a.Package < b.Package
-		}
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		return a.Line < b.Line
+		return nodeLess(g.Nodes[i], g.Nodes[j])
 	})
 	// Total order over every Edge field (edgeLess): a comparator that ignored Boundary
 	// and Concurrent left equal-keyed edges in build order — deterministic only as
@@ -1555,6 +1538,30 @@ func sortGraph(g *Graph) {
 	// Via edge parallel to a base From/To).
 	sort.Slice(g.Edges, func(i, j int) bool { return edgeLess(g.Edges[i], g.Edges[j]) })
 	g.Edges = dedupEdges(g.Edges)
+}
+
+// nodeLess imposes the canonical order over every Node field serialized by
+// Graph.Marshal. Equal comparator keys therefore mean byte-identical serialized
+// node records, making their relative input order irrelevant to canonical output.
+func nodeLess(a, b Node) bool {
+	switch {
+	case a.FQN != b.FQN:
+		return a.FQN < b.FQN
+	case a.Sig != b.Sig:
+		return a.Sig < b.Sig
+	case a.Package != b.Package:
+		return a.Package < b.Package
+	case a.File != b.File:
+		return a.File < b.File
+	case a.Line != b.Line:
+		return a.Line < b.Line
+	case a.EndLine != b.EndLine:
+		return a.EndLine < b.EndLine
+	case a.Tier != b.Tier:
+		return a.Tier < b.Tier
+	default:
+		return !a.Fallible && b.Fallible
+	}
 }
 
 // edgeLess is the ONE canonical total order over Edge — every field, so two records

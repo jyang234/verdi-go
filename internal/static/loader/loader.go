@@ -48,6 +48,17 @@ type Service struct {
 // Load type-checks the packages rooted at dir (the "./..." pattern relative to
 // dir) and returns them as one service unit.
 func Load(dir string) (*Service, error) {
+	// Tests: false is load-bearing beyond scope. The in-package test variant
+	// go/packages produces under Tests: true reports the SAME types.Package path
+	// over the SAME files at the SAME byte offsets, which the function-local type
+	// discriminator cannot separate from the real package (its key qualifies a
+	// declaration site by package PATH). Flipping this admits a collision class
+	// that would correctly, but newly, fail closed — see "Physical position" in
+	// docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+	// TestLoadExcludesInPackageTestVariants is the tripwire, over the
+	// inpkgtestsvc fixture: it holds an in-package test file and declares no
+	// dependencies, so the flip fails on the duplicate PkgPath itself rather than
+	// on a fixture whose test dependencies do not resolve.
 	cfg := &packages.Config{
 		Mode:  loadMode,
 		Dir:   dir,

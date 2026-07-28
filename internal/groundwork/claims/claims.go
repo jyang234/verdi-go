@@ -121,6 +121,7 @@ import (
 	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
+	"github.com/jyang234/golang-code-graph/internal/nodecount"
 	"github.com/jyang234/golang-code-graph/internal/routematch"
 )
 
@@ -291,9 +292,18 @@ type Result struct {
 }
 
 // Report is the full evaluation, in claims-file order.
+//
+// NumNodes counts the DISTINCT node FQNs — the node universe every node claim actually
+// resolves against, and the counting basis its sibling NumUniquePairs already used for
+// edges. A display FQN can legally carry several node records (a generic instantiated at
+// two function-local types), so the raw len(nodes) would report a universe larger than
+// the one claims are graded over. NumNodeRecords keeps the raw record total beside it so
+// the collapse is disclosed rather than silently absorbed (tenet 3); String() renders the
+// pair through the shared nodecount phrasing.
 type Report struct {
 	Results        []Result
 	NumNodes       int
+	NumNodeRecords int
 	NumUniquePairs int
 }
 
@@ -331,8 +341,9 @@ func (r Report) String() string {
 			fmt.Fprintf(&b, "ERROR %s [%s] %s\n", res.Label, res.Kind, res.Detail)
 		}
 	}
-	fmt.Fprintf(&b, "assert: %d passed, %d failed, %d errored (graph: %d nodes, %d unique edges)\n",
-		r.Passed(), r.Failed(), r.Errored(), r.NumNodes, r.NumUniquePairs)
+	fmt.Fprintf(&b, "assert: %d passed, %d failed, %d errored (graph: %d nodes%s, %d unique edges)\n",
+		r.Passed(), r.Failed(), r.Errored(), r.NumNodes,
+		nodecount.RecordSuffix(r.NumNodes, r.NumNodeRecords), r.NumUniquePairs)
 	return b.String()
 }
 
@@ -341,7 +352,7 @@ func (r Report) String() string {
 // aggregate to an exit code.
 func Evaluate(g *graph.Graph, cf *File) Report {
 	m := newModel(g)
-	rep := Report{NumNodes: m.numNodes, NumUniquePairs: m.numUniquePairs}
+	rep := Report{NumNodes: m.numNodes, NumNodeRecords: m.numNodeRecords, NumUniquePairs: m.numUniquePairs}
 	for _, c := range cf.Claims {
 		rep.Results = append(rep.Results, m.eval(c))
 	}
@@ -368,8 +379,14 @@ type model struct {
 	// entrypoint claim iterates them in this order but every list it emits (the
 	// disagreeing-joins ERROR) is sorted, so the verdict is arrival-order
 	// independent (pinned by TestDeterministicOverShuffledInput).
-	entrypoints    []graph.Entrypoint
+	entrypoints []graph.Entrypoint
+	// numNodes is the size of nodeUniverse — DISTINCT FQNs, the universe a node claim is
+	// graded against — while numNodeRecords is the raw nodes[] length. They differ exactly
+	// when a display FQN carries several node records (a generic instantiated at two
+	// function-local types); the report discloses the difference instead of reporting one
+	// number that quietly means the other.
 	numNodes       int
+	numNodeRecords int
 	numUniquePairs int
 }
 
@@ -400,7 +417,8 @@ func newModel(g *graph.Graph) *model {
 		callees:          sortedSets(calleesSet),
 		nodeTiers:        sortedIntSets(tierSet),
 		entrypoints:      g.Entrypoints,
-		numNodes:         len(g.Nodes),
+		numNodes:         len(nodeSet),
+		numNodeRecords:   len(g.Nodes),
 		numUniquePairs:   len(pairs),
 	}
 }
