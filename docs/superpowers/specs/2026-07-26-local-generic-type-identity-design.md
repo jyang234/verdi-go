@@ -670,8 +670,11 @@ undecidable by the chosen identity vocabulary, and it is the reason Goal 1 is
 stated as bounded.
 
 **A generic function that declares a function-local type, reached through two
-analyzed instances of that one generic body.** Every instance shares one
-syntactic declaration, hence one site. When the local's structure varies with the
+analyzed instances of that one generic body** — where "generic function" is
+shorthand for any body the analyzer builds more than once, including a closure
+nested in one and a method of a generic type; see the sub-case below. Every
+instance shares one syntactic declaration, hence one site. When the local's
+structure varies with the
 type parameter (`type L struct{ A X }`, witness `n1c`), the structural component
 separates them. When it does not (`type L struct{ A int }`, witness `n1b`),
 position and structure are both identical and no refinement of either can help.
@@ -685,53 +688,133 @@ distinguishes them, so nothing in the diagnostic may assert which occurred.
 ### The uninstantiated-body sub-case — same class, one instantiation
 
 **Blast radius, stated as the mechanism.** The refusal fires exactly when all
-four of the following hold:
+five of the following hold. Each is individually **necessary**, and the five are
+jointly **sufficient**:
 
-1. a **generic** function declares a function-local type `L`;
-2. `L` reaches the **discriminator roots** of some SSA function — it is one of
-   that function's type arguments, or its receiver (see "Wrapper
-   discrimination");
-3. the analyzed set holds **two** analyzed instances of that one generic body —
-   two instantiations, or one instantiation alongside the generic's own
-   uninstantiated body — and **builds** that SSA function from each, so the two
-   are distinct `*ssa.Function` produced from the one declaration of `L`;
+1. a function-local type `L` is declared inside a body the analyzer builds **more
+   than once** — a generic function (`n1b`), a **closure nested in** one
+   (`n1closure`), or a **method of a generic type** (`n1typemethod`, where `Show`
+   declares no type parameters of its own and the program contains no generic
+   function at all);
+2. `L` is **reachable in the type graph** from the **discriminator roots** of some
+   SSA function `F` — `F`'s type arguments in order, then its receiver when it has
+   one (see "Wrapper discrimination"). `L` need not *be* a root: the encoding
+   walks the whole graph below each root, so `[]L` (`n1nestedroot`), `*L`,
+   `chan L`, `map[string]L`, `func(L)` and `Wrap[L]` all reach it;
+3. the analyzed set holds **two** analyzed instances of that one enclosing body —
+   two instantiations, or one instantiation alongside the body's own
+   uninstantiated form — and **builds** `F` from each, so the two are distinct
+   `*ssa.Function` produced from the one declaration of `L`;
 4. `L`'s structure does not depend on the enclosing type parameter, so the two
-   encode identically.
+   copies of `L` encode identically (`n1c` fails here);
+5. and **nothing else reaching `F`'s roots separates the two either**. Every
+   *other* function-local type reachable from those roots is likewise produced
+   from a single declaration with a structure that does not vary, and the
+   enclosing type parameter's own instantiation does not reach them
+   (`n1fqndiffers` and `n1twodecls` fail here).
 
-Equivalently and more briefly: **the analyzed set holds two distinct
-`*ssa.Function` that differ only in which instantiation of the enclosing generic
-body produced them.** Drop any conjunct and the program graphs cleanly. Nothing
-in the four is exotic, so the refusal is not a corner case; it is the price of
-failing closed, and it is paid by any analysis whose set holds that pair.
+Conjuncts 4 and 5 are one property split by role — `L` cannot separate the pair,
+and neither can anything else — and together they say exactly this: **the two
+instances agree on everything the encoding reads from `F`'s roots**: every kind,
+every basic and field label, and every function-local object's declaring package
+path, file basename and byte offset. Equal encodings render equally, so conjunct
+5 also delivers the equal **display FQN** that `panicOnDuplicateSortKey` tests
+first — it short-circuits on `prev.FQN != cur.FQN` and never consults the
+discriminator, so a pair the FQN already separates is not a refusal however well
+conjuncts 1–4 fit it.
+
+Drop conjunct 2, 3, 4 or 5 and the program graphs cleanly — the table below
+carries a committed negative witness for each. Conjunct 1 has none of its own,
+and needs none: it is *implied* by conjunct 3, since a body the analyzer builds
+once yields one `F` and no pair (that program is `n1zeroinst`). It is stated
+separately because it is the conjunct a reader checks by looking at the source.
+Nothing in the five is exotic, so the refusal is not a corner case; it is the
+price of failing closed, and it is paid by any analysis whose set holds that
+pair.
+
+**"Generic function" is shorthand elsewhere in this document**, including in the
+frozen diagnostic text ("inside a generic function"), for what conjunct 1
+actually needs: a body the analyzer builds more than once. `n1typemethod` is
+refused with that wording and contains no generic function. The shorthand is
+disclosed here rather than corrected there, because the diagnostic's exact text
+is ratified and byte-identical to the block under "Diagnostic"; widening it is a
+separate spec change.
+
+**There is no shorter equivalent, and this section no longer offers one.** "Two
+distinct `*ssa.Function` that differ only in which instantiation of the enclosing
+generic body produced them" was carried here as an equivalence and reads well,
+but "differ" has no stable meaning that makes it one. Read as type identity it
+also describes `n1c`, whose two `sink[L]` differ in exactly that and graph
+cleanly; read as "differ in anything the key can see" it is
+`panicOnDuplicateSortKey` restated. Keep it as a mnemonic; the five conjuncts are
+the criterion.
 
 The syntactic forms below are **illustrations, not an enumeration.** This
-sentence has twice been written as a shape list and twice been falsified by
-execution — first by over-claiming refusals that do not happen, then by being
-read as exhaustive — so every shape is a committed fixture, indexed by the
-conjunct it exercises, and the table's exit codes are asserted.
+sentence has now been written three times and falsified three times by execution
+— first by over-claiming refusals that do not happen, then by being read as
+exhaustive, then by omitting conjunct 5 — so every shape is a committed fixture,
+indexed by the conjunct it exercises, and the table's exit codes are asserted.
 
 | Fixture | Shape | `rta` | `vta` | `cha` |
 |---|---|---|---|---|
 | `n1b` | `f[X]` declares `L`, passes it to a generic `g`; `f` instantiated twice | refused | refused | refused |
 | `n1` | two *different* generic functions declare `L`, so conjunct 3 is met only via the uninstantiated body | 0 | 0 | refused |
 | `n1lib` | an exported generic in a **library** unit, instantiated once; root discovery supplies its uninstantiated body | refused | refused | refused |
+| `n1closure` | conjunct 1 — `L` is declared in a **closure** nested in the generic function, which has no type parameters of its own | refused | refused | refused |
+| `n1typemethod` | conjunct 1 — `L` is declared in a **method of a generic type**; no generic *function* appears in the program | refused | refused | refused |
 | `n1method` | `L` is a type argument of a generic **type**; the refused pair is that type's method, `(Box[L]).Show[L]` | 0 | 0 | refused |
 | `n1methodnocall` | the same with the method **never called** | 0 | 0 | refused |
 | `n1recv` | `L` reaches a promotion wrapper's **receiver**; the refused function carries no type arguments at all | 0 | 0 | refused |
+| `n1nestedroot` | conjunct 2 — the type argument is `[]L`, so `L` is **not a root**; the walk reaches it one edge below | refused | refused | refused |
+| `n1onedecl` | conjunct 5, the refusing half of `n1twodecls`' minimal pair: the *second* root is two instances of ONE declaration of `M` | refused | refused | refused |
 | `n1c` | conjunct 4 fails — `L`'s structure mentions `X` | 0 | 0 | 0 |
 | `n1zeroinst` | conjunct 3 fails — zero instantiations, so `cha` builds exactly one `g[L]` | 0 | 0 | 0 |
 | `n1nongencallee` | conjunct 2 fails — the callee is not generic, so nothing carries `L` in its roots | 0 | 0 | 0 |
 | `n1typeonly` | conjunct 2 fails differently — `Box[L]` *is* instantiated twice, but `Box` has no methods, so no SSA function is built at `L` | 0 | 0 | 0 |
+| `n1fqndiffers` | conjunct 5 fails — `x` carries `X`'s instantiation into the roots, so the FQNs **differ** | 0 | 0 | 0 |
+| `n1twodecls` | conjunct 5 fails with the FQNs **equal** — the second root's two locals render alike but come from two declarations | 0 | 0 | 0 |
 
-Three of those rows exist because they falsify a reading the earlier shape-list
+Six of those rows exist because they falsify a reading an earlier wording
+invited, and each was confirmed by execution:
+
+- **"a generic function declares `L`."** Too narrow, twice over. `n1closure`
+  declares it in a closure whose own signature has no type parameters, and
+  `n1typemethod` declares it in `func (Box[T]) Show()`, which declares none
+  either — in a program with no generic function anywhere. What conjunct 1 needs
+  is a body the analyzer **builds more than once**; "generic function" names only
+  the commonest way to get one.
+- **"`L` IS one of the type arguments, or the receiver."** Too narrow.
+  `n1nestedroot` passes `[]L`; `L` is one edge below the root and the refusal
+  fires all the same, because `localTypeGraph` walks the graph under each root
+  rather than reading the roots themselves.
+- **"the four conjuncts are sufficient."** False, and this is the falsification
+  that added conjunct 5. `n1fqndiffers` satisfies all four — `gen` declares `L`,
+  `L` reaches `sink`'s roots, `cha` builds `sink` from the uninstantiated body
+  and from each of two instantiations, and `L`'s structure does not mention `X` —
+  and graphs cleanly under all three algorithms, because the second argument
+  `x` gives the three instances three different FQNs (`sink[L X]`, `sink[L int]`,
+  `sink[L string]`). Replacing `x` with `0` refuses it.
+- **"then require the two to share a display FQN."** The obvious repair, and also
+  false. In `n1twodecls` they *do* share one — both are
+  `sink[…n1twodecls.L …n1twodecls.L]`, two node records under one FQN — and the
+  program still graphs cleanly, because `mkA`'s `L` and `mkB`'s `L` render alike
+  but sit at different declaration sites. Sharing an FQN is necessary, not
+  sufficient; conjunct 5 has to be about what the *encoding* reads.
+- **"the pair must differ in nothing but the instantiation."** `n1onedecl` is
+  `n1twodecls` with `mkA`/`mkB` collapsed into one generic instantiated twice —
+  one declaration of `M` behind the differing root instead of two — and it is
+  refused. The two fixtures are a minimal pair: what conjunct 5 counts is
+  declarations, not type arguments and not rendering.
+
+Three further rows exist because they falsify a reading the original shape-list
 wording invited, and each was confirmed by execution:
 
 - **"the callee must be a generic function."** False. `n1method` and `n1recv`
-  call no generic function at `L`. Conjunct 2 requires only that `L` reach a
-  *discriminator root* — a type argument **or** a receiver. The receiver is a
-  root because a promoted-method wrapper carries no type arguments whatsoever
-  (see "Wrapper discrimination"), so a blast radius stated over type arguments
-  alone omits `n1recv` entirely.
+  call no generic function at `L`. Conjunct 2 requires only that `L` be reachable
+  from a *discriminator root* — the type arguments **and** the receiver. The
+  receiver is a root because a promoted-method wrapper carries no type arguments
+  whatsoever (see "Wrapper discrimination"), so a blast radius stated over type
+  arguments alone omits `n1recv` entirely.
 - **"the function at `L` must be called."** False. `n1methodnocall` never calls
   `Show`; converting `Box[L]` to an interface puts its method set into the
   analyzed set, and `cha` refuses. Conjunct 3 says *built*, not *called*.
@@ -750,12 +833,22 @@ not pass for one whose guard did not fire.
 
 **Nothing intercepts a member of the class before the guard sees it.** `mergeKey`
 merges byte-identical wrappers, but it accepts only functions with no type
-arguments and no receiver — an empty discriminator root set, hence an empty
+arguments **and** no receiver — an empty discriminator root set, hence an empty
 discriminator — so it can never hold a function whose key carries the
 `local-type-graph/v1` suffix. That is the one step of "exactly when" no
 end-to-end fixture can exhibit, and the two definitions live in two packages, so
 it is asserted by `TestMergeKeyNeverAbsorbsASuffixCarryingFunction` rather than
 argued.
+
+The exclusion has **two** conjuncts and the test pins each separately, because a
+fixture that exercises one is silent about the other. Relaxing the *receiver*
+conjunct is a genuine silent merge: `n1recv` under `cha` goes from refused to
+exit 0, two distinct promotion wrappers collapsing into one node with no
+refusal — and while `mergeKeyDisjointSrc` held only a type-argument-rooted local,
+that mutation left the whole `internal/static/callgraph` suite green. The fixture
+now also carries a receiver-rooted function-local type, and the suffix
+non-vacuity counter is split one per conjunct, so hoisting either local back to
+package scope fails the test instead of quietly disarming half of it.
 
 The mechanism behind conjunct 3: under `cha` the analyzed set is the whole
 program, which includes the **uninstantiated** body of every generic function
