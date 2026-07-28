@@ -185,7 +185,7 @@ func receiverType(fn *ssa.Function) types.Type {
 // createWrapper and createBound. They are the only handle go/ssa exposes: the
 // kind is not a field, and $thunk/$bound in the display name is derived from the
 // same selection. Pinned against the toolchain by
-// TestReceiverTypeMatchesGoSSASyntheticPrefixes.
+// TestReceiverTypeReadsThunkParameterAndBoundFreeVar.
 const (
 	thunkSynthetic = "thunk for "
 	boundSynthetic = "bound method wrapper for "
