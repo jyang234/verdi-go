@@ -215,8 +215,13 @@ type wrapperKey struct {
 	obj types.Object
 }
 
-// mergeKey returns fn's wrapper identity and true when fn is one of the receiver-less
-// method-value / method-expression forwarders go/ssa mints fresh per use-site.
+// mergeKey returns fn's wrapper identity and true when fn satisfies every conjunct
+// below: a synthetic function with a wrapped Object, no type arguments and no
+// Signature.Recv(), whose discriminator carries no local-type-graph suffix. The class
+// it EXISTS for — and the only class it ever actually merges — is the receiver-less
+// method-value / method-expression forwarders go/ssa mints fresh per use-site; see
+// "The admitted set is what the conjuncts say" below for the third kind that also
+// passes and why that is harmless.
 // createBound (MethodVal, "$bound") and createThunk (MethodExpr, "$thunk") in x/tools
 // go/ssa build a NEW wrapper at every occurrence and never cache it, so K uses of one
 // method M yield K distinct *ssa.Function that are byte-identical — same wrapped
@@ -226,8 +231,9 @@ type wrapperKey struct {
 // too, so no tie-break could separate them: the sound resolution is to MERGE the
 // interchangeable copies, not to fabricate an order between identical things.
 //
-// The class is deliberately restricted to receiver-less forwarders
-// (Signature.Recv() == nil) — exactly bound+thunk, the two UNCACHED kinds. Everything
+// The class is deliberately restricted to receiver-less synthetics
+// (Signature.Recv() == nil), which is what admits bound+thunk, the two UNCACHED
+// kinds. Everything
 // else is excluded ON PURPOSE so an unproven collision fails LOUD at finalize() rather
 // than being silently merged (CLAUDE.md: fail closed; soundness is asymmetric): a
 // promotion/interface wrapper carries a receiver and is cached by go/ssa (it never
@@ -236,6 +242,20 @@ type wrapperKey struct {
 // spliced-wrapper set (which keys on Pkg == nil for the different splice-vs-render
 // question); the two are NOT folded into one predicate because they answer different
 // questions.
+//
+// The admitted set is what the conjuncts say, NOT an enumeration of those two kinds,
+// and a THIRD go/ssa kind passes them on every real run: a bodiless declared
+// package-level function, Synthetic "from type information" (create.go), which go/ssa
+// mints for every dependency the loader resolves from export data rather than syntax
+// — fmt.Errorf, net/http.HandleFunc, context.Background. It has a non-empty
+// Synthetic, a non-nil Object(), no type arguments and no Signature.Recv(), so it is
+// admitted in the thousands; over the loansvc fixture it is the bulk of the merge
+// candidates. It is harmless rather than overlooked, and no merge has ever fired for
+// one. It genuinely has no receiver, so features.receiverType returning nil is
+// correct and its empty discriminator is earned rather than missed; and one
+// *types.Func yields one *ssa.Function per package, so two of them cannot share
+// (RelString, Object) — the key that would be needed to collapse them. Admitted,
+// never merged: do not read this predicate as "exactly bound+thunk".
 //
 // Merge safety rests on the KEY, not on Object being unique: two wrappers merge only
 // when they share RelString(nil) AND the wrapped Object. RelString carries the full

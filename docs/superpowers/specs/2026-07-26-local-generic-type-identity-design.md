@@ -434,8 +434,21 @@ and `package initializer` have no receiver at all.
 `mergeKey` is widened in NO direction. Merging a receiver-carrying wrapper remains
 forbidden, because go/ssa caches those wrappers and two distinct ones are not
 interchangeable; and `mergeKey` gains a third exclusion — any function whose
-discriminator carries the `local-type-graph/v1` suffix — so the two forwarder
-kinds it *does* merge can never be members of the residual class.
+discriminator carries the `local-type-graph/v1` suffix — so nothing `mergeKey`
+admits can ever be a member of the residual class.
+
+That admitted subset is defined by `mergeKey`'s conjuncts, **not** by an
+enumeration of kinds, and it is wider than the two forwarders the merge exists
+for. A bodiless declared package-level function — `Synthetic == "from type
+information"`, which `go/ssa` mints for every dependency the loader resolves from
+export data rather than syntax (`fmt.Errorf`, `net/http.HandleFunc`,
+`context.Background`) — has a non-empty `Synthetic`, a non-nil `Object()`, no type
+arguments and no `Signature.Recv()`, so it is admitted too, in the thousands on
+any real run. This is harmless rather than overlooked, and no merge has ever fired
+for one: it genuinely has no receiver, so `receiverType` returning nil is correct
+and its empty discriminator is earned rather than missed; and one `*types.Func`
+yields one `*ssa.Function` per package, so two of them cannot share the
+`(RelString, Object)` key a merge would require. Admitted, never merged.
 
 Goal 2 is preserved without exception: a method, thunk or bound whose receiver
 reaches no function-local declaration produces no suffix, so its discriminator
