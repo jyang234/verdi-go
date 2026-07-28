@@ -443,7 +443,9 @@ for. A bodiless declared package-level function — `Synthetic == "from type
 information"`, which `go/ssa` mints for every dependency the loader resolves from
 export data rather than syntax (`fmt.Errorf`, `net/http.HandleFunc`,
 `context.Background`) — has a non-empty `Synthetic`, a non-nil `Object()`, no type
-arguments and no `Signature.Recv()`, so it is admitted too, in the thousands on
+arguments and no `Signature.Recv()`, so it is admitted too — in the thousands under
+`--algo cha`, and a clear majority of the candidates (15 of 18 on loansvc) under the
+default `rta`/`vta`, whose node set is far smaller — on
 any real run. This is harmless rather than overlooked, and no merge has ever fired
 for one: it genuinely has no receiver, so `receiverType` returning nil is correct
 and its empty discriminator is earned rather than missed; and one `*types.Func`

@@ -97,9 +97,13 @@ func main() { var r Reader = impl{}; call(r.Exists); gen(1); local().QueryContex
 // them disjoint by assertion. features' discriminatorRoots is (type arguments,
 // receiver), where "receiver" is features.receiverType — which reads a $thunk's
 // FIRST PARAMETER and a $bound's SOLE FREE VARIABLE, neither of which is
-// Signature.Recv(). So a mergeKey-eligible function does NOT have an empty root
-// set: exactly the two uncached forwarder kinds mergeKey exists to merge are the
-// two whose receiver lives elsewhere. What keeps the merge subset empty-keyed is
+// Signature.Recv(). So a mergeKey-eligible function need NOT have an empty root
+// set: the two uncached forwarder kinds mergeKey exists to merge are the two whose
+// receiver lives elsewhere, and they are all this fixture's helper mints. Do not
+// read that as a universal over everything mergeKey admits — behind the real
+// loader the admitted set is dominated by receiver-less "from type information"
+// functions (see mergeKey's doc); the disjointness argument needs only the
+// forwarder subset, which is what this fixture supplies. What keeps the merge subset empty-keyed is
 // mergeKey's own HasLocalTypeGraph conjunct, and the parity between the two
 // definitions lives in two packages, so it is asserted here rather than assumed.
 //

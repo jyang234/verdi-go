@@ -249,7 +249,8 @@ type wrapperKey struct {
 // mints for every dependency the loader resolves from export data rather than syntax
 // — fmt.Errorf, net/http.HandleFunc, context.Background. It has a non-empty
 // Synthetic, a non-nil Object(), no type arguments and no Signature.Recv(), so it is
-// admitted in the thousands; over the loansvc fixture it is the bulk of the merge
+// admitted in the thousands under --algo cha (15 of 18 candidates under the default
+// rta/vta, whose node set is far smaller); over the loansvc fixture it is the bulk of the merge
 // candidates. It is harmless rather than overlooked, and no merge has ever fired for
 // one. It genuinely has no receiver, so features.receiverType returning nil is
 // correct and its empty discriminator is earned rather than missed; and one

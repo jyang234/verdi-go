@@ -32,10 +32,29 @@ import (
 // repo-wide: it is a merge blocker, and a blocker that starts red on unrelated
 // pre-existing prose gets disabled instead of obeyed. Widen it by adding a
 // directory here once that directory is clean.
-// A repo-wide run at the time of writing reported five further violations, in
-// internal/fqnres, internal/fuzzcov, internal/groundwork/fitness (two) and
-// internal/static/schemadrift. They are pre-existing and out of this change's
-// scope; they are left for their owners rather than silently swept in here.
+// A repo-wide run at the time of writing reported five further HITS — and only
+// TWO are stale citations. Read them before widening, because three are
+// limitations of the pattern, not defects, and widening onto them turns CORRECT
+// comments red:
+//
+//   - internal/fqnres and internal/static/schemadrift are genuinely stale: each
+//     names a test that was later renamed to a longer name it is now a prefix of.
+//   - internal/groundwork/fitness has two, both correct as written. One cites a
+//     `go test -run` PREFIX GLOB (a real name plus a trailing star); the other
+//     HYPHEN-WRAPS a name across two comment lines. Long names plus dense prose
+//     make both idioms live in this repo, including in the packages covered here.
+//   - internal/fuzzcov names Go's own Fuzz-target naming CONVENTION, not a
+//     function.
+//
+// Those five are deliberately described rather than quoted, because the pattern
+// has NO OPT-OUT and quoting them here would make this very comment fail the
+// guard — as it did, once, while being written. That is the limitation in one
+// sentence: a citation to a testdata fixture, an upstream repo's test, or a name
+// under discussion rather than in use misfires identically, and there is no way
+// to say so in a comment. Widening means fixing the two stale names AND teaching
+// the pattern those shapes (or adding an opt-out marker) — not merely adding a
+// directory below. A merge blocker that starts red on prose that is right is one
+// somebody deletes instead of obeying.
 var citedPackages = []string{
 	"internal/commentcite",
 	"internal/static/callgraph",
