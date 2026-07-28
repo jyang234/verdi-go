@@ -49,6 +49,61 @@ func gen[X any](x X) { type L struct{ A int }; sink(L{}) }
 func main() { gen(1); gen("s") }
 `
 
+// mergeKeyDisjointSrc holds BOTH mechanisms at once: `call(r.Exists)` mints a
+// $bound wrapper, which mergeKey is allowed to merge, and gen's function-local L
+// gives sink[L] a local-type-graph suffix.
+const mergeKeyDisjointSrc = `package localtypes
+type Reader interface{ Exists(id int) bool }
+type impl struct{}
+func (impl) Exists(id int) bool { return id > 0 }
+func call(check func(int) bool) bool { return check(1) }
+func sink[T any](v T) {}
+func gen[X any](x X) { type L struct{ A int }; sink(L{}) }
+func main() { var r Reader = impl{}; call(r.Exists); gen(1) }
+`
+
+// TestMergeKeyNeverAbsorbsASuffixCarryingFunction pins the one step of the
+// residual class's blast radius that no end-to-end fixture can exhibit: that
+// wrapper merging cannot quietly absorb a member of the class before the guard
+// ever sees it. If it could, "the refusal fires exactly when …" in "The
+// uninstantiated-body sub-case" would be an over-claim.
+//
+// The two mechanisms are disjoint by construction. mergeKey accepts only a
+// function with NO type arguments and NO receiver; features' discriminator roots
+// are exactly (type arguments, receiver), so a mergeKey-eligible function has an
+// empty root set and InstanceDiscriminator returns "" for it — never a key
+// carrying the local-type-graph suffix. The parity between those two definitions
+// lives in two packages, so it is asserted here rather than assumed.
+func TestMergeKeyNeverAbsorbsASuffixCarryingFunction(t *testing.T) {
+	roots := buildCallGraphRoots(t, mergeKeyDisjointSrc)
+	if len(roots) == 0 {
+		t.Fatal("fixture produced no roots")
+	}
+	merged, suffixed := 0, 0
+	for fn := range ssautil.AllFunctions(roots[0].Prog) {
+		key := features.InstanceDiscriminator(fn)
+		if features.HasLocalTypeGraph(key) {
+			suffixed++
+		}
+		if _, ok := mergeKey(fn); !ok {
+			continue
+		}
+		merged++
+		if key != "" {
+			t.Errorf("mergeKey accepts %q, whose discriminator is %q; merge candidates must have an empty key",
+				fn.RelString(nil), key)
+		}
+	}
+	// Non-vacuity in both directions: a program exercising neither mechanism
+	// would pass this test while proving nothing about their disjointness.
+	if merged == 0 {
+		t.Error("fixture produced no mergeKey candidate; the assertion is vacuous")
+	}
+	if suffixed == 0 {
+		t.Error("fixture produced no local-type-graph suffix; the assertion is vacuous")
+	}
+}
+
 // buildCallGraphRoots returns the main and init roots for src.
 func buildCallGraphRoots(t *testing.T, src string) []*ssa.Function {
 	t.Helper()

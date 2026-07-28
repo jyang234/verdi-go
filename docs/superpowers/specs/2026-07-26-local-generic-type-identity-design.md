@@ -351,13 +351,6 @@ a basename and whose local declarations are offset-aligned collide: witness `f26
 builds two distinct `*ssa.Function` with one key from exactly that, and renaming
 one file to break the basename equality makes it graph cleanly.
 
-The `local-sites/v1` uniqueness argument — that intra-package basename uniqueness
-suffices because the type string already carries the package path — **is
-invalid**. Once sites are pooled into one alphabet, two packages whose files share
-a basename and whose local declarations are offset-aligned collide: witness `f26`
-builds two distinct `*ssa.Function` with one key from exactly that, and renaming
-one file to break the basename equality makes it graph cleanly.
-
 **Separate normative tripwire.** Package-path qualification does **not**
 distinguish a package from its `go/packages` in-package test variant: both report
 the same `Path()`, over the same files at the same offsets. `Tests: false` in
@@ -609,17 +602,40 @@ keys and *no panic* unless stated:
   instantiation count, or offering "instantiate it only once" as a remedy, is
   false here under every algorithm, and the test asserts those phrasings are
   absent.
-- two **negative** witnesses that bound the disclosed blast radius, both holding
+- three **positive** witnesses that reach the residual class WITHOUT a call to a
+  generic function, each asserted to exit 0 under `rta` and `vta` and to be
+  refused under `cha` with the residual diagnostic: `n1method` (the local is a
+  type argument of a generic **type**, and the refused pair is that type's
+  method), `n1methodnocall` (the same with the method **never called**), and
+  `n1recv` (the local reaches a promotion wrapper's **receiver**, so the refused
+  function carries no type arguments at all). They are what make the blast radius
+  a mechanism rather than a shape list; a phrasing quantified over calls to
+  generic functions, or over type arguments alone, contains none of them.
+- three **negative** witnesses that bound the disclosed blast radius, all holding
   `n1b`'s shape yet asserted to exit 0 under `rta`, `vta` **and** `cha`:
-  `n1zeroinst`, whose generic is never instantiated, and `n1nongencallee`, whose
-  callee is not generic. Each also asserts the node counts that keep it armed —
-  `n1zeroinst` must show **exactly one** `sink[L]` under `cha` (the
-  uninstantiated body's, so the door is demonstrably open), and
-  `n1nongencallee` must show both `gen` and `gen[int]` under `cha`. Without those
-  counts a fixture whose subject was simply never analyzed would pass, and the
-  witnesses would prove nothing. They exist because the blast-radius sentence in
-  "The uninstantiated-body sub-case" was once written as an unbounded "ANY
-  program containing this shape", which execution falsified twice.
+  `n1zeroinst`, whose generic is never instantiated; `n1nongencallee`, whose
+  callee is not generic; and `n1typeonly`, whose local IS a type argument of a
+  generic type the analyzed set instantiates twice, but that type has no methods,
+  so no SSA function is built at the local. Each also asserts the node counts
+  that keep it armed — `n1zeroinst` must show **exactly one** `sink[L]` under
+  `cha` (the uninstantiated body's, so the door is demonstrably open), and
+  `n1nongencallee` and `n1typeonly` must each show both `gen` and `gen[int]`
+  under `cha`. Without those counts a fixture whose subject was simply never
+  analyzed would pass, and the witnesses would prove nothing. They exist because
+  the blast-radius sentence in "The uninstantiated-body sub-case" was once
+  written as an unbounded "ANY program containing this shape", which execution
+  falsified twice. `n1typeonly` and `n1methodnocall` are a controlled pair: they
+  differ by exactly one never-called method declaration, and that one line is the
+  difference between a clean graph and a refusal under `cha`.
+- an assertion that `mergeKey` and the local-type-graph suffix are **disjoint** —
+  no function `mergeKey` accepts may carry a non-empty discriminator — over a
+  program exercising both mechanisms, with non-vacuity asserted in both
+  directions. It is the one step of the blast radius's "exactly when" that no
+  end-to-end fixture can exhibit.
+- a `//line` **display/key separation** test: two sources differing only in a
+  `//line` directive's target line, at equal byte length, asserted to produce a
+  byte-identical discriminator and different displayed lines (see "Physical
+  position → Display convention").
 
 ### Guard regression
 
@@ -668,35 +684,82 @@ distinguishes them, so nothing in the diagnostic may assert which occurred.
 
 ### The uninstantiated-body sub-case — same class, one instantiation
 
-**Blast radius, plainly: under `--algo cha`, a program that instantiates
-`func f[X any]() { type L struct{ …no X… }; g(L{}) }` AT LEAST ONCE, where `g` is
-itself generic so that `L` becomes a type argument, is refused — one
-instantiation is enough, because the whole-program set also holds `f`'s
-uninstantiated body.** That is an ordinary Go idiom, not a pathological one, so
-the refusal is not a corner case; it is the price of failing closed, and it is
-paid by whole-program analysis of any unit written that way.
+**Blast radius, stated as the mechanism.** The refusal fires exactly when all
+four of the following hold:
 
-Both halves of that antecedent are load-bearing, and the earlier wording — "ANY
-program containing the shape is refused, even when `f` is never instantiated at
-all" — was false on both counts. Neither of these is refused, under any of the
-three algorithms:
+1. a **generic** function declares a function-local type `L`;
+2. `L` reaches the **discriminator roots** of some SSA function — it is one of
+   that function's type arguments, or its receiver (see "Wrapper
+   discrimination");
+3. the analyzed set holds **two** analyzed instances of that one generic body —
+   two instantiations, or one instantiation alongside the generic's own
+   uninstantiated body — and **builds** that SSA function from each, so the two
+   are distinct `*ssa.Function` produced from the one declaration of `L`;
+4. `L`'s structure does not depend on the enclosing type parameter, so the two
+   encode identically.
 
-- **zero instantiations** (witness `n1zeroinst`). Under `cha` the uninstantiated
-  body is analyzed and does build `g[L]`, but it is then the *only* `g[L]`, and
-  one instance is not a collision. Zero instantiations is precisely the case that
-  cannot trip the guard.
-- **a non-generic `g`** (witness `n1nongencallee`), with `f` instantiated once.
-  Passing `L` to `func g(v any)` instantiates nothing at `L`, so there is one `g`
-  node and no pair to order. The refusal needs a *generic* callee, so that two
-  `g[L]` exist.
+Equivalently and more briefly: **the analyzed set holds two distinct
+`*ssa.Function` that differ only in which instantiation of the enclosing generic
+body produced them.** Drop any conjunct and the program graphs cleanly. Nothing
+in the four is exotic, so the refusal is not a corner case; it is the price of
+failing closed, and it is paid by any analysis whose set holds that pair.
 
-Both witnesses graph cleanly under `rta`, `vta` and `cha`, and both are asserted
-to — including the node counts that keep them armed, so a fixture whose door was
-merely shut could not pass for a fixture whose guard did not fire.
+The syntactic forms below are **illustrations, not an enumeration.** This
+sentence has twice been written as a shape list and twice been falsified by
+execution — first by over-claiming refusals that do not happen, then by being
+read as exhaustive — so every shape is a committed fixture, indexed by the
+conjunct it exercises, and the table's exit codes are asserted.
 
-The mechanism: under `cha` the analyzed set is the whole program, which includes
-the **uninstantiated** body of every generic function alongside its
-instantiations. `go/ssa` builds `sink[L]` from the uninstantiated body of `gen[X]`
+| Fixture | Shape | `rta` | `vta` | `cha` |
+|---|---|---|---|---|
+| `n1b` | `f[X]` declares `L`, passes it to a generic `g`; `f` instantiated twice | refused | refused | refused |
+| `n1` | two *different* generic functions declare `L`, so conjunct 3 is met only via the uninstantiated body | 0 | 0 | refused |
+| `n1lib` | an exported generic in a **library** unit, instantiated once; root discovery supplies its uninstantiated body | refused | refused | refused |
+| `n1method` | `L` is a type argument of a generic **type**; the refused pair is that type's method, `(Box[L]).Show[L]` | 0 | 0 | refused |
+| `n1methodnocall` | the same with the method **never called** | 0 | 0 | refused |
+| `n1recv` | `L` reaches a promotion wrapper's **receiver**; the refused function carries no type arguments at all | 0 | 0 | refused |
+| `n1c` | conjunct 4 fails — `L`'s structure mentions `X` | 0 | 0 | 0 |
+| `n1zeroinst` | conjunct 3 fails — zero instantiations, so `cha` builds exactly one `g[L]` | 0 | 0 | 0 |
+| `n1nongencallee` | conjunct 2 fails — the callee is not generic, so nothing carries `L` in its roots | 0 | 0 | 0 |
+| `n1typeonly` | conjunct 2 fails differently — `Box[L]` *is* instantiated twice, but `Box` has no methods, so no SSA function is built at `L` | 0 | 0 | 0 |
+
+Three of those rows exist because they falsify a reading the earlier shape-list
+wording invited, and each was confirmed by execution:
+
+- **"the callee must be a generic function."** False. `n1method` and `n1recv`
+  call no generic function at `L`. Conjunct 2 requires only that `L` reach a
+  *discriminator root* — a type argument **or** a receiver. The receiver is a
+  root because a promoted-method wrapper carries no type arguments whatsoever
+  (see "Wrapper discrimination"), so a blast radius stated over type arguments
+  alone omits `n1recv` entirely.
+- **"the function at `L` must be called."** False. `n1methodnocall` never calls
+  `Show`; converting `Box[L]` to an interface puts its method set into the
+  analyzed set, and `cha` refuses. Conjunct 3 says *built*, not *called*.
+- **"`L` becoming a type argument of something the analyzed set instantiates
+  twice is enough."** False. In `n1typeonly` the generic *type* `Box[L]` is
+  instantiated twice and nothing is refused, because a type instantiation is not
+  an `*ssa.Function`. The type argument must land on a function the analyzer
+  builds.
+
+The earlier wording — "ANY program containing the shape is refused, even when `f`
+is never instantiated at all" — was false on both of its counts, which is what
+`n1zeroinst` (conjunct 3) and `n1nongencallee` (conjunct 2) exist to keep from
+being written a third time. Every negative witness also asserts the node counts
+that keep it armed, so a fixture whose subject was simply never analyzed could
+not pass for one whose guard did not fire.
+
+**Nothing intercepts a member of the class before the guard sees it.** `mergeKey`
+merges byte-identical wrappers, but it accepts only functions with no type
+arguments and no receiver — an empty discriminator root set, hence an empty
+discriminator — so it can never hold a function whose key carries the
+`local-type-graph/v1` suffix. That is the one step of "exactly when" no
+end-to-end fixture can exhibit, and the two definitions live in two packages, so
+it is asserted by `TestMergeKeyNeverAbsorbsASuffixCarryingFunction` rather than
+argued.
+
+The mechanism behind conjunct 3: under `cha` the analyzed set is the whole
+program, which includes the **uninstantiated** body of every generic function
+alongside its instantiations. `go/ssa` builds `sink[L]` from the uninstantiated body of `gen[X]`
 *and* from each instantiation, and those are distinct `*ssa.Function` produced
 from the same one declaration of `L` with the same structure. So the class is
 reached with a generic instantiated only **once** — witness `n1`, which graphs
@@ -840,12 +903,13 @@ determinism guard must never be removed as a rollback mechanism.
 - `make verify` passes.
 - Every witness of the 2026-07-27 revision graphs successfully under `rta`,
   `vta`, and `cha`, except the declared residual (`n1b`), which must still exit
-  non-zero with the specified diagnostic — **and except `n1` under `cha`, and
-  `n1lib` under all three**, which fall into the same declared residual class
-  through the uninstantiated generic body (see "The uninstantiated-body
-  sub-case"). `n1` under `rta` and `vta` must exit 0. These exceptions are
-  disclosed unmet criteria, not a relaxation: the shape is undecidable by the
-  ratified vocabulary, and it fails closed.
+  non-zero with the specified diagnostic — **and except `n1`, `n1method`,
+  `n1methodnocall` and `n1recv` under `cha`, and `n1lib` under all three**, which
+  fall into the same declared residual class through the uninstantiated generic
+  body (see "The uninstantiated-body sub-case"). Those four must exit 0 under
+  `rta` and `vta`. These exceptions are disclosed unmet criteria, not a
+  relaxation: the shape is undecidable by the ratified vocabulary, and it fails
+  closed.
 - The residual diagnostic renders the declaration's position as
   `<basename>, byte offset <offset> (line <line>)`, never as `<basename>:<n>`,
   while the discriminator still frames `<basename>:<offset>`.

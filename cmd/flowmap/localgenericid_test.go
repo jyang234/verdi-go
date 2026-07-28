@@ -37,12 +37,25 @@ import (
 //	f26    two packages, equal file basenames, offset-aligned local declarations
 //	rec    a recursive function-local named type
 //
-// Two of them are NEGATIVE witnesses: they hold the residual's shape yet graph
+// Three more are the shapes the residual's blast radius reaches OTHER than
+// through a call to a generic function, which is the only shape the design's
+// earlier shape-list phrasing described:
+//
+//	n1method        the local becomes a type argument of a generic TYPE; the refused
+//	                function is that type's METHOD, (Box[L]).Show[L]
+//	n1methodnocall  the same, with the method never called — "built", not "called",
+//	                is the threshold
+//	n1recv          the local reaches the RECEIVER root of a promotion wrapper, which
+//	                carries no type arguments at all
+//
+// Three are NEGATIVE witnesses: they hold the residual's shape yet graph
 // cleanly, and they exist to bound the disclosed blast radius so it cannot be
 // restated too widely (see "The uninstantiated-body sub-case" in the design):
 //
 //	n1zeroinst      the residual's shape with ZERO instantiations — one sink[L], no pair
 //	n1nongencallee  the residual's shape with a NON-GENERIC callee — no sink[L] at all
+//	n1typeonly      L IS a type argument of a twice-instantiated generic TYPE, but that
+//	                type has no methods, so no ssa.Function is built at L
 //
 // They are driven through the BUILT BINARY in separate processes: the residual
 // refusal is a panic, which an in-process call cannot observe without unwinding
@@ -258,6 +271,20 @@ func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 		{name: "f26", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/f26/mm.P[example.com/f26/q1.L example.com/f26/q2.L]", want: 2},
 		{name: "rec", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/rec.sink[example.com/rec.R]", want: 1},
 
+		// The two generic-TYPE-method shapes, under the algorithms that hold ONE
+		// analyzed instance of gen's body. Each builds exactly one function at L,
+		// which is the armed half: under cha the uninstantiated body supplies a
+		// second and both are refused (see the residual test).
+		{name: "n1method", algos: []string{"rta", "vta"}, fqn: "(example.com/n1method.Box[example.com/n1method.L]).Show[example.com/n1method.L]", want: 1},
+		// Show is never called here. It is built regardless, because fmt.Println
+		// converts Box[L] to an interface and pulls in its method set — so the
+		// mechanism's threshold is "the analyzed set BUILDS it", not "calls it".
+		{name: "n1methodnocall", algos: []string{"rta", "vta"}, fqn: "(example.com/n1methodnocall.Box[example.com/n1methodnocall.L]).Show[example.com/n1methodnocall.L]", want: 1},
+		// n1recv's refused function is a promotion wrapper, which go/ssa splices out
+		// of the emitted graph (as in n2), so exit 0 is the separation assertion and
+		// the promoted method surviving is the not-dropped assertion.
+		{name: "n1recv", algos: []string{"rta", "vta"}, fqn: "(example.com/n1recv.emb).QueryContext", want: 1},
+
 		// The two NEGATIVE witnesses. Both carry n1b's shape — one generic
 		// function, one function-local type whose structure does not mention X —
 		// and both graph cleanly under every algorithm. They pin the two
@@ -282,6 +309,17 @@ func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 		// is open here too and only the non-generic callee explains the clean graph.
 		{name: "n1nongencallee_uninstbody", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen", want: 1},
 		{name: "n1nongencallee_instance", algos: []string{"cha"}, fqn: "example.com/n1nongencallee.gen[int]", want: 1},
+
+		// A generic TYPE instantiated at L twice, with NO methods. L is a type
+		// argument of something the analyzed set instantiates twice — the loose
+		// reading of the mechanism — and nothing is refused, because that
+		// instantiation builds no ssa.Function whose roots reach L. Adding one
+		// never-called method to Box turns this fixture into n1methodnocall, which
+		// cha refuses; the two differ by exactly that line.
+		{name: "n1typeonly", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1typeonly.gen[int]", want: 1},
+		// The armed half: under cha both the uninstantiated body and the one
+		// instantiation are analyzed, so Box[L] genuinely exists twice.
+		{name: "n1typeonly_uninstbody", algos: []string{"cha"}, fqn: "example.com/n1typeonly.gen", want: 1},
 	}
 
 	for _, test := range tests {
@@ -336,26 +374,45 @@ func TestLocalGenericIdentityWitnessN2Graphs(t *testing.T) {
 //
 // It asserts the TEXT, not merely the exit code, in both directions: the refusal
 // must carry the disclosed wording, and it must NOT claim an instantiation count.
-// Two of the three subjects here (n1 under cha, n1lib under every algorithm)
-// instantiate their generic exactly once.
+// Most of the subjects here (everything except n1b) instantiate their generic
+// exactly once.
+//
+// The subject list is also what pins the blast-radius MECHANISM. n1b/n1/n1lib
+// reach the class through a call to a generic function; n1method and
+// n1methodnocall reach it through a method of a generic TYPE; n1recv reaches it
+// through a promotion wrapper's RECEIVER, with no type arguments anywhere. A
+// blast radius written as `g(L{})` with g a generic function contains only the
+// first three.
 func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 	tests := []struct {
 		name  string
 		algos []string
 		fqn   string
 		file  string
+		// local is the function-local type's name, which the diagnostic quotes.
+		local string
 	}{
-		{name: "n1b", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1b.sink[example.com/n1b.L]", file: "main.go"},
+		{name: "n1b", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1b.sink[example.com/n1b.L]", file: "main.go", local: "L"},
 		// The whole-program sub-case: gen is instantiated ONCE, but cha also
 		// analyzes its uninstantiated body, so two distinct sink[L] come from one
 		// declaration with identical structure. Same undecidable class.
-		{name: "n1", algos: []string{"cha"}, fqn: "example.com/n1.sink[example.com/n1.L]", file: "main.go"},
+		{name: "n1", algos: []string{"cha"}, fqn: "example.com/n1.sink[example.com/n1.L]", file: "main.go", local: "L"},
 		// The same sub-case under rta and vta: a library unit roots at its exported
 		// surface, so an exported generic's uninstantiated body is analyzed
 		// alongside its single instantiation. The uninstantiated-body door is NOT
 		// cha-specific, which is why the diagnostic may not claim an instantiation
 		// count and may not offer "instantiate it only once" as a remedy.
-		{name: "n1lib", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1lib.sink[example.com/n1lib.L]", file: "lib.go"},
+		{name: "n1lib", algos: []string{"rta", "vta", "cha"}, fqn: "example.com/n1lib.sink[example.com/n1lib.L]", file: "lib.go", local: "L"},
+		// A METHOD OF A GENERIC TYPE. L is a type argument of Box, not of any
+		// generic function, and the refused pair is Box's method.
+		{name: "n1method", algos: []string{"cha"}, fqn: "(example.com/n1method.Box[example.com/n1method.L]).Show[example.com/n1method.L]", file: "main.go", local: "L"},
+		// The same with the method never called: cha refuses it too, so the
+		// mechanism's threshold is what the analyzed set BUILDS, not what it calls.
+		{name: "n1methodnocall", algos: []string{"cha"}, fqn: "(*example.com/n1methodnocall.Box[example.com/n1methodnocall.L]).Show", file: "main.go", local: "L"},
+		// The RECEIVER door: a promotion wrapper over a function-local receiver
+		// declared inside a generic function. It carries no type arguments at all,
+		// so only the receiver root reaches the local declaration.
+		{name: "n1recv", algos: []string{"cha"}, fqn: "(*example.com/n1recv.result).QueryContext", file: "main.go", local: "result"},
 	}
 
 	for _, test := range tests {
@@ -369,7 +426,10 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 					"callgraph: refusing to order two distinct instances of",
 					test.fqn,
 					`ONE declaration of the function-local`,
-					`type "L" at ` + test.file + ":",
+					// The position is rendered for a human, not as the key's site
+					// bytes: "main.go:991" reads as line 991 in a 26-line file.
+					`type "` + test.local + `" at ` + test.file + ", byte offset ",
+					" (line ",
 					"This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash",
 					"HOW THE ANALYSIS GOT TWO OF THEM:",
 					"the analyzed set holds its UNINSTANTIATED body",
@@ -396,6 +456,13 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 						t.Errorf("refusal of ./%s under %s claims %q, which is false for a generic instantiated once:\n%s",
 							test.name, algo, forbidden, stderr)
 					}
+				}
+				// The retired rendering of the position: `main.go:991` is what a
+				// reader parses as line 991, and it is a byte offset. The key still
+				// carries exactly those bytes; the prose must not.
+				if joined := `type "` + test.local + `" at ` + test.file + ":"; strings.Contains(stderr, joined) {
+					t.Errorf("refusal of ./%s under %s renders the site as %q, which reads as a line number:\n%s",
+						test.name, algo, joined, stderr)
 				}
 				if strings.Contains(stderr, "share sort key") {
 					t.Errorf("refusal of ./%s under %s fell back to the unknown-class wording:\n%s", test.name, algo, stderr)
