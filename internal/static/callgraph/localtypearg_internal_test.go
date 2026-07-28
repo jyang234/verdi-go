@@ -49,17 +49,34 @@ func gen[X any](x X) { type L struct{ A int }; sink(L{}) }
 func main() { gen(1); gen("s") }
 `
 
-// mergeKeyDisjointSrc holds BOTH mechanisms at once: `call(r.Exists)` mints a
-// $bound wrapper, which mergeKey is allowed to merge, and gen's function-local L
-// gives sink[L] a local-type-graph suffix.
+// mergeKeyDisjointSrc holds all THREE shapes the parity needs at once, because
+// mergeKey excludes suffix-carrying functions through two independent conjuncts
+// and a fixture that exercises one of them leaves the other unpinned:
+//
+//   - `call(r.Exists)` mints a $bound wrapper — no type arguments, no receiver —
+//     which mergeKey is ALLOWED to merge;
+//   - gen's function-local L gives sink[L] a suffix through the TYPE-ARGUMENT
+//     root, which mergeKey excludes on `len(fn.TypeArgs()) != 0`;
+//   - local's function-local `result` gives the promotion wrapper
+//     (*result).QueryContext a suffix through the RECEIVER root — it carries no
+//     type arguments whatsoever (witness n1recv's shape) — which mergeKey
+//     excludes on `fn.Signature.Recv() != nil` and on nothing else.
+//
+// Without the third shape, relaxing the receiver conjunct merges two distinct
+// promotion wrappers into one node and this test stays green: a SILENT merge,
+// which is the outcome the whole guard exists to prevent.
 const mergeKeyDisjointSrc = `package localtypes
 type Reader interface{ Exists(id int) bool }
 type impl struct{}
 func (impl) Exists(id int) bool { return id > 0 }
 func call(check func(int) bool) bool { return check(1) }
+type ifc interface{ QueryContext() string }
+type emb struct{}
+func (emb) QueryContext() string { return "A" }
+func local() ifc { type result struct{ emb }; return result{} }
 func sink[T any](v T) {}
 func gen[X any](x X) { type L struct{ A int }; sink(L{}) }
-func main() { var r Reader = impl{}; call(r.Exists); gen(1) }
+func main() { var r Reader = impl{}; call(r.Exists); gen(1); local().QueryContext() }
 `
 
 // TestMergeKeyNeverAbsorbsASuffixCarryingFunction pins the one step of the
@@ -69,21 +86,36 @@ func main() { var r Reader = impl{}; call(r.Exists); gen(1) }
 // uninstantiated-body sub-case" would be an over-claim.
 //
 // The two mechanisms are disjoint by construction. mergeKey accepts only a
-// function with NO type arguments and NO receiver; features' discriminator roots
-// are exactly (type arguments, receiver), so a mergeKey-eligible function has an
+// function with NO type arguments and NO receiver; features' discriminatorRoots
+// is exactly (type arguments, receiver), so a mergeKey-eligible function has an
 // empty root set and InstanceDiscriminator returns "" for it — never a key
 // carrying the local-type-graph suffix. The parity between those two definitions
 // lives in two packages, so it is asserted here rather than assumed.
+//
+// The exclusion has TWO conjuncts and each is pinned separately, because the
+// fixture that covers one is silent about the other. suffixedTypeArg counts the
+// functions a relaxed `len(fn.TypeArgs()) != 0` would wrongly admit;
+// suffixedRecv counts the ones a relaxed `fn.Signature.Recv() != nil` would.
+// Relaxing the RECEIVER conjunct is a real silent merge — two distinct promotion
+// wrappers collapse into one node with no refusal — and until
+// mergeKeyDisjointSrc grew its receiver-rooted local it was caught by nothing in
+// this package, only by the end-to-end n1recv/cha subject of
+// TestLocalGenericIdentityResidualStaysRefused.
 func TestMergeKeyNeverAbsorbsASuffixCarryingFunction(t *testing.T) {
 	roots := buildCallGraphRoots(t, mergeKeyDisjointSrc)
 	if len(roots) == 0 {
 		t.Fatal("fixture produced no roots")
 	}
-	merged, suffixed := 0, 0
+	merged, suffixedTypeArg, suffixedRecv := 0, 0, 0
 	for fn := range ssautil.AllFunctions(roots[0].Prog) {
 		key := features.InstanceDiscriminator(fn)
 		if features.HasLocalTypeGraph(key) {
-			suffixed++
+			if len(fn.TypeArgs()) != 0 {
+				suffixedTypeArg++
+			}
+			if fn.Signature != nil && fn.Signature.Recv() != nil {
+				suffixedRecv++
+			}
 		}
 		if _, ok := mergeKey(fn); !ok {
 			continue
@@ -94,13 +126,20 @@ func TestMergeKeyNeverAbsorbsASuffixCarryingFunction(t *testing.T) {
 				fn.RelString(nil), key)
 		}
 	}
-	// Non-vacuity in both directions: a program exercising neither mechanism
-	// would pass this test while proving nothing about their disjointness.
+	// Non-vacuity in every direction: a program exercising neither mechanism
+	// would pass this test while proving nothing about their disjointness, and a
+	// program exercising only ONE of the two exclusion conjuncts would leave the
+	// other free to be relaxed.
 	if merged == 0 {
 		t.Error("fixture produced no mergeKey candidate; the assertion is vacuous")
 	}
-	if suffixed == 0 {
-		t.Error("fixture produced no local-type-graph suffix; the assertion is vacuous")
+	if suffixedTypeArg == 0 {
+		t.Error("fixture produced no TYPE-ARGUMENT-rooted local-type-graph suffix; " +
+			"relaxing mergeKey's `len(fn.TypeArgs()) != 0` conjunct would not be caught here")
+	}
+	if suffixedRecv == 0 {
+		t.Error("fixture produced no RECEIVER-rooted local-type-graph suffix; " +
+			"relaxing mergeKey's `fn.Signature.Recv() != nil` conjunct would not be caught here")
 	}
 }
 
