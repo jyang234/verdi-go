@@ -116,7 +116,9 @@ func FirstLocalDeclaration(fn *ssa.Function) (LocalDeclaration, bool) {
 
 // discriminatorRoots returns the roots of fn's type-graph encoding, in the order
 // the encoding visits them: the type arguments in declaration order, then the
-// receiver type when fn has one.
+// receiver type when fn has one — where "receiver" is receiverType, which is
+// Signature.Recv() for everything except the two forwarder kinds that carry
+// their receiver elsewhere.
 //
 // The receiver is a root because a promoted-method wrapper over a function-local
 // receiver carries NO type arguments — so InstanceDiscriminator used to return ""
@@ -130,11 +132,64 @@ func discriminatorRoots(fn *ssa.Function) []types.Type {
 	targs := fn.TypeArgs()
 	roots := make([]types.Type, 0, len(targs)+1)
 	roots = append(roots, targs...)
-	if fn.Signature != nil && fn.Signature.Recv() != nil {
-		roots = append(roots, fn.Signature.Recv().Type())
+	if recv := receiverType(fn); recv != nil {
+		roots = append(roots, recv)
 	}
 	return roots
 }
+
+// receiverType returns the type fn dispatches on, or nil when fn has none.
+//
+// For everything go/ssa gives a Signature receiver — a declared method, a
+// promotion wrapper, an interface wrapper — that IS Signature.Recv(). The two
+// UNCACHED forwarder kinds are the exceptions, and go/ssa states both in
+// wrappers.go: a $thunk has NO Signature receiver and takes the receiver as its
+// FIRST PARAMETER (createWrapper: `recv = sig.Params().At(0)`), and a $bound has
+// no Signature receiver either and takes it as its SOLE FREE VARIABLE
+// (createBound: `fn.FreeVars = []*FreeVar{{name: "recv", ...}}`).
+//
+// Reading only Signature.Recv() for those two returned an EMPTY root set, hence
+// an empty InstanceDiscriminator, hence a mergeKey that admitted them: two
+// forwarders over two distinct same-rendering function-local receivers collapsed
+// into one node whose out-edge set is the UNION of theirs. That is not an absence
+// failure — a union never deletes a callee, so no PROVEN/NO-FLOW claim can flip —
+// but it fabricates edges on the positive pole and widens every blast radius
+// computed from them. Witness testdata/fixtures/localgenericid/thunkmerge.
+//
+// The thunk case reads the SIGNATURE, not fn.Params: go/ssa populates Params
+// during the body build, and a root set that silently empties for an unbuilt
+// function would restore exactly the fail-open this closes. The bound case reads
+// FreeVars because createBound populates it at CREATION, before any build.
+func receiverType(fn *ssa.Function) types.Type {
+	if fn.Signature == nil {
+		return nil
+	}
+	if recv := fn.Signature.Recv(); recv != nil {
+		return recv.Type()
+	}
+	switch {
+	case strings.HasPrefix(fn.Synthetic, thunkSynthetic):
+		if params := fn.Signature.Params(); params != nil && params.Len() > 0 {
+			return params.At(0).Type()
+		}
+	case strings.HasPrefix(fn.Synthetic, boundSynthetic):
+		if len(fn.FreeVars) > 0 {
+			return fn.FreeVars[0].Type()
+		}
+	}
+	return nil
+}
+
+// thunkSynthetic and boundSynthetic are the go/ssa Synthetic descriptions of the
+// two uncached forwarder kinds, formatted as "<kind> for <object>" by
+// createWrapper and createBound. They are the only handle go/ssa exposes: the
+// kind is not a field, and $thunk/$bound in the display name is derived from the
+// same selection. Pinned against the toolchain by
+// TestReceiverTypeMatchesGoSSASyntheticPrefixes.
+const (
+	thunkSynthetic = "thunk for "
+	boundSynthetic = "bound method wrapper for "
+)
 
 // localTypeGraph returns the framed, positional serialization of the type graph
 // reachable from roots, or "" when no function-local declaration is reachable —

@@ -1196,3 +1196,156 @@ func TestLocalTypeGraphFailsClosedOverBudget(t *testing.T) {
 		localTypeGraph(fn, []types.Type{root})
 	})
 }
+
+// localReceiverForwarders is the fixture for the two UNCACHED forwarder kinds over
+// function-local receivers. Neither carries its receiver in Signature.Recv():
+//
+//   - `L.QueryContext` is a method EXPRESSION, so go/ssa mints a $thunk whose
+//     receiver is its FIRST PARAMETER (wrappers.go createWrapper);
+//   - `b.Show` on a Box instantiated at a function-local type is a method VALUE, so
+//     go/ssa mints a $bound whose receiver is its SOLE FREE VARIABLE (createBound).
+//
+// The promoted-method form (`m.QueryContext` where M embeds emb) is deliberately
+// NOT the bound shape here: createBound wraps the DECLARED method, so its free
+// variable is typed `emb` and the local type never reaches it. A generic type
+// instantiated at the local is the shape that does.
+//
+// Each shape appears twice, in two functions declaring same-named locals, so the
+// pair shares a display FQN and only the discriminator can tell them apart.
+// pkgForwarders adds the package-scope control for both kinds.
+const localReceiverForwarders = `package localtypes
+type ifc interface{ QueryContext() string }
+type emb struct{}
+func (emb) QueryContext() string { return "A" }
+type Box[T any] struct{ v T }
+func (b Box[T]) Show() string { return "box" }
+func call(f func() string) string { return f() }
+func firstThunk() string { type L struct{ emb }; f := L.QueryContext; return f(L{}) }
+func secondThunk() string { type L struct{ emb }; f := L.QueryContext; return f(L{}) }
+func firstBound() string { type M struct{ A int }; var b Box[M]; return call(b.Show) }
+func secondBound() string { type M struct{ A int }; var b Box[M]; return call(b.Show) }
+func pkgForwarders() string { f := emb.QueryContext; return f(emb{}) + call(emb{}.QueryContext) }
+func main() { _, _, _, _, _ = firstThunk(), secondThunk(), firstBound(), secondBound(), pkgForwarders() }
+`
+
+// TestReceiverTypeReadsThunkParameterAndBoundFreeVar pins receiverType against the
+// go/ssa toolchain rather than against a remembered reading of it. Three things
+// could drift independently and each would silently empty the root set again: the
+// Synthetic description strings, which are the only handle on wrapper KIND go/ssa
+// exposes; the thunk's receiver living at Signature.Params()[0]; and the bound's
+// living at FreeVars[0]. All three are asserted here, with a non-vacuity count so
+// a fixture that stopped producing forwarders could not pass silently.
+//
+// It also pins the equivalence receiverType relies on for the thunk: the signature
+// parameter and the built fn.Params[0] carry the same type (buildWrapper spills
+// exactly that parameter). receiverType reads the SIGNATURE because Params is
+// populated at BUILD time, so a root set derived from it would empty itself for an
+// unbuilt function — the same fail-open, differently reached.
+func TestReceiverTypeReadsThunkParameterAndBoundFreeVar(t *testing.T) {
+	prog := buildLocalTypeProgram(t, "/checkout/root/local.go", localReceiverForwarders)
+	thunks, bounds := 0, 0
+	for fn := range ssautil.AllFunctions(prog) {
+		if fn == nil || fn.Signature == nil || fn.Signature.Recv() != nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(fn.Synthetic, thunkSynthetic):
+			thunks++
+			params := fn.Signature.Params()
+			if params == nil || params.Len() == 0 {
+				t.Fatalf("thunk %s has no parameters; go/ssa's thunk receiver convention changed", fn.RelString(nil))
+			}
+			want := params.At(0).Type()
+			if got := receiverType(fn); got != want {
+				t.Errorf("receiverType(%s) = %v, want its first parameter %v", fn.RelString(nil), got, want)
+			}
+			if len(fn.Params) == 0 || fn.Params[0].Type() != want {
+				t.Errorf("thunk %s: built Params[0] and Signature.Params()[0] disagree", fn.RelString(nil))
+			}
+		case strings.HasPrefix(fn.Synthetic, boundSynthetic):
+			bounds++
+			if len(fn.FreeVars) == 0 {
+				t.Fatalf("bound %s has no free variables; go/ssa's bound receiver convention changed", fn.RelString(nil))
+			}
+			want := fn.FreeVars[0].Type()
+			if got := receiverType(fn); got != want {
+				t.Errorf("receiverType(%s) = %v, want its sole free variable %v", fn.RelString(nil), got, want)
+			}
+		}
+	}
+	if thunks == 0 {
+		t.Errorf("fixture produced no function whose Synthetic starts with %q; either go/ssa renamed the kind or the fixture stopped minting thunks", thunkSynthetic)
+	}
+	if bounds == 0 {
+		t.Errorf("fixture produced no function whose Synthetic starts with %q; either go/ssa renamed the kind or the fixture stopped minting bounds", boundSynthetic)
+	}
+}
+
+// TestInstanceDiscriminatorSeparatesLocalReceiverForwarders is the behavioral half:
+// two forwarders of one kind, over two DIFFERENT function-local types that render
+// identically, must get two different suffix-carrying keys.
+//
+// Before receiverType existed both keys were "", which is what let callgraph's
+// mergeKey collapse the pair into one node and union two out-edge sets — see the
+// thunkmerge witness. This test is the package-local pin for that; running it
+// against the old discriminatorRoots reports an empty discriminator on every
+// forwarder below.
+func TestInstanceDiscriminatorSeparatesLocalReceiverForwarders(t *testing.T) {
+	prog := buildLocalTypeProgram(t, "/checkout/root/local.go", localReceiverForwarders)
+	for _, form := range []struct {
+		name string
+		fqn  string
+	}{
+		{name: "thunk", fqn: "(example.com/localtypes.L).QueryContext$thunk"},
+		{name: "bound", fqn: "(example.com/localtypes.Box[example.com/localtypes.M]).Show$bound"},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			forwarders := functionsWithFQN(prog, form.fqn)
+			if len(forwarders) != 2 {
+				t.Fatalf("forwarders for %q = %d, want 2", form.fqn, len(forwarders))
+			}
+			keys := make(map[string]bool, len(forwarders))
+			for _, fn := range forwarders {
+				if len(fn.TypeArgs()) != 0 || fn.Signature.Recv() != nil {
+					t.Fatalf("%s carries type arguments or a signature receiver; the fixture no longer exercises the forwarder path", fn.RelString(nil))
+				}
+				key := InstanceDiscriminator(fn)
+				if key == "" {
+					t.Fatalf("forwarder %s has an empty discriminator; its receiver did not reach the local declaration", fn.RelString(nil))
+				}
+				if !HasLocalTypeGraph(key) {
+					t.Errorf("forwarder discriminator %q carries no local-type-graph suffix", key)
+				}
+				keys[key] = true
+			}
+			if len(keys) != len(forwarders) {
+				t.Fatalf("%d distinct forwarders produced %d discriminators: %v", len(forwarders), len(keys), keys)
+			}
+		})
+	}
+}
+
+// TestInstanceDiscriminatorLeavesNonLocalForwardersEmpty is the Goal-2 guard for
+// the forwarder roots, exactly as TestInstanceDiscriminatorLeavesNonLocalReceiverEmpty
+// is for the promotion-wrapper receiver: adding the thunk parameter and the bound
+// free variable to the root set may change the key of forwarders over LOCAL
+// receivers only, and only from "" to something. A $thunk or $bound over a
+// package-scope receiver is still mergeable and must keep its empty key, or every
+// method value in every program would leave the merge subset.
+func TestInstanceDiscriminatorLeavesNonLocalForwardersEmpty(t *testing.T) {
+	prog := buildLocalTypeProgram(t, "/checkout/root/local.go", localReceiverForwarders)
+	for _, fqn := range []string{
+		"(example.com/localtypes.emb).QueryContext$thunk",
+		"(example.com/localtypes.emb).QueryContext$bound",
+	} {
+		forwarders := functionsWithFQN(prog, fqn)
+		if len(forwarders) == 0 {
+			t.Fatalf("fixture produced no %q; the assertion is vacuous", fqn)
+		}
+		for _, fn := range forwarders {
+			if got := InstanceDiscriminator(fn); got != "" {
+				t.Errorf("package-scope forwarder %q discriminator = %q, want \"\"", fqn, got)
+			}
+		}
+	}
+}

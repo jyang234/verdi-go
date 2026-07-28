@@ -192,10 +192,13 @@ func (g *Graph) node(fn *ssa.Function) *Node {
 	return g.newNode(fn)
 }
 
-// newNode builds and registers a fresh node for fn. The merge class of a wrapper is
-// byte-identical (same wrapped Object, RelString, and body), so which copy iteration
-// happens to reach here first — and thus becomes the node's Func — does not change the
-// node's FQN or its edges: map-iteration order over x.Nodes does not leak into output.
+// newNode builds and registers a fresh node for fn. Every copy in a merge class shares
+// the key's FQN and wrapped Object, and mergeKey now also refuses any copy whose
+// discriminator carries the local-type-graph suffix — the one way two copies with that
+// key were observed to differ in body. So which copy iteration happens to reach here
+// first — and thus becomes the node's Func — does not change the node's FQN, and the
+// node's edge set is the union over the class either way: map-iteration order over
+// x.Nodes does not leak into output.
 func (g *Graph) newNode(fn *ssa.Function) *Node {
 	n := &Node{FQN: fn.RelString(nil), Func: fn}
 	g.byFunc[fn] = n
@@ -239,11 +242,30 @@ type wrapperKey struct {
 // receiver display, so wrappers over different instantiations of one generic method —
 // (*Store[int]).Get$bound vs (*Store[string]).Get$bound, whose Object() is the SHARED
 // origin generic (taint.go:75, features.EffectivePkgPath) — get DIFFERENT keys and do
-// not merge. A receiver-less forwarder with equal RelString and equal Object is
-// byte-identical, so the merge cannot collapse two behaviorally distinct functions.
+// not merge.
+//
+// Equal RelString plus equal Object is NOT by itself byte-identity, and this comment
+// used to claim it was. RelString renders a function-local receiver type without its
+// lexical scope, so two forwarders over two DIFFERENT function-local types that render
+// alike share both — and their bodies differ (the fabricated-edge witness
+// testdata/fixtures/localgenericid/thunkmerge merges `&t0.emb [#0]` with
+// `&t0.emb [#1]`). Merging them unions two out-edge sets that VTA had kept disjoint:
+// no callee is deleted, so no absence proof can flip, but edges are fabricated on the
+// positive pole. The third conjunct below is what closes it: a function whose
+// discriminator carries the local-type-graph suffix is a function whose identity the
+// FQN provably does not carry, so it is refused from the merge subset and left for
+// finalize() to order or refuse. features.receiverType is what makes that suffix
+// appear for these two kinds at all — a $thunk's receiver is its first parameter and a
+// $bound's its sole free variable, neither of which is Signature.Recv() — and the two
+// halves must land together: the guard is what keeps mergeKey's candidates
+// empty-keyed, which is the invariant TestMergeKeyNeverAbsorbsASuffixCarryingFunction
+// pins.
 func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 	if fn == nil || fn.Synthetic == "" || fn.Object() == nil ||
 		len(fn.TypeArgs()) != 0 || fn.Signature == nil || fn.Signature.Recv() != nil {
+		return wrapperKey{}, false
+	}
+	if features.HasLocalTypeGraph(features.InstanceDiscriminator(fn)) {
 		return wrapperKey{}, false
 	}
 	return wrapperKey{fqn: fn.RelString(nil), obj: fn.Object()}, true

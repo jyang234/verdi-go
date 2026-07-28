@@ -47,6 +47,14 @@ import (
 //	                is the threshold
 //	n1recv          the local reaches the RECEIVER root of a promotion wrapper, which
 //	                carries no type arguments at all
+//	n1thunk         the same through a $thunk, whose receiver is its first PARAMETER
+//	                and which therefore has no Signature receiver either
+//
+// One is the FABRICATED-EDGE witness, and it asserts edges rather than nodes:
+//
+//	thunkmerge      two $thunk forwarders over two same-rendering function-local
+//	                types, with DISJOINT out-edges under vta. mergeKey merged them
+//	                and emitted the union; the fix keeps them apart.
 //
 // Three more are the enclosing bodies and root positions a blast radius written
 // as "a GENERIC FUNCTION declares L, and L IS one of the callee's type
@@ -270,9 +278,9 @@ func countFQN(t *testing.T, stdout, fqn string) int {
 // told apart by the discriminator instead, which is why "the two share an FQN"
 // cannot be the criterion.
 //
-// The n1method, n1methodnocall and n1recv rows are the rta/vta half of subjects
-// cha refuses: exactly one function is built at the local type here, and the
-// residual test asserts the second one and the refusal under cha. Together the
+// The n1method, n1methodnocall, n1recv and n1thunk rows are the rta/vta half of
+// subjects cha refuses: exactly one function is built at the local type here, and
+// the residual test asserts the second one and the refusal under cha. Together the
 // two tests are what makes the blast radius a mechanism rather than a shape
 // list — see "The uninstantiated-body sub-case" in the design.
 func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
@@ -312,6 +320,12 @@ func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 		// of the emitted graph (as in n2), so exit 0 is the separation assertion and
 		// the promoted method surviving is the not-dropped assertion.
 		{name: "n1recv", algos: []string{"rta", "vta"}, fqn: "(example.com/n1recv.emb).QueryContext", want: 1},
+		// n1thunk is n1recv with the promotion wrapper replaced by a method
+		// EXPRESSION, so the refused function is a $thunk — spliced out of the
+		// emitted graph like every forwarder, which is why the promoted method is
+		// what is counted here. Under cha the uninstantiated body supplies the
+		// second thunk and both are refused (see the residual test).
+		{name: "n1thunk", algos: []string{"rta", "vta"}, fqn: "(example.com/n1thunk.emb).QueryContext", want: 1},
 
 		// The two NEGATIVE witnesses. Both carry n1b's shape — one generic
 		// function, one function-local type whose structure does not mention X —
@@ -419,6 +433,109 @@ func TestLocalGenericIdentityWitnessN2Graphs(t *testing.T) {
 	}
 }
 
+// TestLocalGenericIdentityThunkMergeDoesNotFabricateEdges is the witness for the
+// silent $thunk merge, and it asserts EDGES rather than node counts because the
+// damage was never visible in the node set: both thunks were spliced out of the
+// emitted graph either way, and the merged node left exactly the nodes a correct
+// run leaves.
+//
+// The defect: a $thunk's receiver is its first PARAMETER, so before
+// features.receiverType existed its discriminator root set was empty, its
+// InstanceDiscriminator was "", and callgraph.mergeKey admitted it. one()'s and
+// two()'s thunks share a display FQN (a function-local type renders without its
+// lexical scope) and a wrapped Object (the interface method emb.QueryContext), so
+// they merged — into ONE node whose out-edges are the UNION of theirs.
+//
+// The direction of the damage is the positive pole, and the assertion is written
+// to keep that honest. A union never DELETES a callee, so no absence proof could
+// flip; what it added was
+//
+//	one -> (B).QueryContext
+//	two -> (A).QueryContext
+//
+// under vta, which is the only algorithm here precise enough to know better. rta
+// and cha resolve the embedded interface call to every implementer regardless, so
+// their six edges are sound over-approximation and are IDENTICAL before and after
+// the fix — asserting all three is what separates "the fix removed fabricated
+// edges" from "the fix made the graph smaller".
+func TestLocalGenericIdentityThunkMergeDoesNotFabricateEdges(t *testing.T) {
+	const (
+		a   = "(example.com/thunkmerge.A).QueryContext"
+		b   = "(example.com/thunkmerge.B).QueryContext"
+		one = "example.com/thunkmerge.one"
+		two = "example.com/thunkmerge.two"
+		mn  = "example.com/thunkmerge.main"
+	)
+	tests := []struct {
+		algo string
+		want []string
+	}{
+		// vta separates the two locals' interface contents, so each caller reaches
+		// exactly its own implementer. This is the row the merge falsified.
+		{algo: "vta", want: []string{
+			mn + " -> " + one,
+			mn + " -> " + two,
+			one + " -> " + a,
+			two + " -> " + b,
+		}},
+		// rta and cha over-approximate the invoke to every implementer of emb.
+		// Both edges per caller are sound here, and unchanged by the fix.
+		{algo: "rta", want: []string{
+			mn + " -> " + one,
+			mn + " -> " + two,
+			one + " -> " + a,
+			one + " -> " + b,
+			two + " -> " + a,
+			two + " -> " + b,
+		}},
+		{algo: "cha", want: []string{
+			mn + " -> " + one,
+			mn + " -> " + two,
+			one + " -> " + a,
+			one + " -> " + b,
+			two + " -> " + a,
+			two + " -> " + b,
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.algo, func(t *testing.T) {
+			stdout, stderr, code := graphWitness(t, "thunkmerge", test.algo)
+			if code != 0 {
+				t.Fatalf("graph --algo %s ./thunkmerge exited %d:\n%s", test.algo, code, stderr)
+			}
+			got := edgePairs(t, stdout)
+			if len(got) != len(test.want) {
+				t.Fatalf("graph --algo %s ./thunkmerge emitted %d edges, want %d:\n got %v\nwant %v",
+					test.algo, len(got), len(test.want), got, test.want)
+			}
+			for i := range got {
+				if got[i] != test.want[i] {
+					t.Fatalf("graph --algo %s ./thunkmerge edge %d = %q, want %q\n got %v\nwant %v",
+						test.algo, i, got[i], test.want[i], got, test.want)
+				}
+			}
+		})
+	}
+}
+
+// edgePairs returns the graph's edges as sorted "from -> to" strings. Sorting
+// makes the comparison a multiset over an already-canonical serialization, so the
+// assertion is about which edges exist and not about the emitter's ordering, which
+// graphio.sortGraph pins separately.
+func edgePairs(t *testing.T, stdout string) []string {
+	t.Helper()
+	var g graphio.Graph
+	if err := json.Unmarshal([]byte(stdout), &g); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	got := make([]string, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		got = append(got, e.From+" -> "+e.To)
+	}
+	sort.Strings(got)
+	return got
+}
+
 // TestLocalGenericIdentityResidualStaysRefused is the fixture that must NEVER go
 // green without a ratified change to "Residual undecided classes". If it does,
 // two distinct *ssa.Function were collapsed into one node and every absence proof
@@ -440,9 +557,12 @@ func TestLocalGenericIdentityWitnessN2Graphs(t *testing.T) {
 //     contains only the first three.
 //   - the ROOT POSITION (conjunct 2). n1method/n1methodnocall: a type argument
 //     of a generic type's method. n1recv: a promotion wrapper's RECEIVER, with
-//     no type arguments anywhere. n1nestedroot: []L, so L is not a root at all.
-//     A conjunct 2 written as "L IS one of the type arguments" contains none of
-//     the last two.
+//     no type arguments anywhere. n1thunk: a $thunk's receiver, which is not
+//     Signature.Recv() either — it is the thunk's first PARAMETER, and reading
+//     only Signature.Recv() is what made this subject exit 0 while n1recv, the
+//     same shape one wrapper kind away, exited 2. n1nestedroot: []L, so L is not
+//     a root at all. A conjunct 2 written as "L IS one of the type arguments"
+//     contains none of the last three.
 //   - CONJUNCT 5, that nothing else reaching those roots separates the pair:
 //     n1onedecl is the refusing half of the minimal pair whose clean half is
 //     n1twodecls (see TestLocalGenericIdentityWitnessesGraph).
@@ -476,6 +596,13 @@ func TestLocalGenericIdentityResidualStaysRefused(t *testing.T) {
 		// declared inside a generic function. It carries no type arguments at all,
 		// so only the receiver root reaches the local declaration.
 		{name: "n1recv", algos: []string{"cha"}, fqn: "(*example.com/n1recv.result).QueryContext", file: "main.go", local: "result"},
+		// The same door reached through a $thunk instead of a promotion wrapper.
+		// A thunk has no Signature receiver AND no type arguments — its receiver is
+		// its first PARAMETER — so before features.receiverType existed this
+		// program was not refused: mergeKey saw an empty discriminator and merged
+		// the pair. One program shape, exit 2 through n1recv and exit 0 through
+		// n1thunk, is the severity cliff this row closes.
+		{name: "n1thunk", algos: []string{"cha"}, fqn: "(example.com/n1thunk.local).QueryContext$thunk", file: "main.go", local: "local"},
 		// L declared in a CLOSURE nested in a generic function. The closure has no
 		// type parameters of its own; the analyzer builds one copy of it per
 		// instantiation of gen, which is all conjunct 1 requires.

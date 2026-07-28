@@ -201,10 +201,12 @@ packages' offset-aligned locals pool into one equal set in witness `f26`.
 Encoding rules, all normative:
 
 1. **Roots**, in order: the function's type arguments in declaration order,
-   followed by the receiver type when `fn.Signature != nil &&
-   fn.Signature.Recv() != nil` (see "Wrapper discrimination"). The roots section
-   lists one framed `R<id>` token per root, in that order — including repeats, so
-   a root appearing twice is recorded twice.
+   followed by the type the function dispatches on, when it has one — that is
+   `features.receiverType`, which is `Signature.Recv()` for everything except a
+   `$thunk` (first **parameter**) and a `$bound` (sole **free variable**); see
+   "Wrapper discrimination". The roots section lists one framed `R<id>` token per
+   root, in that order — including repeats, so a root appearing twice is recorded
+   twice.
 2. **Node ids** are assigned on *first visit* of a fixed depth-first traversal
    that follows the roots in order and each node's children in the order given
    by the definition grammar below. An id is **reserved before recursing**, so a
@@ -411,17 +413,36 @@ arguments, and `callgraph.mergeKey` deliberately excludes any wrapper carrying a
 receiver. A promoted-method wrapper over a function-local receiver therefore fell
 between the two and got an empty discriminator (witness `n2`).
 
-The root set is extended: when `fn.Signature != nil && fn.Signature.Recv() != nil`,
-the receiver type is appended to the roots, **after** the type arguments.
-`mergeKey` is **not** widened — merging a receiver-carrying wrapper remains
-forbidden, because go/ssa caches those wrappers and two distinct ones are not
-interchangeable.
+The root set is extended: the type the function dispatches on is appended to the
+roots, **after** the type arguments. That type is `features.receiverType`, and it
+is deliberately **not** `Signature.Recv()`, because two `go/ssa` kinds carry their
+receiver somewhere else (`wrappers.go`):
 
-Goal 2 is preserved without exception: a method whose receiver reaches no
-function-local declaration produces no suffix, so its discriminator stays `""`
-exactly as before. Only wrappers over local receivers change, and only from `""`
-to something. Both the value-receiver and pointer-receiver wrapper forms must be
-covered.
+| Kind | `Synthetic` prefix | Receiver lives in |
+|---|---|---|
+| declared method, promotion wrapper, interface wrapper | — / `wrapper for ` | `Signature.Recv()` |
+| method expression | `thunk for ` | `Signature.Params()[0]` |
+| method value | `bound method wrapper for ` | `FreeVars[0]` |
+
+Reading only `Signature.Recv()` gave the last two an empty root set, hence an
+empty discriminator, hence admission to `mergeKey` — the silent merge recorded
+under "Residual undecided classes" (witnesses `thunkmerge`, `n1thunk`). The three
+carriers are exhaustive over `go/ssa` v0.40.0 and are pinned against the toolchain
+by `TestReceiverTypeReadsThunkParameterAndBoundFreeVar`; `range-over-func yield`
+and `package initializer` have no receiver at all.
+
+`mergeKey` is widened in NO direction. Merging a receiver-carrying wrapper remains
+forbidden, because go/ssa caches those wrappers and two distinct ones are not
+interchangeable; and `mergeKey` gains a third exclusion — any function whose
+discriminator carries the `local-type-graph/v1` suffix — so the two forwarder
+kinds it *does* merge can never be members of the residual class.
+
+Goal 2 is preserved without exception: a method, thunk or bound whose receiver
+reaches no function-local declaration produces no suffix, so its discriminator
+stays `""` exactly as before, and it stays mergeable. Only wrappers and forwarders
+over local receivers change, and only from `""` to something. Both the
+value-receiver and pointer-receiver wrapper forms must be covered, and both
+forwarder kinds.
 
 ## Complete type walk
 
@@ -697,10 +718,12 @@ jointly **sufficient**:
    declares no type parameters of its own and the program contains no generic
    function at all);
 2. `L` is **reachable in the type graph** from the **discriminator roots** of some
-   SSA function `F` — `F`'s type arguments in order, then its receiver when it has
-   one (see "Wrapper discrimination"). `L` need not *be* a root: the encoding
-   walks the whole graph below each root, so `[]L` (`n1nestedroot`), `*L`,
-   `chan L`, `map[string]L`, `func(L)` and `Wrap[L]` all reach it;
+   SSA function `F` — `F`'s type arguments in order, then **the type `F`
+   dispatches on**, which is `features.receiverType` and NOT `Signature.Recv()`
+   (see "Wrapper discrimination", and the reading note below). `L` need not *be* a
+   root: the encoding walks the whole graph below each root, so `[]L`
+   (`n1nestedroot`), `*L`, `chan L`, `map[string]L`, `func(L)` and `Wrap[L]` all
+   reach it;
 3. the analyzed set holds **two** analyzed instances of that one enclosing body —
    two instantiations, or one instantiation alongside the body's own
    uninstantiated form — and **builds** `F` from each, so the two are distinct
@@ -712,6 +735,33 @@ jointly **sufficient**:
    from a single declaration with a structure that does not vary, and the
    enclosing type parameter's own instantiation does not reach them
    (`n1fqndiffers` and `n1twodecls` fail here).
+
+**Conjunct 2 is read two ways, and the gap between them is where a defect
+lived.** Under the STRICT reading it names the function `discriminatorRoots`, and
+the five conjuncts are then sufficient by construction — the criterion is whatever
+that function returns. Under the SOURCE-LEVEL reading a reader actually applies —
+"its type arguments, then its receiver" — the two readings must be argued equal,
+and until 2026-07-27 they were not. `discriminatorRoots` read `Signature.Recv()`,
+which is empty for the two `go/ssa` forwarder kinds that carry their receiver
+elsewhere: a `$thunk`'s is its first **parameter** and a `$bound`'s its sole
+**free variable**. `n1thunk` satisfied all five conjuncts on the source reading
+and was **not** refused; `mergeKey` absorbed the pair instead. `n1recv` — the same
+program one wrapper kind away — was refused. One shape, two answers.
+
+`features.receiverType` closes that instance: the strict reading now includes the
+thunk parameter and the bound free variable, so both fixtures behave alike. **The
+tension itself is not closed and is not claimed to be.** "Receiver" is a
+source-level word and `discriminatorRoots` is a function; they agree today because
+`go/ssa` v0.40.0 has exactly three receiver carriers (`Signature.Recv()`, a
+thunk's `Params()[0]`, a bound's `FreeVars[0]`) and `receiverType` enumerates all
+three, pinned against the toolchain by
+`TestReceiverTypeReadsThunkParameterAndBoundFreeVar`. A fourth carrier — a new
+synthetic kind, or an existing one changing where it puts its receiver — would
+reopen the gap in exactly the same shape and with exactly the same symptom: a
+silent merge where the source reading expects a refusal. When reading this
+section as a criterion, read conjunct 2 strictly; when reading it as a claim about
+programs, treat the equality of the two readings as a property that must be
+re-checked whenever `go/ssa` is upgraded, not as a definition.
 
 Conjuncts 4 and 5 are one property split by role — `L` cannot separate the pair,
 and neither can anything else — and together they say exactly this: **the two
@@ -765,6 +815,7 @@ indexed by the conjunct it exercises, and the table's exit codes are asserted.
 | `n1method` | `L` is a type argument of a generic **type**; the refused pair is that type's method, `(Box[L]).Show[L]` | 0 | 0 | refused |
 | `n1methodnocall` | the same with the method **never called** | 0 | 0 | refused |
 | `n1recv` | `L` reaches a promotion wrapper's **receiver**; the refused function carries no type arguments at all | 0 | 0 | refused |
+| `n1thunk` | conjunct 2 — the same through a `$thunk`, whose receiver is its first **parameter**, so it has no `Signature.Recv()` either | 0 | 0 | refused |
 | `n1nestedroot` | conjunct 2 — the type argument is `[]L`, so `L` is **not a root**; the walk reaches it one edge below | refused | refused | refused |
 | `n1onedecl` | conjunct 5, the refusing half of `n1twodecls`' minimal pair: the *second* root is two instances of ONE declaration of `M` | refused | refused | refused |
 | `n1c` | conjunct 4 fails — `L`'s structure mentions `X` | 0 | 0 | 0 |
@@ -806,7 +857,7 @@ invited, and each was confirmed by execution:
   refused. The two fixtures are a minimal pair: what conjunct 5 counts is
   declarations, not type arguments and not rendering.
 
-Three further rows exist because they falsify a reading the original shape-list
+Four further rows exist because they falsify a reading the original shape-list
 wording invited, and each was confirmed by execution:
 
 - **"the callee must be a generic function."** False. `n1method` and `n1recv`
@@ -815,6 +866,13 @@ wording invited, and each was confirmed by execution:
   receiver is a root because a promoted-method wrapper carries no type arguments
   whatsoever (see "Wrapper discrimination"), so a blast radius stated over type
   arguments alone omits `n1recv` entirely.
+- **"the receiver is `Signature.Recv()`."** False, and this is the falsification
+  that cost a silent merge rather than a mis-worded sentence. `n1thunk` is
+  `n1recv` with the promotion wrapper replaced by a method expression; the
+  resulting `$thunk` has no `Signature.Recv()` and no type arguments, so its root
+  set was empty, its discriminator `""`, and `mergeKey` absorbed the pair — exit 0
+  where `n1recv` exits 2, for one program shape. See the conjunct 2 reading note
+  above and "Wrapper discrimination".
 - **"the function at `L` must be called."** False. `n1methodnocall` never calls
   `Show`; converting `Box[L]` to an interface puts its method set into the
   analyzed set, and `cha` refuses. Conjunct 3 says *built*, not *called*.
@@ -832,23 +890,51 @@ that keep it armed, so a fixture whose subject was simply never analyzed could
 not pass for one whose guard did not fire.
 
 **Nothing intercepts a member of the class before the guard sees it.** `mergeKey`
-merges byte-identical wrappers, but it accepts only functions with no type
-arguments **and** no receiver — an empty discriminator root set, hence an empty
-discriminator — so it can never hold a function whose key carries the
-`local-type-graph/v1` suffix. That is the one step of "exactly when" no
-end-to-end fixture can exhibit, and the two definitions live in two packages, so
-it is asserted by `TestMergeKeyNeverAbsorbsASuffixCarryingFunction` rather than
-argued.
+merges byte-identical wrappers; it refuses any function whose
+`InstanceDiscriminator` carries the `local-type-graph/v1` suffix, so no member of
+the class can be absorbed before `panicOnDuplicateSortKey` ever runs. That is the
+one step of "exactly when" no end-to-end fixture can exhibit, and the two
+definitions live in two packages, so it is asserted by
+`TestMergeKeyNeverAbsorbsASuffixCarryingFunction` rather than argued.
 
-The exclusion has **two** conjuncts and the test pins each separately, because a
-fixture that exercises one is silent about the other. Relaxing the *receiver*
-conjunct is a genuine silent merge: `n1recv` under `cha` goes from refused to
-exit 0, two distinct promotion wrappers collapsing into one node with no
-refusal — and while `mergeKeyDisjointSrc` held only a type-argument-rooted local,
-that mutation left the whole `internal/static/callgraph` suite green. The fixture
-now also carries a receiver-rooted function-local type, and the suffix
-non-vacuity counter is split one per conjunct, so hoisting either local back to
-package scope fails the test instead of quietly disarming half of it.
+**The earlier argument for this paragraph was true and useless, and it licensed a
+real defect.** It ran: `mergeKey` accepts only functions with no type arguments
+**and** no receiver, which is an empty discriminator root set, hence an empty
+discriminator, hence never a suffix-carrying key. Every clause of that is literally
+true. What it establishes is only that `mergeKey` cannot hold a function *carrying*
+the suffix — and `mergeKey` routinely held functions that **should have** carried
+one. The `$thunk` and `$bound` forwarders it exists to merge are precisely the two
+`go/ssa` kinds whose receiver is **not** `Signature.Recv()`: a thunk's is its first
+**parameter** and a bound's its sole **free variable**. `discriminatorRoots` read
+`Signature.Recv()` alone, returned an empty root set for both, and the empty key
+that followed was an artifact of the omission, not evidence of an empty class. Two
+thunks over two distinct same-rendering function-local types therefore merged
+into one node — silently, with no refusal at any algorithm. Witnesses `thunkmerge`
+(the merged node emits the **union** of two out-edge sets `vta` had kept disjoint,
+so edges are fabricated on the positive pole; a union deletes no callee, so no
+absence proof can flip) and `n1thunk` (the same program shape as `n1recv`, exit 0
+through a thunk where `n1recv` exits 2 through a promotion wrapper — one shape,
+two answers, one of them silent).
+
+Both halves of the repair are load-bearing and neither works alone.
+`features.receiverType` is what makes the suffix appear for the two forwarder
+kinds; `mergeKey`'s `HasLocalTypeGraph` conjunct is what then keeps it out of the
+merge subset. With only the first, `mergeKey` admits a suffix-carrying thunk and
+`TestMergeKeyNeverAbsorbsASuffixCarryingFunction` fails on its `key != ""`
+assertion; with only the second, the conjunct is unreachable because the key is
+still empty.
+
+The exclusion now has **three** conjuncts and the test pins each separately,
+because a fixture that exercises one is silent about the others. Relaxing the
+*receiver* conjunct is a genuine silent merge: `n1recv` under `cha` goes from
+refused to exit 0, two distinct promotion wrappers collapsing into one node with
+no refusal — and while `mergeKeyDisjointSrc` held only a type-argument-rooted
+local, that mutation left the whole `internal/static/callgraph` suite green.
+Dropping the *`HasLocalTypeGraph`* conjunct is the same failure through the
+forwarder door. The fixture now carries a receiver-rooted function-local type and
+a thunk-rooted one, and the suffix non-vacuity counter is split one per conjunct,
+so hoisting any local back to package scope fails the test instead of quietly
+disarming a third of it.
 
 The mechanism behind conjunct 3: under `cha` the analyzed set is the whole
 program, which includes the **uninstantiated** body of every generic function
@@ -997,12 +1083,18 @@ determinism guard must never be removed as a rollback mechanism.
 - Every witness of the 2026-07-27 revision graphs successfully under `rta`,
   `vta`, and `cha`, except the declared residual (`n1b`), which must still exit
   non-zero with the specified diagnostic — **and except `n1`, `n1method`,
-  `n1methodnocall` and `n1recv` under `cha`, and `n1lib` under all three**, which
-  fall into the same declared residual class through the uninstantiated generic
-  body (see "The uninstantiated-body sub-case"). Those four must exit 0 under
-  `rta` and `vta`. These exceptions are disclosed unmet criteria, not a
-  relaxation: the shape is undecidable by the ratified vocabulary, and it fails
-  closed.
+  `n1methodnocall`, `n1recv` and `n1thunk` under `cha`, and `n1lib` under all
+  three**, which fall into the same declared residual class through the
+  uninstantiated generic body (see "The uninstantiated-body sub-case"). Those five
+  must exit 0 under `rta` and `vta`. These exceptions are disclosed unmet
+  criteria, not a relaxation: the shape is undecidable by the ratified vocabulary,
+  and it fails closed.
+- The `thunkmerge` witness graphs successfully under all three algorithms and
+  emits **no fabricated edge**: under `vta` exactly `one -> (A).QueryContext` and
+  `two -> (B).QueryContext`, never the union of the two. `rta` and `cha`
+  over-approximate the embedded-interface invoke to both implementers, which is
+  sound and unchanged; asserting all three is what distinguishes "the fabricated
+  edges are gone" from "the graph got smaller".
 - The residual diagnostic renders the declaration's position as
   `<basename>, byte offset <offset> (line <line>)`, never as `<basename>:<n>`,
   while the discriminator still frames `<basename>:<offset>`.
