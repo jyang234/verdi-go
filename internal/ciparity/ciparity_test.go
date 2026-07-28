@@ -57,3 +57,42 @@ func TestGolangciLintVersionParity(t *testing.T) {
 		}
 	}
 }
+
+// TestRaceTimeoutParity pins the -race per-package timeout the local gate and the
+// remote gate use to the SAME value. Go's default is 600s per package; the static
+// packages outgrew it (graphio 579s, cmd/flowmap 571s on the CI runners), so one
+// commit passed on one runner and timed out on its twin. Raising the ceiling in
+// one file only would restore precisely the split-brain this package forbids: a
+// `make test` that cannot reproduce a CI timeout, or a CI that times out on a
+// suite the author watched pass.
+func TestRaceTimeoutParity(t *testing.T) {
+	root := repoRoot(t)
+
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	mkMatch := regexp.MustCompile(`(?m)^RACE_TIMEOUT\s*\?=\s*(\S+)`).FindSubmatch(mk)
+	if mkMatch == nil {
+		t.Fatal("Makefile: no `RACE_TIMEOUT ?= ...` assignment found; the -race " +
+			"timeout must stay a named, greppable pin so this guard can see it")
+	}
+	if !regexp.MustCompile(`go test -race -timeout \$\(RACE_TIMEOUT\) \./\.\.\.`).Match(mk) {
+		t.Error("Makefile: the test target does not run " +
+			"`go test -race -timeout $(RACE_TIMEOUT) ./...`; RACE_TIMEOUT is pinned but unused")
+	}
+
+	wf, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "gates.yml"))
+	if err != nil {
+		t.Fatalf("read gates.yml: %v", err)
+	}
+	wfMatch := regexp.MustCompile(`go test -race -timeout (\S+) \./\.\.\.`).FindSubmatch(wf)
+	if wfMatch == nil {
+		t.Fatal("gates.yml: no `go test -race -timeout ... ./...` step found")
+	}
+
+	if got, want := string(wfMatch[1]), string(mkMatch[1]); got != want {
+		t.Errorf("race timeout drift: Makefile RACE_TIMEOUT=%s but gates.yml passes "+
+			"-timeout=%s — `make test` and CI would enforce different ceilings", want, got)
+	}
+}

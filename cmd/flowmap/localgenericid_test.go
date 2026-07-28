@@ -746,15 +746,25 @@ func TestF26DeclarationOffsetsStayAligned(t *testing.T) {
 //	go test -race ./... -count=1           cmd/flowmap 251s, whole suite 4m12s
 //	one child analysis                     0.30s; 2.01s if race-instrumented (6.7x)
 //
-// Go's default per-package timeout is 600s, so the contended 251s leaves ~2.4x —
-// a machine ~2.4x slower than this one starts timing out. That is the risk, and
-// it is real. Cutting this test is nevertheless the wrong lever, for two reasons.
+// That risk was real and it CAME DUE. Against go's 600s per-package default, the
+// contended 251s left ~2.4x — and the CI runners are inside that margin: the same
+// commit ran cmd/flowmap in 571s on one runner and timed out on its twin, one
+// passing and one failing verdict for identical bytes. The ceiling is now an
+// explicit RACE_TIMEOUT (Makefile, mirrored into gates.yml and pinned by
+// ciparity's TestRaceTimeoutParity), not go's default; read the current value
+// there rather than trusting a number quoted here.
+//
+// Cutting this test was and remains the wrong lever, for two reasons.
 //
 // It would not move the constraint. The 80 key dumps cost ~24s isolated and ~47s
 // contended; deleting them outright leaves cmd/flowmap around 204s, with
 // internal/static/graphio at 232s and static/rebind at 176s immediately behind.
 // Whatever machine times this package out times those out at nearly the same
-// slowdown, so the headroom is a property of the suite, not of this seam.
+// slowdown, so the headroom is a property of the suite, not of this seam. The CI
+// numbers bear that out and are the reason the fix was a suite-wide ceiling rather
+// than surgery here: on the same runners, graphio ran 579s against the old 600s —
+// closer to timing out than this package was, and on main, owing nothing to this
+// test.
 //
 // And it would weaken the assertion. The mutation this test exists to catch —
 // appending a per-process value to every discriminator suffix, which collides
@@ -768,9 +778,14 @@ func TestF26DeclarationOffsetsStayAligned(t *testing.T) {
 // localtypeargsvc the shipped fixture). Either cut buys time by lowering
 // detection probability.
 //
-// So if this package does start timing out: raise its -timeout, or make the
-// children cheaper (they are already built WITHOUT -race for exactly this reason
-// — see keyDumpBinary). Do not lower the 20 and do not shorten the subject list.
+// So if this package starts timing out AGAIN: raise RACE_TIMEOUT further, or make
+// the children cheaper (they are already built WITHOUT -race for exactly this
+// reason — see keyDumpBinary). Do not lower the 20 and do not shorten the subject
+// list. Splitting this file into its own package was prototyped and rejected: it
+// relocates the seam away from the binary it builds (`go build -o … .` then
+// silently writes nothing for a test-only package, failing later as a
+// permission-denied exec) and buys headroom for the third-slowest package while
+// the slowest keeps its margin.
 func TestLocalGenericIdentityDeterministicAcrossProcesses(t *testing.T) {
 	// A slice, not a map: nothing in this repository iterates a map where the
 	// order is observable, and a subtest order that varies run to run is exactly
