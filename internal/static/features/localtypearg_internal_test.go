@@ -450,6 +450,80 @@ func second() { type result struct{ B string }; instantiate[result]() }
 	}
 }
 
+// lineDirectiveSrc renders the //line-separation fixture with the directive's
+// target line as its only variable. The two renderings have EQUAL BYTE LENGTH by
+// construction (both targets are three digits), so every declaration in them sits
+// at the same physical byte offset and the discriminator has no legitimate reason
+// to differ. Any difference is the display line leaking into the key.
+func lineDirectiveSrc(target int) string {
+	return `package localtypes
+func instantiate[T any]() {}
+//line generated.go:` + strconv.Itoa(target) + `
+func use() { type result struct{ A int }; instantiate[result]() }
+`
+}
+
+// TestLineDirectiveMovesDisplayLineNotTheKey is the single test that pins BOTH
+// halves of the display/key separation, by moving the one input that must reach
+// exactly one of them.
+//
+// Two programs differ only in a //line directive's target line, at equal byte
+// length. The DISPLAY line must follow the directive — that is what a //line
+// directive is for, and what an editor jumps to — while the discriminator must be
+// byte-identical, because a directive that could move a key would let a generated
+// file rewrite the canonical sort order of the graph.
+//
+// Nothing weaker proves it. Asserting the key alone leaves the display untested,
+// and asserting the display alone leaves open that the key moved with it.
+func TestLineDirectiveMovesDisplayLineNotTheKey(t *testing.T) {
+	const near, far = 400, 900
+	if len(lineDirectiveSrc(near)) != len(lineDirectiveSrc(far)) {
+		t.Fatalf("fixture sources have unequal length (%d and %d); the offsets would differ for a reason other than the directive",
+			len(lineDirectiveSrc(near)), len(lineDirectiveSrc(far)))
+	}
+
+	declOf := func(target int) (LocalDeclaration, string) {
+		t.Helper()
+		instances := localInstances(t,
+			buildLocalTypeProgram(t, "/checkout/root/local.go", lineDirectiveSrc(target)),
+			"example.com/localtypes.instantiate[")
+		if len(instances) != 1 {
+			t.Fatalf("instantiate instances = %d, want 1", len(instances))
+		}
+		decl, ok := FirstLocalDeclaration(instances[0])
+		if !ok {
+			t.Fatal("instance carries no function-local declaration")
+		}
+		return decl, InstanceDiscriminator(instances[0])
+	}
+
+	nearDecl, nearKey := declOf(near)
+	farDecl, farKey := declOf(far)
+
+	// The key half: byte-identical, including the site bytes it frames.
+	if nearKey != farKey {
+		t.Fatalf("//line target moved the discriminator:\n //line %d -> %q\n //line %d -> %q", near, nearKey, far, farKey)
+	}
+	if nearDecl.File != "local.go" || farDecl.File != "local.go" {
+		t.Errorf("declaration files = %q and %q, want the PHYSICAL basename local.go", nearDecl.File, farDecl.File)
+	}
+	if nearDecl.Offset != farDecl.Offset {
+		t.Errorf("declaration offsets = %d and %d, want equal physical offsets", nearDecl.Offset, farDecl.Offset)
+	}
+	if !strings.Contains(nearKey, "local.go:"+strconv.Itoa(nearDecl.Offset)) {
+		t.Errorf("discriminator %q does not frame the site bytes local.go:%d", nearKey, nearDecl.Offset)
+	}
+
+	// The display half: the line follows the directive, in both directions.
+	if nearDecl.Line != near || farDecl.Line != far {
+		t.Fatalf("displayed lines = %d and %d, want %d and %d — display must honour //line",
+			nearDecl.Line, farDecl.Line, near, far)
+	}
+	if got, want := nearDecl.Location(), fmt.Sprintf("local.go, byte offset %d (line %d)", nearDecl.Offset, near); got != want {
+		t.Errorf("Location() = %q, want %q", got, want)
+	}
+}
+
 func TestInstanceDiscriminatorSeparatesSameLineLocalTypes(t *testing.T) {
 	const src = `package localtypes
 func instantiate[T any]() {}

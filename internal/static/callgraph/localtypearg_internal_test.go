@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -391,7 +392,10 @@ func assertResidualDiagnostic(t *testing.T, message string) {
 	t.Helper()
 	for _, want := range []string{
 		"callgraph: refusing to order two distinct instances of\n    example.com/localtypes.sink[example.com/localtypes.L]",
-		"WHY: both instances were produced from ONE declaration of the function-local\ntype \"L\" at local.go:",
+		// The position is rendered for a HUMAN: a bare "local.go:98" reads as a
+		// line number, and 98 is a byte offset. The key keeps the offset form.
+		"WHY: both instances were produced from ONE declaration of the function-local\ntype \"L\" at local.go, byte offset ",
+		" (line ",
 		"This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash",
 		"HOW THE ANALYSIS GOT TWO OF THEM:",
 		"the analyzed set holds its UNINSTANTIATED body",
@@ -424,6 +428,12 @@ func assertResidualDiagnostic(t *testing.T, message string) {
 	if strings.Contains(message, "share sort key") {
 		t.Errorf("residual collision fell back to the unknown-class wording:\n%s", message)
 	}
+	// The retired rendering of the position. `at local.go:98` is what a reader
+	// parses as line 98 — 98 is a byte offset, and the witness file has twelve
+	// lines. The key still carries exactly those bytes; the prose must not.
+	if strings.Contains(message, `type "L" at local.go:`) {
+		t.Errorf("residual diagnostic renders the site as <file>:<number>, which reads as a line:\n%s", message)
+	}
 	// The discriminator is rendered with %q, so its NUL frames appear escaped; the
 	// marker is matched in that escaped form rather than as raw bytes.
 	if !strings.Contains(message, `local-type-graph/v1`) {
@@ -432,22 +442,33 @@ func assertResidualDiagnostic(t *testing.T, message string) {
 }
 
 // TestResidualDiagnosticFillsPlaceholdersInOrder pins the ratified placeholder
-// ORDER — FQN, local type name, site, FQN, discriminator — which a substring
-// check alone cannot catch: swapping the name and the site, or the two FQN slots,
-// still leaves every phrase present.
+// ORDER — FQN, local type name, display location, FQN, discriminator — which a
+// substring check alone cannot catch: swapping the name and the location, or the
+// two FQN slots, still leaves every phrase present.
+//
+// The third verb is LocalDeclaration.Location, the display rendering. The key's
+// site bytes are `<basename>:<offset>` and stay that way; this asserts the
+// diagnostic does not use them.
 func TestResidualDiagnosticFillsPlaceholdersInOrder(t *testing.T) {
 	left, _ := collidingSortKeyPair(t)
 	fqn := left.RelString(nil)
 	key := features.InstanceDiscriminator(left)
-	name, site, ok := features.FirstLocalDeclaration(left)
+	decl, ok := features.FirstLocalDeclaration(left)
 	if !ok {
 		t.Fatal("fixture instance carries no function-local declaration")
 	}
-	if name != "L" || !strings.HasPrefix(site, "local.go:") {
-		t.Fatalf("first local declaration = %q at %q, want L at local.go:<offset>", name, site)
+	if decl.Name != "L" || decl.File != "local.go" || decl.Offset <= 0 || decl.Line <= 0 {
+		t.Fatalf("first local declaration = %+v, want L in local.go at a positive offset and line", decl)
+	}
+	if got, want := decl.Location(), fmt.Sprintf("local.go, byte offset %d (line %d)", decl.Offset, decl.Line); got != want {
+		t.Fatalf("Location() = %q, want %q", got, want)
+	}
+	// The key still carries the joined offset form the display no longer uses.
+	if !strings.Contains(key, "local.go:"+strconv.Itoa(decl.Offset)) {
+		t.Fatalf("discriminator %q does not carry the site bytes local.go:%d", key, decl.Offset)
 	}
 
-	want := fmt.Sprintf(residualCollisionDiagnostic, fqn, name, site, fqn, key)
+	want := fmt.Sprintf(residualCollisionDiagnostic, fqn, decl.Name, decl.Location(), fqn, key)
 	if got := duplicateSortKeyDiagnostic(fqn, key, left); got != want {
 		t.Fatalf("duplicateSortKeyDiagnostic() =\n%s\n\nwant\n%s", got, want)
 	}

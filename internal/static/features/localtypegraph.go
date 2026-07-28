@@ -47,28 +47,71 @@ func HasLocalTypeGraph(discriminator string) bool {
 	return strings.Contains(discriminator, LocalTypeGraphMarker)
 }
 
-// FirstLocalDeclaration returns the name and physical site of the FIRST
-// function-local declaration in fn's type-graph encoding, in node-id order, and
-// whether one exists. Ids are assigned in first-visit order of a traversal fixed
-// by the input, so "first" is deterministic and does not depend on map order.
+// LocalDeclaration identifies one function-local type declaration for a HUMAN
+// reader. It is a struct rather than a joined string because the discriminator's
+// site bytes and the diagnostic's prose are two different concerns with two
+// different rules, and a single joined string forces one of them to re-parse the
+// other's format.
+//
+// File and Offset are the PHYSICAL position — the same two values the key
+// encodes. Line is DISPLAY ONLY; see the field comment.
+type LocalDeclaration struct {
+	// Name is the declared type's identifier, e.g. "L".
+	Name string
+	// File is the physical file's basename and Offset the physical byte offset
+	// of the declaration within it. This pair, and nothing else, is what site()
+	// hands the encoder.
+	File   string
+	Offset int
+	// Line is the //line-ADJUSTED line number, resolved through FileSet.Position.
+	// It is DISPLAY ONLY and never reaches a key: it is read from the FileSet
+	// here, after the encoding is complete, and typeGraphEncoder never calls
+	// FileSet.Position at all. Putting it in a key would let a //line directive
+	// rewrite the discriminator, and a line alone cannot separate two
+	// declarations written on one physical line — which is why site() is defined
+	// on offsets. Neither reason governs what a human is shown.
+	// TestLineDirectiveMovesDisplayLineNotTheKey pins the separation.
+	Line int
+}
+
+// Location renders the declaration's position for a human: the reader of the
+// residual diagnostic sees a byte offset, and "main.go:98" invites reading 98 as
+// a line number in a file that may have twelve lines. The offset is kept because
+// it is the value the key is actually built from, so a reader can correlate the
+// message with the key; the line is added because it is what an editor jumps to.
+func (d LocalDeclaration) Location() string {
+	return fmt.Sprintf("%s, byte offset %d (line %d)", d.File, d.Offset, d.Line)
+}
+
+// FirstLocalDeclaration returns the FIRST function-local declaration in fn's
+// type-graph encoding, in node-id order, and whether one exists. Ids are assigned
+// in first-visit order of a traversal fixed by the input, so "first" is
+// deterministic and does not depend on map order.
 //
 // It exists for the residual-collision diagnostic: when two distinct functions
 // survive with one sort key, this names the single declaration both instances
 // were produced from. It re-derives the encoding rather than parsing it, so the
 // suffix grammar stays private to this file.
-func FirstLocalDeclaration(fn *ssa.Function) (name, site string, ok bool) {
+func FirstLocalDeclaration(fn *ssa.Function) (LocalDeclaration, bool) {
 	roots := discriminatorRoots(fn)
 	if len(roots) == 0 {
-		return "", "", false
+		return LocalDeclaration{}, false
 	}
 	e := newTypeGraphEncoder(fn)
 	for _, root := range roots {
 		e.id(root)
 	}
 	if !e.sawLocal {
-		return "", "", false
+		return LocalDeclaration{}, false
 	}
-	return e.firstLocalName, e.firstLocalSite, true
+	return LocalDeclaration{
+		Name:   e.firstLocalName,
+		File:   e.firstLocalSite.file,
+		Offset: e.firstLocalSite.offset,
+		// The ONLY FileSet.Position call in this file, reached only from here —
+		// i.e. only after localTypeGraph has already produced the key bytes.
+		Line: e.fset.Position(e.firstLocalPos).Line,
+	}, true
 }
 
 // discriminatorRoots returns the roots of fn's type-graph encoding, in the order
@@ -161,7 +204,10 @@ type typeGraphEncoder struct {
 
 	sawLocal       bool
 	firstLocalName string
-	firstLocalSite string
+	firstLocalSite localSite
+	// firstLocalPos is kept for the DISPLAY line only (see LocalDeclaration.Line).
+	// The encoder itself never resolves it through the FileSet.
+	firstLocalPos token.Pos
 }
 
 func newTypeGraphEncoder(fn *ssa.Function) *typeGraphEncoder {
@@ -343,11 +389,12 @@ func (e *typeGraphEncoder) writeObject(b *strings.Builder, obj *types.TypeName) 
 	}
 	site := e.site(obj)
 	b.WriteByte('@')
-	writeFramed(b, site)
+	writeFramed(b, site.key())
 	if !e.sawLocal {
 		e.sawLocal = true
 		e.firstLocalName = obj.Name()
 		e.firstLocalSite = site
+		e.firstLocalPos = obj.Pos()
 	}
 }
 
@@ -364,7 +411,20 @@ func isFunctionLocal(obj *types.TypeName) bool {
 	return obj != nil && obj.Pkg() != nil && obj.Parent() != obj.Pkg().Scope()
 }
 
-// site returns obj's PHYSICAL declaration site, <basename>:<byte offset>.
+// localSite is a function-local declaration's PHYSICAL position. It carries the
+// two values the key is allowed to see and no others — in particular no line
+// number, so no code path can join one into the discriminator by accident.
+type localSite struct {
+	file   string
+	offset int
+}
+
+// key renders the site as the discriminator encodes it, <basename>:<byte offset>.
+// This is the ONLY rendering that reaches a key; LocalDeclaration.Location is the
+// separate, display-only one.
+func (s localSite) key() string { return s.file + ":" + strconv.Itoa(s.offset) }
+
+// site returns obj's PHYSICAL declaration site.
 //
 // It reads the physical token.File, never FileSet.Position (which honours //line
 // and would let a generated-file directive rewrite the key), never an absolute
@@ -372,7 +432,10 @@ func isFunctionLocal(obj *types.TypeName) bool {
 // (whose file-set base depends on load construction), and never a line number
 // alone (valid Go may declare two types on one line). Incomplete position data
 // is not safe to render as a canonical key, so it panics instead.
-func (e *typeGraphEncoder) site(obj *types.TypeName) string {
+//
+// All four reasons are about what may become a KEY. None of them governs what a
+// human is shown, which is why LocalDeclaration carries a display-only line.
+func (e *typeGraphEncoder) site(obj *types.TypeName) localSite {
 	file := e.fset.File(obj.Pos())
 	if file == nil {
 		panic(fmt.Sprintf(
@@ -387,7 +450,7 @@ func (e *typeGraphEncoder) site(obj *types.TypeName) string {
 			obj.Name(),
 		))
 	}
-	return filepath.Base(file.Name()) + ":" + strconv.Itoa(file.Offset(obj.Pos()))
+	return localSite{file: filepath.Base(file.Name()), offset: file.Offset(obj.Pos())}
 }
 
 // writeTypeParams writes a comma-separated list of type-parameter node ids.

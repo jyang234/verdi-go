@@ -313,6 +313,44 @@ used alone**: it appears only inside a `Named`/`Alias` definition that already
 carries `obj.Pkg().Path()`, so the effective site identity is the pair (declaring
 package path, basename:offset).
 
+#### Display convention — deliberately not the site bytes
+
+The four prohibitions above are all statements about what may become a **key**.
+None of them governs what a **human** is shown, and the two must not be conflated:
+
+- **Key**: `<basename>:<offset>`, exactly as specified above, unchanged.
+- **Display** (the residual diagnostic's third placeholder):
+  `<basename>, byte offset <offset> (line <line>)`.
+
+`main.go:98` is read by every reader as line 98 — the form every compiler uses —
+and 98 is a byte offset, into a file that may have twelve lines. The offset is
+kept in the prose because it is the value the key is actually built from, so a
+reader can correlate the message with the key; the line is added because it is
+what an editor jumps to.
+
+The line is **display-only** and is resolved with `FileSet.Position`, i.e. it
+**honours `//line`** — which is exactly why it may not reach a key, and exactly
+what a reader of a generated file wants to see. Two normative consequences:
+
+1. The producer of `site` must expose the file and offset as **structured data**,
+   not as a joined string. The key formatter and the prose formatter are then
+   independent, and neither re-parses the other's output.
+2. `FileSet.Position` must be unreachable from the encoding path. It is called
+   once, in the accessor the diagnostic uses, after the key bytes already exist.
+
+A single test pins both halves at once: two sources differing only in a `//line`
+directive's target line, at equal byte length, must produce a **byte-identical
+discriminator** and **different displayed lines**. Asserting only the key leaves
+the display untested; asserting only the display leaves open that the key moved
+with it.
+
+The `local-sites/v1` uniqueness argument — that intra-package basename uniqueness
+suffices because the type string already carries the package path — **is
+invalid**. Once sites are pooled into one alphabet, two packages whose files share
+a basename and whose local declarations are offset-aligned collide: witness `f26`
+builds two distinct `*ssa.Function` with one key from exactly that, and renaming
+one file to break the basename equality makes it graph cleanly.
+
 The `local-sites/v1` uniqueness argument — that intra-package basename uniqueness
 suffices because the type string already carries the package path — **is
 invalid**. Once sites are pooled into one alphabet, two packages whose files share
@@ -726,8 +764,10 @@ none: it sees two `*ssa.Function` with one key, not how they were produced. Both
 doors of the class (above) must be named, and no remedy may be offered that a
 one-instantiation program already satisfies.
 
-Exact text (`%s` placeholders in order: FQN, local type name, site, FQN,
-discriminator):
+Exact text (`%s` placeholders in order: FQN, local type name, **display
+location**, FQN, discriminator). The third placeholder is the display rendering
+of "Physical position → Display convention" — `main.go, byte offset 98 (line 7)`
+— **not** the key's `site` bytes:
 
 ```text
 callgraph: refusing to order two distinct instances of
@@ -771,8 +811,10 @@ sort key:      %s
 discriminator: %q
 ```
 
-The local type name and site are read from the first `@<site>`-bearing node in
-the shared discriminator, in id order, so the choice is deterministic.
+The local type name and position are read from the first `@<site>`-bearing node
+in the shared discriminator, in id order, so the choice is deterministic. The
+accessor returns them as structured data (name, file, offset, display line); the
+display line is resolved there and nowhere else.
 
 ## Compatibility and rollout
 
@@ -804,6 +846,9 @@ determinism guard must never be removed as a rollback mechanism.
   sub-case"). `n1` under `rta` and `vta` must exit 0. These exceptions are
   disclosed unmet criteria, not a relaxation: the shape is undecidable by the
   ratified vocabulary, and it fails closed.
+- The residual diagnostic renders the declaration's position as
+  `<basename>, byte offset <offset> (line <line>)`, never as `<basename>:<n>`,
+  while the discriminator still frames `<basename>:<offset>`.
 - The pooled-sorted-deduplicated site set no longer appears anywhere, and the
   string `local-sites/v1` no longer appears in code, tests, or comments.
 - `loader.Tests` is still `false`, or "Physical position" has been revisited.

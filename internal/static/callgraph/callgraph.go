@@ -353,20 +353,28 @@ func panicOnDuplicateSortKey(nodes []*Node) {
 // local-type-graph suffix AND a local declaration can be named. Anything else gets
 // the generic wording: asserting the diagnosis on a key that does not carry its
 // signature would be laundering a guess into a claim.
+//
+// The position is rendered by LocalDeclaration.Location, NOT by the site bytes the
+// key carries. "main.go:98" reads as line 98 to every human who has ever seen a
+// compiler error, and 98 is a byte offset — in the boxwit witness, into a
+// twelve-line file. The key keeps the offset for the reasons in features' site();
+// none of them is a reason to show it that way.
 func duplicateSortKeyDiagnostic(fqn, key string, fn *ssa.Function) string {
-	name, site, ok := features.FirstLocalDeclaration(fn)
+	decl, ok := features.FirstLocalDeclaration(fn)
 	if !ok || !features.HasLocalTypeGraph(key) {
 		return fmt.Sprintf(
 			"callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically",
 			fqn, key,
 		)
 	}
-	return fmt.Sprintf(residualCollisionDiagnostic, fqn, name, site, fqn, key)
+	return fmt.Sprintf(residualCollisionDiagnostic, fqn, decl.Name, decl.Location(), fqn, key)
 }
 
 // residualCollisionDiagnostic is the exact text ratified in "Residual undecided
-// classes" of the design. Its %s/%q verbs are, in order: FQN, local type name,
-// site, FQN, discriminator. Rewording it is a spec change, not an edit.
+// classes" of the design — byte-identical to that section's "Exact text" block.
+// Its %s/%q verbs are, in order: FQN, local type name, DISPLAY LOCATION (the
+// third verb is LocalDeclaration.Location, not the key's site bytes), FQN,
+// discriminator. Rewording it is a spec change, not an edit.
 //
 // It states NO instantiation count. The class has two doors — a generic
 // instantiated more than once, or an analyzed set holding the generic's
