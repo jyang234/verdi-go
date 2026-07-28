@@ -192,10 +192,13 @@ func (g *Graph) node(fn *ssa.Function) *Node {
 	return g.newNode(fn)
 }
 
-// newNode builds and registers a fresh node for fn. The merge class of a wrapper is
-// byte-identical (same wrapped Object, RelString, and body), so which copy iteration
-// happens to reach here first — and thus becomes the node's Func — does not change the
-// node's FQN or its edges: map-iteration order over x.Nodes does not leak into output.
+// newNode builds and registers a fresh node for fn. Every copy in a merge class shares
+// the key's FQN and wrapped Object, and mergeKey now also refuses any copy whose
+// discriminator carries the local-type-graph suffix — the one way two copies with that
+// key were observed to differ in body. So which copy iteration happens to reach here
+// first — and thus becomes the node's Func — does not change the node's FQN, and the
+// node's edge set is the union over the class either way: map-iteration order over
+// x.Nodes does not leak into output.
 func (g *Graph) newNode(fn *ssa.Function) *Node {
 	n := &Node{FQN: fn.RelString(nil), Func: fn}
 	g.byFunc[fn] = n
@@ -212,8 +215,13 @@ type wrapperKey struct {
 	obj types.Object
 }
 
-// mergeKey returns fn's wrapper identity and true when fn is one of the receiver-less
-// method-value / method-expression forwarders go/ssa mints fresh per use-site.
+// mergeKey returns fn's wrapper identity and true when fn satisfies every conjunct
+// below: a synthetic function with a wrapped Object, no type arguments and no
+// Signature.Recv(), whose discriminator carries no local-type-graph suffix. The class
+// it EXISTS for — and the only class it ever actually merges — is the receiver-less
+// method-value / method-expression forwarders go/ssa mints fresh per use-site; see
+// "The admitted set is what the conjuncts say" below for the third kind that also
+// passes and why that is harmless.
 // createBound (MethodVal, "$bound") and createThunk (MethodExpr, "$thunk") in x/tools
 // go/ssa build a NEW wrapper at every occurrence and never cache it, so K uses of one
 // method M yield K distinct *ssa.Function that are byte-identical — same wrapped
@@ -223,8 +231,9 @@ type wrapperKey struct {
 // too, so no tie-break could separate them: the sound resolution is to MERGE the
 // interchangeable copies, not to fabricate an order between identical things.
 //
-// The class is deliberately restricted to receiver-less forwarders
-// (Signature.Recv() == nil) — exactly bound+thunk, the two UNCACHED kinds. Everything
+// The class is deliberately restricted to receiver-less synthetics
+// (Signature.Recv() == nil), which is what admits bound+thunk, the two UNCACHED
+// kinds. Everything
 // else is excluded ON PURPOSE so an unproven collision fails LOUD at finalize() rather
 // than being silently merged (CLAUDE.md: fail closed; soundness is asymmetric): a
 // promotion/interface wrapper carries a receiver and is cached by go/ssa (it never
@@ -234,16 +243,50 @@ type wrapperKey struct {
 // question); the two are NOT folded into one predicate because they answer different
 // questions.
 //
+// The admitted set is what the conjuncts say, NOT an enumeration of those two kinds,
+// and a THIRD go/ssa kind passes them on every real run: a bodiless declared
+// package-level function, Synthetic "from type information" (create.go), which go/ssa
+// mints for every dependency the loader resolves from export data rather than syntax
+// — fmt.Errorf, net/http.HandleFunc, context.Background. It has a non-empty
+// Synthetic, a non-nil Object(), no type arguments and no Signature.Recv(), so it is
+// admitted in the thousands under --algo cha (15 of 18 candidates under the default
+// rta/vta, whose node set is far smaller); over the loansvc fixture it is the bulk of the merge
+// candidates. It is harmless rather than overlooked, and no merge has ever fired for
+// one. It genuinely has no receiver, so features.receiverType returning nil is
+// correct and its empty discriminator is earned rather than missed; and one
+// *types.Func yields one *ssa.Function per package, so two of them cannot share
+// (RelString, Object) — the key that would be needed to collapse them. Admitted,
+// never merged: do not read this predicate as "exactly bound+thunk".
+//
 // Merge safety rests on the KEY, not on Object being unique: two wrappers merge only
 // when they share RelString(nil) AND the wrapped Object. RelString carries the full
 // receiver display, so wrappers over different instantiations of one generic method —
 // (*Store[int]).Get$bound vs (*Store[string]).Get$bound, whose Object() is the SHARED
 // origin generic (taint.go:75, features.EffectivePkgPath) — get DIFFERENT keys and do
-// not merge. A receiver-less forwarder with equal RelString and equal Object is
-// byte-identical, so the merge cannot collapse two behaviorally distinct functions.
+// not merge.
+//
+// Equal RelString plus equal Object is NOT by itself byte-identity, and this comment
+// used to claim it was. RelString renders a function-local receiver type without its
+// lexical scope, so two forwarders over two DIFFERENT function-local types that render
+// alike share both — and their bodies differ (the fabricated-edge witness
+// testdata/fixtures/localgenericid/thunkmerge merges `&t0.emb [#0]` with
+// `&t0.emb [#1]`). Merging them unions two out-edge sets that VTA had kept disjoint:
+// no callee is deleted, so no absence proof can flip, but edges are fabricated on the
+// positive pole. The third conjunct below is what closes it: a function whose
+// discriminator carries the local-type-graph suffix is a function whose identity the
+// FQN provably does not carry, so it is refused from the merge subset and left for
+// finalize() to order or refuse. features.receiverType is what makes that suffix
+// appear for these two kinds at all — a $thunk's receiver is its first parameter and a
+// $bound's its sole free variable, neither of which is Signature.Recv() — and the two
+// halves must land together: the guard is what keeps mergeKey's candidates
+// empty-keyed, which is the invariant TestMergeKeyNeverAbsorbsASuffixCarryingFunction
+// pins.
 func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 	if fn == nil || fn.Synthetic == "" || fn.Object() == nil ||
 		len(fn.TypeArgs()) != 0 || fn.Signature == nil || fn.Signature.Recv() != nil {
+		return wrapperKey{}, false
+	}
+	if features.HasLocalTypeGraph(features.InstanceDiscriminator(fn)) {
 		return wrapperKey{}, false
 	}
 	return wrapperKey{fqn: fn.RelString(nil), obj: fn.Object()}, true
@@ -252,34 +295,180 @@ func mergeKey(fn *ssa.Function) (wrapperKey, bool) {
 // finalize sorts nodes and each node's edges into canonical order. The node sort
 // tie-breaks on features.InstanceDiscriminator because a generic instance's FQN
 // (fn.RelString) is documented non-unique: an FQN-only comparator over the
-// map-iteration-ordered node set is nondeterministic on such a tie (M-20). The one
-// FQN+discriminator collision go/ssa is known to produce — interchangeable synthetic
-// $bound/$thunk wrappers minted per use-site — is merged upstream in node() (see
-// mergeKey). A collision surviving to here is therefore either genuinely un-orderable
-// or an unrecognized synthetic class outside that proven-identical merge set; either
-// way, fail loudly rather than emit a run-varying order (determinism before
-// convenience), so an unproven duplicate trips this guard instead of being silently
-// merged.
+// map-iteration-ordered node set is nondeterministic on such a tie (M-20). These
+// collision classes are resolved upstream:
+//
+//   - byte-identical $bound/$thunk wrappers, merged by mergeKey;
+//   - generic instances whose type strings lose local lexical scope, separated by
+//     the positional local-type-graph/v1 serialization;
+//   - local declarations inside generic functions, whose TypeName has a nil
+//     Parent() after instantiation;
+//   - offset-aligned local declarations in same-basename files of DIFFERENT
+//     packages, separated by the package path carried in each named node;
+//   - promoted-method wrappers over function-local receivers, separated by the
+//     same serialization applied to the receiver.
+//
+// One class is NOT resolved and is not claimed to be: two instances produced from
+// one function-local declaration inside a generic function, structurally
+// identical in both. See panicOnDuplicateSortKey.
+//
+// A surviving duplicate must panic rather than emit a run-varying order. The guard is
+// panicOnDuplicateSortKey, run AFTER the sort over adjacent nodes — deliberately not
+// inside the comparator. sort.Slice guarantees only that the result is sorted; it never
+// promises the comparator is invoked on every equal pair, so a comparator-resident
+// guard rests on an implementation detail rather than on the documented contract.
+// Equal keys form one contiguous run in any correctly sorted slice, so the adjacency
+// scan derives the same panic from the postcondition alone.
 func (g *Graph) finalize() {
 	sort.Slice(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
 		if a.FQN != b.FQN {
 			return a.FQN < b.FQN
 		}
-		ka, kb := features.InstanceDiscriminator(a.Func), features.InstanceDiscriminator(b.Func)
-		if ka != kb {
-			return ka < kb
-		}
-		if a.Func != b.Func {
-			panic(fmt.Sprintf("callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically", a.FQN, ka))
-		}
-		return false
+		return features.InstanceDiscriminator(a.Func) < features.InstanceDiscriminator(b.Func)
 	})
+	panicOnDuplicateSortKey(g.Nodes)
 	for _, n := range g.Nodes {
 		sort.Slice(n.Out, func(i, j int) bool { return edgeLess(n.Out[i], n.Out[j]) })
 		sort.Slice(n.In, func(i, j int) bool { return edgeLess(n.In[i], n.In[j]) })
 	}
 }
+
+// panicOnDuplicateSortKey refuses a node slice in which two DISTINCT functions carry
+// the same (FQN, InstanceDiscriminator) sort key. nodes must already be sorted on that
+// key, which puts each duplicate GROUP in one contiguous run. That is NOT the stronger
+// claim that every duplicate PAIR is adjacent — in a run of three sharing one key the
+// outer two are never compared — and the scan does not need it. It needs only one
+// witness per group: if a contiguous run holds two distinct functions then some ADJACENT
+// pair inside that run is distinct (were every adjacent pair the same *ssa.Function,
+// transitivity would make the whole run one function), and the scan panics on it. So a
+// group is caught whenever it should be, though not necessarily on the pair a reader of
+// the diagnostic first suspects. The caller is finalize, immediately after its sort.
+//
+// A surviving duplicate is NOT necessarily a producer bug. InstanceDiscriminator
+// separates every collision class the vocabulary of declaration position and type
+// structure can decide, and exactly ONE class survives it:
+//
+//	A generic function that declares a function-local type whose structure does NOT
+//	vary with the type parameter, reached through TWO analyzed instances of that
+//	one generic body. Every instance shares the one syntactic declaration, hence
+//	one source position; and `type L struct{ A int }` is byte-identical structure
+//	in all of them. No refinement of position or structure can decide it.
+//
+// Two analyzed instances arise EITHER from instantiating the generic more than
+// once OR from analyzing its uninstantiated body alongside a single
+// instantiation — whole-program cha always does the latter, and rta/vta do it
+// too when an exported generic is a library unit's discovered root. The guard
+// cannot tell the two apart (it sees functions and keys, not provenance), and
+// neither can the algorithm, so the diagnostic asserts no instantiation count.
+//
+// That class is refused, not merged. Merging would delete one of two distinct
+// *ssa.Function and its out-edges from the graph, and every absence proof
+// downstream — PROVEN, NO-FLOW, NEVER, "no path", "covered" — would then cover a
+// function the analysis never examined: a SILENT false PROVEN, the worst outcome
+// under CLAUDE.md tenet 4. A panic is a refused analysis; a merge is a wrong
+// answer that looks right. Do not soften this into a merge as a convenience.
+//
+// A duplicate whose discriminator carries the local-type-graph suffix is diagnosed
+// as that disclosed class; one WITHOUT the suffix is an unknown class and keeps
+// the generic wording, because the diagnosis cannot be proven for it.
+func panicOnDuplicateSortKey(nodes []*Node) {
+	for i := 1; i < len(nodes); i++ {
+		prev, cur := nodes[i-1], nodes[i]
+		if prev.Func == cur.Func || prev.FQN != cur.FQN {
+			continue
+		}
+		key := features.InstanceDiscriminator(prev.Func)
+		if key == features.InstanceDiscriminator(cur.Func) {
+			panic(duplicateSortKeyDiagnostic(prev.FQN, key, prev.Func))
+		}
+	}
+}
+
+// duplicateSortKeyDiagnostic renders the refusal. A refusal in the disclosed
+// residual class is a user-facing failure on a VALID Go program, so it must say
+// what was refused, WHY, that this is a disclosed limit rather than a crash, and
+// what the user can change. It is deterministic: no pointer values, no map-ordered
+// content, no wall clock — the named declaration is the first @site-bearing node
+// of the shared discriminator, in node-id order.
+//
+// The disclosed wording is used only when the discriminator carries the
+// local-type-graph suffix AND a local declaration can be named. Anything else gets
+// the generic wording: asserting the diagnosis on a key that does not carry its
+// signature would be laundering a guess into a claim.
+//
+// The position is rendered by LocalDeclaration.Location, NOT by the site bytes the
+// key carries. "main.go:98" reads as line 98 to every human who has ever seen a
+// compiler error, and 98 is a byte offset — in the boxwit witness, into a
+// twelve-line file. The key keeps the offset for the reasons in features' site();
+// none of them is a reason to show it that way.
+func duplicateSortKeyDiagnostic(fqn, key string, fn *ssa.Function) string {
+	decl, ok := features.FirstLocalDeclaration(fn)
+	if !ok || !features.HasLocalTypeGraph(key) {
+		return fmt.Sprintf(
+			"callgraph: two distinct functions share sort key %q (discriminator %q) — cannot order deterministically",
+			fqn, key,
+		)
+	}
+	return fmt.Sprintf(residualCollisionDiagnostic, fqn, decl.Name, decl.Location(), fqn, key)
+}
+
+// residualCollisionDiagnostic is the exact text ratified in "Residual undecided
+// classes" of the design — byte-identical to that section's "Exact text" block.
+// Its %s/%q verbs are, in order: FQN, local type name, DISPLAY LOCATION (the
+// third verb is LocalDeclaration.Location, not the key's site bytes), FQN,
+// discriminator. Rewording it is a spec change, not an edit.
+//
+// It states NO instantiation count. The class has two doors — a generic
+// instantiated more than once, or an analyzed set holding the generic's
+// uninstantiated body alongside ONE instantiation — and the guard establishes
+// neither: it sees two *ssa.Function with one key, not how they were produced.
+// Nor does the algorithm decide it. Whole-program cha always analyzes
+// uninstantiated bodies, and rta/vta do too whenever an exported generic is a
+// library unit's discovered root (fixture n1lib), so a message tailored on
+// g.Algo would still assert a count that is false. The earlier text claimed
+// "instantiates more than once" and offered "instantiate it only once" as a
+// remedy; both are wrong for a one-instantiation program, and the second reads
+// as the tool being broken to the user who already satisfies it.
+const residualCollisionDiagnostic = `callgraph: refusing to order two distinct instances of
+    %s
+
+WHY: both instances were produced from ONE declaration of the function-local
+type %q at %s, inside a generic function, and in both the type has identical
+structure. One declaration means one source position, and equal structure means
+equal structure — so neither position nor structure can tell the instances
+apart. flowmap will not invent an order it cannot derive from the source: a
+run-varying "canonical" order would silently change every downstream verdict,
+snapshot, and gate.
+
+HOW THE ANALYSIS GOT TWO OF THEM: either the enclosing generic function is
+instantiated more than once, or the analyzed set holds its UNINSTANTIATED body
+alongside a single instantiation — which is what --algo cha does for the whole
+program, and what root discovery does when an exported generic is a library
+unit's entry point. flowmap does not report which: it refused on the key, and
+the key does not record it.
+
+This is a DISCLOSED LIMIT of the function-local type discriminator, not a crash
+and not a defect in your program. See "Residual undecided classes" in
+docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+
+WHAT YOU CAN DO — any one of:
+  * give the local type a structure that depends on the enclosing type
+    parameter, so the instances differ:
+        type L struct{ A int }        // indistinguishable
+        type L struct{ A int; _ X }   // distinguishable — mentions X
+  * move the type declaration out of the generic function (package scope, or a
+    non-generic helper called from it);
+  * shrink the analyzed set to ONE instance of the enclosing generic body:
+    instantiate the generic once AND keep its uninstantiated body out of the
+    analysis (see HOW above).
+
+If your program does not match that shape, this is an UNKNOWN collision class,
+not the disclosed one — please report it with this message; the correct fix is a
+further refinement of the key, never a merge.
+
+sort key:      %s
+discriminator: %q`
 
 // edgeLess orders edges by callee then caller then call-site position, a total
 // order over the de-duplicated edge set.

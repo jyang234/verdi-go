@@ -41,7 +41,12 @@ jobs:
           golangci-lint run
       - name: gofmt
         run: make fmt-check # names the offending files on failure, unlike a bare test -z
-      - run: go test -race ./...
+      # -timeout replaces go's PER-PACKAGE 600s default, which the static packages
+      # outgrew under -race (graphio has been observed at 579s on these runners).
+      # Kept byte-identical to the Makefile's RACE_TIMEOUT by ciparity's
+      # TestRaceTimeoutParity — raising it here alone would restore exactly the
+      # local/CI split-brain that guard exists to forbid.
+      - run: go test -race -timeout 30m ./...
       # Mirrors Makefile's `fixture` target exactly: both loansvc and impeachsvc
       # snapshot goldens are gated here, so the behavioral-impeachment golden (a
       # missed-route DB DELETE) can no longer regress without CI noticing.

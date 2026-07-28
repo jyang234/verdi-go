@@ -123,3 +123,43 @@ func TestMermaidDiffDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestNodeIndexRepresentativeIsSliceOrderIndependent pins nodeIndex against the duplicate
+// node RECORD the graph is required to keep: several records can share one display FQN (a
+// generic instantiated at two function-local types), and the diff picks ONE representative
+// per FQN. Picking the arrival-order last writer made the delta a function of slice order —
+// the same base, reordered, reported `nodes_changed` empty in one order and populated in
+// the other. Both exported consumers of the index (Delta and MermaidDiff) must be blind to
+// the order the records arrive in.
+func TestNodeIndexRepresentativeIsSliceOrderIndependent(t *testing.T) {
+	const fqn = "example.com/p.report[example.com/p.result]"
+	lo := Node{
+		FQN: fqn, Sig: "func p.report[T any](v T) string", Tier: 3,
+		Package: "example.com/p", File: "p.go", Line: 5, EndLine: 7,
+	}
+	hi := lo
+	hi.Tier = 1
+
+	forward := &Graph{Algo: "rta", Nodes: []Node{lo, hi}}
+	reversed := &Graph{Algo: "rta", Nodes: []Node{hi, lo}}
+	branch := &Graph{Algo: "rta", Nodes: []Node{hi}}
+
+	fwd, err := json.Marshal(Delta(forward, branch))
+	if err != nil {
+		t.Fatalf("marshal forward delta: %v", err)
+	}
+	rev, err := json.Marshal(Delta(reversed, branch))
+	if err != nil {
+		t.Fatalf("marshal reversed delta: %v", err)
+	}
+	if string(fwd) != string(rev) {
+		t.Errorf("Delta depends on node slice order — the representative must be the\n"+
+			"per-FQN maximum under nodeLess, not the arrival-order last writer\nforward:  %s\nreversed: %s", fwd, rev)
+	}
+
+	fwdMD := MermaidDiff(forward, branch, MermaidOptions{MaxTier: 0})
+	revMD := MermaidDiff(reversed, branch, MermaidOptions{MaxTier: 0})
+	if fwdMD != revMD {
+		t.Errorf("MermaidDiff depends on node slice order\nforward:\n%s\nreversed:\n%s", fwdMD, revMD)
+	}
+}

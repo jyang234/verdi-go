@@ -30,6 +30,7 @@ use (
 	./testdata/fixtures/escapemodessvc
 	./testdata/fixtures/ifaceunionsvc
 	./testdata/fixtures/mwchainsvc
+	./testdata/fixtures/inpkgtestsvc
 	./testdata/groundwork/blindsvc
 	./testdata/groundwork/layeredsvc
 	./testdata/groundwork/obligsvc

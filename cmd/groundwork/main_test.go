@@ -391,3 +391,51 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = orig
 	return <-done
 }
+
+// TestReachNotFoundCountsIndexedFunctions pins the not-found message against a graph
+// whose display FQN carries several node records (a generic instantiated at two
+// function-local types — legal, and the local generic type identity design keeps every
+// instance). The lookup that just failed was made against the FQN-KEYED index, so the
+// "it has N" must describe THAT universe: reporting the raw nodes[] length told a user
+// "7 nodes" about an index holding 5. The raw total is not dropped for it — it rides the
+// shared record disclosure — and a duplicate-free graph says nothing extra.
+func TestReachNotFoundCountsIndexedFunctions(t *testing.T) {
+	const dupGraph = `{
+  "algo":"rta",
+  "nodes":[
+    {"fqn":"svc.alpha","sig":"func()","tier":3},
+    {"fqn":"svc.beta","sig":"func()","tier":3},
+    {"fqn":"svc.gamma","sig":"func()","tier":3},
+    {"fqn":"svc.main","sig":"func()","tier":1},
+    {"fqn":"svc.report[svc.result]","sig":"func()","tier":3},
+    {"fqn":"svc.report[svc.result]","sig":"func()","tier":3},
+    {"fqn":"svc.report[svc.result]","sig":"func()","tier":3}
+  ],
+  "edges":[]
+}`
+	const cleanGraph = `{
+  "algo":"rta",
+  "nodes":[{"fqn":"svc.alpha","sig":"func()","tier":3}],
+  "edges":[]
+}`
+	for _, tc := range []struct {
+		name, graph, want string
+	}{
+		{"collapsed", dupGraph, `no function "svc.nope" in graph (it has 5 nodes (7 instance records))`},
+		{"duplicate-free", cleanGraph, `no function "svc.nope" in graph (it has 1 nodes)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "g.json")
+			if err := os.WriteFile(path, []byte(tc.graph), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := run([]string{"reach", path, "svc.nope"})
+			if err == nil {
+				t.Fatal("reach on an unknown fqn = nil, want an error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Errorf("reach error:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}

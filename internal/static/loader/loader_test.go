@@ -1,8 +1,12 @@
 package loader_test
 
 import (
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jyang234/golang-code-graph/internal/static/loader"
@@ -151,5 +155,86 @@ func TestLoadExcludesTestOnlyPackages(t *testing.T) {
 		if len(p.CompiledGoFiles) == 0 {
 			t.Errorf("package %q has no production Go files and should have been filtered", p.PkgPath)
 		}
+	}
+}
+
+// TestLoadExcludesInPackageTestVariants pins Load's Tests: false behaviorally,
+// not by reading the field. Under Tests: true go/packages also returns the
+// in-package test variant, which reports the SAME PkgPath over the SAME files at
+// the SAME byte offsets as the real package — a pair the function-local type
+// discriminator cannot separate, because its declaration sites are qualified by
+// package PATH. That would be a new, correctly fail-closed collision class, so
+// the flip must be a deliberate decision with the design revisited, never a
+// drive-by. See "Physical position" in
+// docs/superpowers/specs/2026-07-26-local-generic-type-identity-design.md.
+//
+// It reads inpkgtestsvc, NOT loansvc, so that flipping the field fails on the
+// assertions below rather than on something incidental. loansvc's behavioral-gate
+// tests pull dependencies its go.mod does not declare for test loading, so
+// `go list -test` there can fail with "updates to go.mod needed" — a tripwire that
+// fires, but with a message pointing at the wrong thing. inpkgtestsvc declares no
+// dependencies and its test file imports only "testing", and — unlike every other
+// fixture — its test file is IN-PACKAGE, which is what produces the same-PkgPath
+// variant this test is actually about.
+func TestLoadExcludesInPackageTestVariants(t *testing.T) {
+	dir := inPkgTestFixtureDir()
+	assertInPackageTestFile(t, dir)
+
+	svc, err := loader.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	byPath := make(map[string]string, len(svc.Packages))
+	for _, p := range svc.Packages {
+		if strings.Contains(p.ID, ".test") || strings.Contains(p.ID, "[") {
+			t.Errorf("loaded test-variant package %q; Load must set Tests: false", p.ID)
+		}
+		if prev, ok := byPath[p.PkgPath]; ok {
+			t.Errorf("package path %q loaded twice, as %q and %q", p.PkgPath, prev, p.ID)
+		}
+		byPath[p.PkgPath] = p.ID
+	}
+}
+
+func inPkgTestFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "testdata", "fixtures", "inpkgtestsvc")
+}
+
+// assertInPackageTestFile keeps the tripwire ARMED. Its whole mechanism is that
+// the fixture holds a test file in the PRODUCTION package: only that yields the
+// `pkg [pkg.test]` variant whose PkgPath duplicates the real one. Moving the file
+// to an external `_test` package, or deleting it, would leave a fixture that
+// still loads, still passes, and proves nothing — a silently disarmed guard.
+func assertInPackageTestFile(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	var prod, inPkg []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".go" {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.PackageClauseOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if !strings.HasSuffix(name, "_test.go") {
+			prod = append(prod, f.Name.Name)
+			continue
+		}
+		if !strings.HasSuffix(f.Name.Name, "_test") {
+			inPkg = append(inPkg, name)
+		}
+	}
+	if len(prod) == 0 {
+		t.Fatalf("fixture %s has no production package", dir)
+	}
+	if len(inPkg) == 0 {
+		t.Fatalf("fixture %s has no IN-PACKAGE test file; the Tests tripwire is disarmed", dir)
 	}
 }

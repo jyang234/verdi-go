@@ -119,6 +119,15 @@ type ChangedFn struct {
 // carries the verified "what this MR does" delta — the sound boundary-effect and entrypoint
 // movement (a floor: the blind zones are where it is incomplete).
 type Report struct {
+	// BaseNodes/BranchNodes are each side's RAW nodes[] length — node RECORDS, not
+	// distinct functions. That is deliberate and it is the honest reading here: this is a
+	// graph-SIZE stat ("how big were the two artifacts I compared"), so it must not fold
+	// anything away, and unlike an FQN-keyed count (graphio's component rollup, the claims
+	// node universe, `groundwork reach`'s not-found message) it describes exactly the array
+	// it measures. A display FQN can carry several records (a generic instantiated at two
+	// function-local types), so on such a graph these can exceed the distinct-function
+	// counts those FQN-keyed surfaces report — expected, not a disagreement. Do not
+	// "align" them to distinct FQNs without also deciding what the size stat should mean.
 	BaseNodes   int         `json:"base_nodes"`
 	BranchNodes int         `json:"branch_nodes"`
 	NewBlind    []ChangedFn `json:"new_blind,omitempty"`
