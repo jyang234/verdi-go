@@ -2,6 +2,7 @@ package fitness
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -162,6 +163,440 @@ func TestMustNotReachProvenAbsentIsSilent(t *testing.T) {
 	res := Check(p, graph.NewIndex(g))
 	if len(res.Findings) != 0 {
 		t.Fatalf("a proven-absent rule must be silent; got %v", res.Findings)
+	}
+}
+
+// TestReachCharacterization pins every Finding field emitted by must_not_reach
+// before its binding, traversal, and blind-frontier facts move to the shared
+// facts package. Presentation changes require an explicit compatibility review.
+//
+// The three "canonical ... within one owner/site" cases are the deliberate
+// exceptions and therefore FAIL against the pre-extraction probe: each pins a
+// declared post-extraction correction that the shuffle-invariance contract
+// required (an intrinsic key where the old probe read producer emission order).
+// See their case comments. Every other case is base parity.
+func TestReachCharacterization(t *testing.T) {
+	const (
+		source = "svc.A"
+		mid    = "svc.Mid"
+		other  = "svc.Other"
+		target = "boundary:db UPDATE users"
+	)
+
+	baseGraph := func() *graph.Graph {
+		return &graph.Graph{
+			Nodes: []graph.Node{
+				{FQN: source},
+				{FQN: mid},
+				{FQN: other},
+			},
+			Edges: []graph.Edge{
+				{From: source, To: mid},
+				{From: other, To: target, Boundary: "outbound-sync"},
+			},
+		}
+	}
+	rule := func() policy.ReachRule {
+		return policy.ReachRule{
+			Name: "no-write",
+			From: []string{source},
+			To:   []string{"boundary:db UPDATE"},
+		}
+	}
+
+	tests := []struct {
+		name string
+		g    func() *graph.Graph
+		rule func() policy.ReachRule
+		want []Finding
+	}{
+		{
+			name: "reachable violation",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.Edges = append(g.Edges, graph.Edge{
+					From: mid, To: target, Boundary: "outbound-sync",
+				})
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE users",
+				From:     source,
+				To:       target,
+				Detail:   "",
+			}},
+		},
+		{
+			name: "function target precedes a nearer boundary target",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: mid},
+						{FQN: "svc.Target"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: target, Boundary: "outbound-sync"},
+						{From: source, To: mid},
+						{From: mid, To: "svc.Target"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"boundary:db UPDATE", "svc.Target"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches svc.Target",
+				From:     source,
+				To:       "svc.Target",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "lexicographic reachable target precedes BFS discovery order",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: "svc.AParent"},
+						{FQN: "svc.ZParent"},
+						{FQN: "svc.targets.ATarget"},
+						{FQN: "svc.targets.ZTarget"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.AParent"},
+						{From: "svc.AParent", To: "svc.targets.ZTarget"},
+						{From: source, To: "svc.ZParent"},
+						{From: "svc.ZParent", To: "svc.targets.ATarget"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"svc.targets"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches svc.targets.ATarget",
+				From:     source,
+				To:       "svc.targets.ATarget",
+				Detail:   "",
+			}},
+		},
+		{
+			// Base-parity pin (F7). Two owners carry a matching effect at different
+			// BFS depths. Precedence across owners is CONE order — the source, then
+			// the reachable functions lexicographically — so svc.ADeep wins even
+			// though svc.ZNear is one hop nearer. The labels are chosen so cone
+			// order, BFS-level order and a global label sort all disagree: a
+			// level-first walk answers "alpha", a global (To, From) sort answers
+			// "alpha", only cone order answers "zeta". The cone is sorted, so this
+			// precedence is already independent of the graph's input order and
+			// nothing about shuffle-invariance licensed changing it.
+			name: "cone owner order decides between boundary effects at different depths",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source}, {FQN: "svc.ZNear"}, {FQN: "svc.ADeep"},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.ZNear"},
+						{From: "svc.ZNear", To: "boundary:db UPDATE alpha", Boundary: "outbound-sync"},
+						{From: "svc.ZNear", To: "svc.ADeep"},
+						{From: "svc.ADeep", To: "boundary:db UPDATE zeta", Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE zeta",
+				From:     source,
+				To:       "boundary:db UPDATE zeta",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately. graph.Load does not
+			// sort the edge list, so the pre-extraction walk named whichever of one
+			// owner's matching effects the PRODUCER happened to emit first (zeta
+			// here) — the witness moved with input order for a graph that is
+			// semantically identical, which the plan's shuffle-invariance
+			// requirement forbids. Within one owner the canonical (To, From)
+			// minimum is taken instead, so the witness is a pure function of the
+			// graph's content. Cross-owner precedence is untouched (see above).
+			name: "canonical effect within one owner over reversed declaration order",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{{FQN: source}, {FQN: mid}},
+					Edges: []graph.Edge{
+						{From: source, To: mid},
+						{From: mid, To: "boundary:db UPDATE zeta", Boundary: "outbound-sync"},
+						{From: mid, To: "boundary:db UPDATE alpha", Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: svc.A reaches boundary:db UPDATE alpha",
+				From:     source,
+				To:       "boundary:db UPDATE alpha",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately — the same input-order
+			// dependence as above, on the blind-spot manifest. graph.Load does not
+			// sort BlindSpots, so the pre-extraction probe named the first
+			// non-disclosure spot the PRODUCER emitted at the site ("unsafe" here).
+			// Selection within one site is now the canonical (Kind, Site, Detail,
+			// Location) minimum, matching the precedent the concurrent path already
+			// declared. Which SITE is chosen still follows cone order.
+			name: "canonical blind spot within one site over adversarial manifest order",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{
+					{Kind: "unsafe", Site: mid, Detail: "zeta"},
+					{Kind: "reflect", Site: mid, Detail: "alpha"},
+				}
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately — the third and last
+			// site the shuffle-invariance contract required an intrinsic key at, and
+			// the only one that had no case. blindForCone's doc declares it ("the
+			// dynamic loop below owns the second"), but nothing enforced it: replacing
+			// the dynamic witness selection with the site's MAXIMUM left the whole
+			// ./internal/groundwork/... suite green. Two dynamic effects at ONE owner,
+			// declared largest-first: the pre-extraction probe returned the first
+			// dynamic edge in an unsorted edge list, so the disclosed site moved with
+			// producer emission order on a semantically identical graph. WHICH owner is
+			// chosen is untouched — that stays cone order, pinned by the case below.
+			name: "canonical dynamic effect within one owner over reversed declaration order",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.Edges = append(g.Edges,
+					graph.Edge{From: mid, To: "boundary:db Exec <dynamic>", Boundary: "outbound-sync"},
+					graph.Edge{From: mid, To: "boundary:db Call <dynamic>", Boundary: "outbound-sync"},
+				)
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (unresolved boundary effect boundary:db Call <dynamic>) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			// Base-parity pin (F7/F8). With every function and package site visible,
+			// the dynamic-effect fallback picks the FIRST owner in cone order that
+			// makes one — the source before any callee — not the globally smallest
+			// (Site, Detail). The source sorts LAST here, so a global sort would
+			// name svc.AMid's effect instead.
+			name: "source dynamic effect precedes a callee's",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: "svc.ZSrc"}, {FQN: "svc.AMid"}, {FQN: other},
+					},
+					Edges: []graph.Edge{
+						{From: "svc.ZSrc", To: "svc.AMid"},
+						{From: "svc.ZSrc", To: "boundary:db Exec <dynamic>", Boundary: "outbound-sync"},
+						{From: "svc.AMid", To: "boundary:db Scan <dynamic>", Boundary: "outbound-sync"},
+						{From: other, To: target, Boundary: "outbound-sync"},
+					},
+				}
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.From = []string{"svc.ZSrc"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (unresolved boundary effect boundary:db Exec <dynamic>) — cannot prove absence",
+				From:     "svc.ZSrc",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "proven absence",
+			g:    baseGraph,
+			rule: rule,
+			want: nil,
+		},
+		{
+			name: "blind frontier caution",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{{
+					Kind: "reflect", Site: mid, Detail: "opaque dispatch",
+				}}
+				return g
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "lexicographic cone function chooses blind evidence before BFS distance",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{
+						{FQN: source},
+						{FQN: "svc.ZNear"},
+						{FQN: "svc.ADeep"},
+						{FQN: other},
+					},
+					Edges: []graph.Edge{
+						{From: source, To: "svc.ZNear"},
+						{From: "svc.ZNear", To: "svc.ADeep"},
+						{From: other, To: target, Boundary: "outbound-sync"},
+					},
+					BlindSpots: []graph.BlindSpot{
+						{Kind: "unsafe", Site: "svc.ZNear", Detail: "near"},
+						{Kind: "reflect", Site: "svc.ADeep", Detail: "deep"},
+					},
+				}
+			},
+			rule: rule,
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.ADeep) — cannot prove absence",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "require proof blind frontier violation",
+			g: func() *graph.Graph {
+				g := baseGraph()
+				g.BlindSpots = []graph.BlindSpot{{
+					Kind: "reflect", Site: mid, Detail: "opaque dispatch",
+				}}
+				return g
+			},
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.RequireProof = true
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "no-write: no path found, but the frontier is blind (reflect at svc.Mid) — require_proof is set and absence cannot be proven",
+				From:     source,
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "unbound source",
+			g:    baseGraph,
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.From = []string{"svc.Missing"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: from binds nothing in this graph — inert rule",
+				From:     "",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "unbound target",
+			g:    baseGraph,
+			rule: func() policy.ReachRule {
+				r := rule()
+				r.To = []string{"boundary:db DELETE"}
+				return r
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Caution,
+				Summary:  "no-write: to binds nothing in this graph — name a first-party sink it can bind, or this invariant is vacuous",
+				From:     "",
+				To:       "",
+				Detail:   "",
+			}},
+		},
+		{
+			name: "entrypoint star",
+			g: func() *graph.Graph {
+				return &graph.Graph{
+					Nodes: []graph.Node{{FQN: source}, {FQN: mid}},
+					Edges: []graph.Edge{{From: source, To: mid}},
+				}
+			},
+			rule: func() policy.ReachRule {
+				return policy.ReachRule{
+					Name: "entrypoint-no-mid",
+					From: []string{policy.EntrypointSelector},
+					To:   []string{mid},
+				}
+			},
+			want: []Finding{{
+				Rule:     "must_not_reach",
+				Severity: Violation,
+				Summary:  "entrypoint-no-mid: svc.A reaches svc.Mid",
+				From:     source,
+				To:       mid,
+				Detail:   "",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &policy.Policy{
+				Service: "svc", Version: 1,
+				MustNotReach: []policy.ReachRule{tt.rule()},
+			}
+			got := Check(p, graph.NewIndex(tt.g())).Findings
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("findings changed\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
 	}
 }
 

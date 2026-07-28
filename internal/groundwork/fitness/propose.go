@@ -278,8 +278,9 @@ func proposeWaypoint(ix *graph.Index, p *policy.Policy, g *guide) {
 	// the deliberate mirror of the enforcer this rule feeds, the same discipline
 	// readOnlyCone documents for the read-only proposer: checkMustPassThrough binds
 	// this rule's From (always policy.EntrypointSelector, set below) through
-	// bindFroms→expandFroms, and expandFroms resolves entrypoint:* to EXACTLY
-	// ix.Sources(). The entrypoint selector does NOT name-expand to $N closures —
+	// facts.BindSources, the same implementation exposed here as expandFroms, and
+	// it resolves entrypoint:* to EXACTLY ix.Sources(). The entrypoint selector does
+	// NOT name-expand to $N closures —
 	// only an explicit-FQN from-entry does (the read-only rule's case, which
 	// readOnlyCone mirrors with expandFroms). So the proposer and the gate walk the
 	// identical source set with the identical guardedWalk: a `through` that guardsAll
@@ -545,10 +546,10 @@ func proposeReadOnly(ix *graph.Index, p *policy.Policy, g *guide) {
 // readOnlyCone returns the reachability cone proposeReadOnly judges a route source
 // over, computed so the read-only verdict matches what fitness will ENFORCE.
 //
-// checkMustNotReach binds a from-entry through expandFroms (matchNodes/matchAny),
-// which — beyond the source itself — binds the source's generated CLOSURE family,
-// its `$N` closures, joined to the source FQN at the `$` identifier boundary.
-// readOnlyCone reuses that SAME expandFroms primitive rather than re-deriving a
+// checkMustNotReach binds a from-entry through facts.BindSources, which — beyond
+// the source itself — binds the source's generated CLOSURE family, its `$N`
+// closures, joined to the source FQN at the `$` identifier boundary. readOnlyCone
+// reuses that SAME implementation through expandFroms rather than re-deriving a
 // private match, so the proposer and the gate expand a from-entry identically. On
 // an oapi-codegen strict-server wrapper — a graph root whose static out-edges stop
 // at the chi router before its own per-handler `$1` closure (the forward seam) —

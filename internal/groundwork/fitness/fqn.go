@@ -8,9 +8,9 @@ package fitness
 import (
 	"strings"
 
+	"github.com/jyang234/golang-code-graph/internal/boundarylabel"
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
-	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
-	"github.com/jyang234/golang-code-graph/internal/groundwork/setutil"
 )
 
 // PkgOf returns the import path of the package that declares the function named
@@ -22,40 +22,7 @@ import (
 // Type arguments on a generic receiver or function (a "[...]" suffix) are
 // stripped before the package is read off. An FQN that does not parse yields "".
 func PkgOf(fqn string) string {
-	s := fqn
-	if strings.HasPrefix(s, "(") {
-		end := strings.IndexByte(s, ')')
-		if end < 0 {
-			return ""
-		}
-		s = strings.TrimPrefix(s[1:end], "*")
-	}
-	return pkgFromQualified(stripTypeArgs(s))
-}
-
-// pkgFromQualified reads the package path off a qualified name "<pkgpath>.<sym>".
-// The symbol separator is the first '.' in the final '/'-segment, because a Go
-// package's final path element is an identifier (no dot), while the path prefix
-// may contain dots (example.com).
-func pkgFromQualified(s string) string {
-	prefix, seg := "", s
-	if slash := strings.LastIndexByte(s, '/'); slash >= 0 {
-		prefix, seg = s[:slash+1], s[slash+1:]
-	}
-	dot := strings.IndexByte(seg, '.')
-	if dot < 0 {
-		return s
-	}
-	return prefix + seg[:dot]
-}
-
-// stripTypeArgs removes a "[...]" generic type-argument suffix, which can itself
-// contain '/' and '.' and would otherwise confuse package extraction.
-func stripTypeArgs(s string) string {
-	if i := strings.IndexByte(s, '['); i >= 0 {
-		return s[:i]
-	}
-	return s
+	return facts.PackageOf(fqn)
 }
 
 // ShortName renders an FQN compactly for summaries — it drops the module path
@@ -70,73 +37,41 @@ func ShortName(fqn string) string {
 	return strings.ReplaceAll(s, ")", "")
 }
 
-// MatchesAny is the exported form of the rule-pattern matcher, for surfaces
-// (the ground card) that must answer "does this rule bind this symbol?" with
-// EXACTLY the semantics the checks use — a second matcher is how a card
-// promises a guardrail that does not actually bind.
-func MatchesAny(s string, patterns []string) bool { return matchAny(s, patterns) }
-
-// matchAny reports whether s equals any pattern or is bound by one as a prefix
-// AT AN IDENTIFIER BOUNDARY. It delegates to policy.MatchPrefix — the ONE
-// boundary-aware matcher shared by every gate, ratchet, and layer assignment — so
-// the rule-pattern matcher here can never diverge from the matcher the gates use.
-// A prefix binds only when the byte of s immediately after the pattern is a
-// non-identifier byte (e.g. '.', '$', '/', '[', ' '), so a pattern can name a
-// function, a receiver type, a whole package, or a boundary system and bind all
-// its members — `(*pkg.T)` → `(*pkg.T).M`, `pkg` → `pkg.Fn`, `Fn` → its generated
-// closures `Fn$1`, `boundary:bus PUBLISH` → `... orders` — without a textual prefix
-// that splits an identifier and binds an UNRELATED symbol. The bare-HasPrefix form
-// let `GetUser` bind the distinct route `GetUserAvatar` (and a package `app` bind
-// `apps`): the prefix-collision that let init's read-only proposal sweep in a
-// sibling route's writes and mis-attribute its effects (R7 review). An exact match
-// always binds.
-func matchAny(s string, patterns []string) bool {
-	for _, p := range patterns {
-		if policy.MatchPrefix(s, p) {
-			return true
-		}
+// shortTarget renders a must-not-reach/must-pass-through TARGET for a summary.
+// A target is either a function FQN or a boundary-effect label, and the two need
+// opposite treatment: an FQN is shortened, a boundary label is printed verbatim.
+// The label is a canonical string the reader acts on — the route template and the
+// SQL statement ARE the evidence — and ShortName is an FQN shortener, so applying
+// it to a label truncates at the last "/" and deletes "*" and ")":
+// "boundary:peer POST /charge/{id}" would become "{id}", "boundary:db SELECT
+// count(*)" would become "count(". Summary is part of Finding.Key(), so that
+// rewrite would also churn the base-vs-branch diff and can reorder Result.sort().
+// The prefix test lives here once (boundarylabel owns the literal) so no caller
+// re-types it. Every target renderer goes through it: must_pass_through's summary
+// and renderBypassPath, and no_concurrent_reach's hit summary — so the three
+// cannot drift apart on how they spell the same effect.
+func shortTarget(value string) string {
+	if strings.HasPrefix(value, boundarylabel.Prefix) {
+		return value
 	}
-	return false
+	return ShortName(value)
 }
 
-// bindFroms is the ONE entry by which a From-bearing rule kind
-// (must_not_reach, must_pass_through, and any future rule) binds its sources:
-// it expands the From selectors and, when the whole From binds nothing,
-// discloses the inert rule on the result and returns nil. Expansion and
-// disclosure are fused deliberately — a check that expands without the
-// disclosure is how a renamed package turns a safety rule into a silent
-// forever-pass, the inert-guardrail failure mode.
-func bindFroms(ix *graph.Index, r *Result, kind, name string, from []string, requireProof bool) []string {
-	froms := expandFroms(ix, from)
-	if len(froms) == 0 {
-		r.add(inertRuleFinding(kind, name, requireProof))
-		return nil
-	}
-	return froms
+// MatchesAny is the compatibility form of facts.MatchesAny for surfaces that
+// have not yet migrated their imports.
+func MatchesAny(s string, patterns []string) bool { return matchAny(s, patterns) }
+
+// matchAny delegates rich-selector matching to facts, the single owner of
+// policy.MatchPrefix semantics.
+func matchAny(s string, patterns []string) bool {
+	return facts.MatchesAny(s, patterns)
 }
 
 // expandFroms expands a rule's From selectors against the graph: the
 // "entrypoint:*" selector matches every graph source, anything else is an FQN
-// exact-or-prefix pattern. The union is sorted and de-duplicated. Checks call
-// bindFroms, not this, so the inert-rule disclosure cannot be forgotten.
+// exact-or-prefix pattern. It delegates binding to facts so fitness and claims
+// cannot diverge. The proposal lens retains this compatibility name while
+// verdict-bearing checks consume complete typed fact results.
 func expandFroms(ix *graph.Index, patterns []string) []string {
-	var pats []string
-	entry := false
-	for _, p := range patterns {
-		if p == policy.EntrypointSelector {
-			entry = true
-		} else {
-			pats = append(pats, p)
-		}
-	}
-	set := map[string]bool{}
-	if entry {
-		for _, s := range ix.Sources() {
-			set[s] = true
-		}
-	}
-	for _, fqn := range matchNodes(ix, pats) {
-		set[fqn] = true
-	}
-	return setutil.SortedKeys(set)
+	return facts.BindSources(ix, patterns)
 }

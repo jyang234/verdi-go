@@ -61,6 +61,10 @@ func testGraph() *graph.Graph {
 
 func intp(i int) *int { return &i }
 
+func sel(v string) Selectors {
+	return Selectors{values: []string{v}}
+}
+
 func evalOne(t *testing.T, c Claim) Result {
 	t.Helper()
 	rep := Evaluate(testGraph(), &File{Claims: []Claim{c}})
@@ -77,26 +81,26 @@ func TestUniquePairDedup(t *testing.T) {
 	if rep.NumUniquePairs != 4 {
 		t.Errorf("NumUniquePairs = %d, want 4", rep.NumUniquePairs)
 	}
-	r := evalOne(t, Claim{Kind: "edge_count", From: "App).Create", To: "repo.Store).Save", Eq: intp(1)})
+	r := evalOne(t, Claim{Kind: "edge_count", From: sel("App).Create"), To: sel("repo.Store).Save"), Eq: intp(1)})
 	if r.Outcome != Pass {
 		t.Errorf("edge_count over deduped pair = %+v, want Pass", r)
 	}
 }
 
 func TestEdgePassFail(t *testing.T) {
-	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save"}); r.Outcome != Pass {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save")}); r.Outcome != Pass {
 		t.Errorf("edge present = %+v, want Pass", r)
 	}
-	if r := evalOne(t, Claim{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}); r.Outcome != Fail {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("repo.Store).Save"), To: sel("App).Create")}); r.Outcome != Fail {
 		t.Errorf("edge absent = %+v, want Fail", r)
 	}
 }
 
 func TestNoEdgePassFailWithOffenders(t *testing.T) {
-	if r := evalOne(t, Claim{Kind: "no_edge", From: "repo.Store).Save", To: "App).Create"}); r.Outcome != Pass {
+	if r := evalOne(t, Claim{Kind: "no_edge", From: sel("repo.Store).Save"), To: sel("App).Create")}); r.Outcome != Pass {
 		t.Errorf("no_edge on absent = %+v, want Pass", r)
 	}
-	r := evalOne(t, Claim{Kind: "no_edge", From: "App).Create", To: "repo.Store).Save"})
+	r := evalOne(t, Claim{Kind: "no_edge", From: sel("App).Create"), To: sel("repo.Store).Save")})
 	if r.Outcome != Fail {
 		t.Fatalf("no_edge on present = %+v, want Fail", r)
 	}
@@ -108,7 +112,7 @@ func TestNoEdgePassFailWithOffenders(t *testing.T) {
 func TestNoEdgeErrorsOnUnresolvedEndpoint(t *testing.T) {
 	// no_edge is NOT no_node: an endpoint that fails to resolve is an ERROR, not
 	// a vacuous pass. (Only no_node treats zero matches as the pass.)
-	r := evalOne(t, Claim{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"})
+	r := evalOne(t, Claim{Kind: "no_edge", From: sel("App).Create"), To: sel("does.Not.Exist")})
 	if r.Outcome != Errored {
 		t.Errorf("no_edge with unresolved endpoint = %+v, want Errored", r)
 	}
@@ -142,24 +146,24 @@ func TestPerSideEnforcement(t *testing.T) {
 	// A plain endpoint that suffix-matches BOTH Score functions is AMBIGUOUS —
 	// an ERROR — even though the other side is a precise regex. A regex on one
 	// side does not relax the uniqueness the plain side implies.
-	r := evalOne(t, Claim{Kind: "edge", From: ".Score", To: `/repo\.Store\).Save$/`})
+	r := evalOne(t, Claim{Kind: "edge", From: sel(".Score"), To: sel(`/repo\.Store\).Save$/`)})
 	if r.Outcome != Errored {
 		t.Fatalf("ambiguous plain side under a regex other side = %+v, want Errored", r)
 	}
 	// The precise regex side alone (unique plain other side) resolves and passes.
-	if r := evalOne(t, Claim{Kind: "edge", From: "scoring.Score", To: `/repo\.Store\).Save$/`}); r.Outcome != Pass {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("scoring.Score"), To: sel(`/repo\.Store\).Save$/`)}); r.Outcome != Pass {
 		t.Errorf("regex to-side edge = %+v, want Pass", r)
 	}
 	// Mirror direction: the same ambiguous plain endpoint on the `to` side, with the
 	// precise regex now on `from`, is still an ERROR — per-side enforcement applies
 	// to both sides independently, not just to `from`.
-	if r := evalOne(t, Claim{Kind: "edge", From: `/repo\.Store\).Save$/`, To: ".Score"}); r.Outcome != Errored {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel(`/repo\.Store\).Save$/`), To: sel(".Score")}); r.Outcome != Errored {
 		t.Errorf("ambiguous plain to-side under a regex from-side = %+v, want Errored", r)
 	}
 }
 
 func TestBoundaryEndpointClaimable(t *testing.T) {
-	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "boundary:db QueryContext"}); r.Outcome != Pass {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("App).Create"), To: sel("boundary:db QueryContext")}); r.Outcome != Pass {
 		t.Errorf("boundary endpoint edge = %+v, want Pass", r)
 	}
 	// out_degree over the endpoint universe counts the boundary target.
@@ -193,7 +197,7 @@ func TestCounterpartAlias(t *testing.T) {
 func TestUnknownKindIsolated(t *testing.T) {
 	// An unknown kind ERRORs its own claim; the surrounding claims still run.
 	rep := Evaluate(testGraph(), &File{Claims: []Claim{
-		{Kind: "edge", From: "App).Create", To: "repo.Store).Save"},
+		{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save")},
 		{Kind: "bogus_kind", FQN: "x"},
 		{Kind: "node", FQN: "App).Create"},
 	}})
@@ -212,7 +216,7 @@ func TestDegreeRequiresEq(t *testing.T) {
 // rather than being silently ignored — the failure mode where `eq` on an `edge`
 // (author meant an absence assertion) would evaluate as a presence check.
 func TestUnexpectedFieldRejected(t *testing.T) {
-	r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Eq: intp(0)})
+	r := evalOne(t, Claim{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save"), Eq: intp(0)})
 	if r.Outcome != Errored {
 		t.Errorf("edge with stray eq = %+v, want Errored (not a silent presence check)", r)
 	}
@@ -298,9 +302,9 @@ func TestDeterministicOverShuffledInput(t *testing.T) {
 		g2.Entrypoints[i], g2.Entrypoints[j] = g2.Entrypoints[j], g2.Entrypoints[i]
 	}
 	cf := &File{Claims: []Claim{
-		{Kind: "no_edge", From: "App).Create", To: "does.Not.Exist"},           // errored
+		{Kind: "no_edge", From: sel("App).Create"), To: sel("does.Not.Exist")}, // errored
 		{Kind: "in_degree", Of: "repo.Store).Save", Eq: intp(3)},               // pass
-		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"},            // fail
+		{Kind: "edge", From: sel("repo.Store).Save"), To: sel("App).Create")},  // fail
 		{Kind: "no_node", FQN: ".Save"},                                        // fail (offenders listed)
 		{Kind: "entrypoint", Name: "GET /widget/7", Fn: "handler.App).Create"}, // errored (disagreeing joins — order-independent)
 	}}
@@ -338,17 +342,54 @@ func TestLoadFileStrict(t *testing.T) {
 	}
 }
 
+func TestStructuralSelectorLists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "selectors.json")
+	data := []byte(`{
+		"claims": [
+			{
+				"id": "list-from",
+				"kind": "edge",
+				"from": ["App).Create"],
+				"to": "repo.Store).Save"
+			},
+			{
+				"id": "list-to",
+				"kind": "edge",
+				"from": "App).Create",
+				"to": ["repo.Store).Save"]
+			}
+		]
+	}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile rejected structural selector lists at file scope: %v", err)
+	}
+
+	report := Evaluate(testGraph(), file)
+	if len(report.Results) != 2 {
+		t.Fatalf("len(Results) = %d, want 2", len(report.Results))
+	}
+	for i, result := range report.Results {
+		if result.Outcome != Errored || result.Reason != ReasonMalformedClaim {
+			t.Errorf("result %d = %+v, want per-claim MALFORMED_CLAIM ERROR", i, result)
+		}
+	}
+}
+
 // TestIDLabelEcho pins that a claim's `id` becomes the report-line label, and
 // an id-less claim falls back to the endpoint-derived label.
 func TestIDLabelEcho(t *testing.T) {
 	// With id: the label is the id verbatim.
-	r := evalOne(t, Claim{ID: "my-check", Kind: "edge", From: "repo.Store).Save", To: "App).Create"})
-	if r.Outcome != Fail || r.Label != "my-check" {
-		t.Errorf("id-labelled claim = %+v, want Fail with Label \"my-check\"", r)
+	r := evalOne(t, Claim{ID: "my-check", Kind: "edge", From: sel("repo.Store).Save"), To: sel("App).Create")})
+	if r.Outcome != Fail || r.ID != "my-check" || r.Label != "my-check" {
+		t.Errorf("id-labelled claim = %+v, want Fail with ID and Label \"my-check\"", r)
 	}
 	// Without id: the endpoint-derived label.
-	if r := evalOne(t, Claim{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}); r.Label != "repo.Store).Save -> App).Create" {
-		t.Errorf("id-less label = %q, want the endpoint-derived label", r.Label)
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("repo.Store).Save"), To: sel("App).Create")}); r.ID != "" || r.Label != "repo.Store).Save -> App).Create" {
+		t.Errorf("id-less result = %+v, want empty ID and endpoint-derived Label", r)
 	}
 }
 
@@ -390,7 +431,7 @@ func TestFnCanonicalBothPresentErrors(t *testing.T) {
 // TestFnOnEdgeIsWrongKind pins that `fn` on an edge kind (which has no anchor
 // field) is a wrong-kind ERROR, not a silently-accepted field.
 func TestFnOnEdgeIsWrongKind(t *testing.T) {
-	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Fn: "x"}); r.Outcome != Errored {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save"), Fn: "x"}); r.Outcome != Errored {
 		t.Errorf("edge with fn = %+v, want Errored (wrong-kind)", r)
 	}
 }
@@ -401,7 +442,7 @@ func TestIDAllowedOnEveryKind(t *testing.T) {
 	if r := evalOne(t, Claim{ID: "x", Kind: "node", FQN: "App).Create"}); r.Outcome != Pass {
 		t.Errorf("id on node = %+v, want Pass", r)
 	}
-	if r := evalOne(t, Claim{ID: "x", Kind: "edge", From: "App).Create", To: "repo.Store).Save"}); r.Outcome != Pass {
+	if r := evalOne(t, Claim{ID: "x", Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save")}); r.Outcome != Pass {
 		t.Errorf("id on edge = %+v, want Pass", r)
 	}
 }
@@ -519,7 +560,7 @@ func TestEntrypointSchemaErrors(t *testing.T) {
 // verdict-inverting hazard), `fqn` on an entrypoint claim ERRORs, and `id` is
 // allowed on an entrypoint claim.
 func TestEntrypointWrongKindFields(t *testing.T) {
-	if r := evalOne(t, Claim{Kind: "edge", From: "App).Create", To: "repo.Store).Save", Name: "x"}); r.Outcome != Errored {
+	if r := evalOne(t, Claim{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save"), Name: "x"}); r.Outcome != Errored {
 		t.Errorf("name on edge = %+v, want Errored (wrong-kind)", r)
 	}
 	if r := evalOne(t, Claim{Kind: "entrypoint", Name: "POST /loan", Fn: "handler.App).Create", FQN: "x"}); r.Outcome != Errored {
@@ -693,22 +734,29 @@ func TestEntrypointWhitespaceName(t *testing.T) {
 }
 
 // TestUnexpectedFieldCoversClaim pins Fix 6: claimFieldChecks is a COMPLETE parallel
-// of the Claim struct — every json-tagged field except `kind` and `id` (claim
-// metadata) is screened by unexpectedField. A new Claim field missed there would be
-// silently ignored on the wrong kind, the verdict-inverting hazard the check closes.
+// of the Claim struct — every json-tagged field except the explicit `kind` and `id`
+// metadata exclusions is screened by unexpectedField, including the rich-claim
+// `through` and `expect` fields. A new Claim field missed here would be silently
+// ignored on the wrong kind, the verdict-inverting hazard the check closes.
 func TestUnexpectedFieldCoversClaim(t *testing.T) {
 	checked := map[string]bool{}
 	for _, f := range claimFieldChecks {
 		checked[f.name] = true
 	}
+	metadata := map[string]bool{"kind": true, "id": true}
 	rt := reflect.TypeOf(Claim{})
 	for i := 0; i < rt.NumField(); i++ {
 		name := strings.SplitN(rt.Field(i).Tag.Get("json"), ",", 2)[0]
-		if name == "" || name == "-" || name == "kind" || name == "id" {
+		if name == "" || name == "-" || metadata[name] {
 			continue
 		}
 		if !checked[name] {
 			t.Errorf("Claim field %q (json:%q) is not screened by claimFieldChecks — a wrong-kind use would be silently ignored", rt.Field(i).Name, name)
+		}
+	}
+	for _, name := range []string{"through", "expect"} {
+		if !checked[name] {
+			t.Errorf("rich selector field %q is not explicitly screened by claimFieldChecks", name)
 		}
 	}
 }
@@ -716,9 +764,9 @@ func TestUnexpectedFieldCoversClaim(t *testing.T) {
 // TestReportFormat pins the exact line shapes the CLI/golden depend on.
 func TestReportFormat(t *testing.T) {
 	rep := Evaluate(testGraph(), &File{Claims: []Claim{
-		{Kind: "edge", From: "App).Create", To: "repo.Store).Save"}, // pass (silent)
-		{Kind: "edge", From: "repo.Store).Save", To: "App).Create"}, // fail
-		{Kind: "node", FQN: ".Score"},                               // errored (ambiguous)
+		{Kind: "edge", From: sel("App).Create"), To: sel("repo.Store).Save")}, // pass (silent)
+		{Kind: "edge", From: sel("repo.Store).Save"), To: sel("App).Create")}, // fail
+		{Kind: "node", FQN: ".Score"},                                         // errored (ambiguous)
 	}})
 	want := "FAIL  repo.Store).Save -> App).Create [edge] 0 edge(s)\n" +
 		"ERROR .Score [node] AMBIGUOUS: '.Score' matches 2: (*svc/scoring.Remote).Score; svc/scoring.Score\n" +

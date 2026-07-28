@@ -1,0 +1,68 @@
+{
+  "claims": [
+    {
+      "id": "R1-handler-reaches-store",
+      "kind": "reach",
+      "from": ["example.com/svc/internal/handler.Handle"],
+      "to": ["example.com/svc/internal/store.Store.Update"],
+      "expect": "present"
+    },
+    {
+      "id": "R2-isolated-reaches-nothing",
+      "kind": "reach",
+      "from": ["example.com/svc/internal/isolated.Orphan"],
+      "to": ["example.com/svc/internal/unrelated.Sink"],
+      "expect": "absent"
+    },
+    {
+      "id": "R3-deliberate-fail-handler-does-reach-store",
+      "kind": "reach",
+      "from": ["example.com/svc/internal/handler.Handle"],
+      "to": ["example.com/svc/internal/store.Store.Update"],
+      "expect": "absent"
+    },
+    {
+      "id": "P1-publishes-go-through-outbox",
+      "kind": "pass_through",
+      "from": ["example.com/svc/internal/handler.Handle"],
+      "to": ["boundary:bus PUBLISH"],
+      "through": ["example.com/svc/internal/outbox.Lifecycle.Publish"]
+    },
+    {
+      "id": "P2-deliberate-fail-writes-bypass-outbox",
+      "kind": "pass_through",
+      "from": ["example.com/svc/internal/handler.Handle"],
+      "to": ["boundary:db UPDATE"],
+      "through": ["example.com/svc/internal/outbox.Lifecycle.Publish"]
+    },
+    {
+      "id": "C1-no-concurrent-publish",
+      "kind": "no_concurrent_reach",
+      "to": ["boundary:bus PUBLISH"]
+    },
+    {
+      "id": "C2-deliberate-fail-concurrent-audit-insert",
+      "kind": "no_concurrent_reach",
+      "to": ["boundary:db INSERT"]
+    },
+    {
+      "id": "O1-transaction-closes",
+      "kind": "obligation",
+      "name": "tx-must-close",
+      "expect": "satisfied"
+    },
+    {
+      "id": "O2-lock-release-unprovable",
+      "kind": "obligation",
+      "name": "lock-must-release",
+      "expect": "satisfied"
+    },
+    {
+      "id": "R4-gateway-absence-blocked-by-blind-frontier",
+      "kind": "reach",
+      "from": ["example.com/svc/internal/gateway.Router.Dispatch"],
+      "to": ["example.com/svc/internal/unrelated.Sink"],
+      "expect": "absent"
+    }
+  ]
+}

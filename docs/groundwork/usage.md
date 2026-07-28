@@ -272,8 +272,13 @@ It declares seven invariant families:
   path entered via a concurrent edge (a go/defer call site): "no DB writes
   from goroutines" — the agent pattern of "make it async" introducing
   unsupervised effects. Same three-valued discipline and `require_proof`
-  escalation. Disclosed v1 limit: the concurrent flag conflates `go` and
-  `defer` sites.
+  escalation. Disclosed v1 limits: the concurrent flag conflates `go` and
+  `defer` sites; and a concurrent edge whose target is neither a boundary label
+  nor a declared node (`graph.json` validates an edge's `from` against the node
+  table, but not its `to`) is dropped from the surface with **no** seed and
+  **no** blind spot — so whatever that target spawns is outside the check, and
+  the rule can hold without covering it. The fail-closed correction is deferred
+  pending review.
 - **`io_budget`** — caps external *writes* reachable from a route (the
   side-effect-blowout guard); reads don't count, and the composition root is
   exempt.
@@ -1277,13 +1282,26 @@ Producer and judge deploy in lockstep — that is a feature.
 
 ### Claims files — `groundwork assert <graph.json> <claims.json>`
 
-`assert` is the point-in-time complement to `fitness`. Where `fitness` gates
-ongoing invariants over a policy, `assert` answers a narrower question: **does
-this graph, right now, match what a design doc says about it?** It is the
-mechanical version of the manual audit that catches consumer-side transcription
-drift — a hand-drawn edge that the graph never had, a tier typed from memory.
-Every claim is fail-loud: a claim that cannot be evaluated ERRORs rather than
-passing vacuously.
+`assert` is the point-in-time complement to `fitness`. It is caller-supplied,
+ephemeral evidence: **does this graph, right now, match these stated facts?**
+`fitness`, by contrast, evaluates CODEOWNERS-gated standing policy: **does this
+graph obey the approved architecture?** An `assert` PASS proves the supplied
+predicate against this graph; it does not approve the predicate as policy. It is
+the mechanical version of the manual audit that catches consumer-side
+transcription drift — a hand-drawn edge that the graph never had, a tier typed
+from memory. Every claim is fail-loud: a claim that cannot be evaluated ERRORs
+rather than passing vacuously.
+
+Its command contract is:
+
+```console
+groundwork assert <graph.json> <claims.json> [--expect <stamp>] [--json]
+```
+
+`--expect` binds the report to the graph's `stamp`: a missing or mismatched
+stamp is an operational error. In CI, `GROUNDWORK_REQUIRE_STAMP=1` also makes a
+missing `--expect` an operational error, so `assert` has no identity-binding
+loophole. Local use remains opt-in when the environment variable is unset.
 
 A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 
@@ -1297,13 +1315,26 @@ A claims file is `{"claims": [ … ]}`. Each claim names a `kind`:
 | `in_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callers (optionally filtered) equals `eq` |
 | `out_degree` | `of`, `eq` [, `counterpart_matching`] | the number of distinct callees (optionally filtered) equals `eq` |
 | `entrypoint` | `name`, `fn` [, `entry_kind`] | a record whose route/topic `name` matches carries a handler equal to the resolved `fn` |
+| `reach` | `from`, `to`, `expect` | reachability matches `expect` (`present` or `absent`) |
+| `pass_through` | `from`, `to`, `through` | every visible path from a source to a target enters the waypoint |
+| `no_concurrent_reach` | `to` | no target sits on the graph's concurrent surface (with one disclosed gap — see "What a PASS on an absence kind does and does not prove") |
+| `obligation` | `name`, `expect` | every obligation record the graph carries for `name` is `SATISFIED` |
+
+The first eight are **structural** — they read the node/edge/entrypoint universe
+directly. The last four are **rich**: they consume the same typed fact evaluators
+`fitness` uses, so a claim and a standing policy rule can never disagree about
+what the graph says. They are documented under
+[Rich claims](#rich-claims) below.
 
 **Claim metadata — `id`.** Any claim may carry a free-form `"id"`, echoed as the
 report-line label so a run's output points back at the exact claim (a suite
 identifies its claims by id). It is allowed on **every** kind — it is metadata,
-not a kind field — and never trips the wrong-kind field check. Uniqueness per
-file is *recommended* but not enforced. A claim with no `id` falls back to an
-endpoint-derived label.
+not a kind field — and never trips the wrong-kind field check. Text mode is
+fully compatible with older id-less files: IDs remain optional and a missing ID
+falls back to an endpoint-derived label. JSON mode requires every ID to contain
+at least one non-whitespace character and requires IDs to be unique by exact
+UTF-8 byte equality. The complete list is validated in claims-file order before
+evaluation; the first missing or duplicate ID rejects the whole machine run.
 
 **The `fn` alias.** `fn` is a documented alias for a claim's anchor field: on
 `node`/`no_node` it aliases `fqn`; on `in_degree`/`out_degree` it aliases `of`.
@@ -1417,6 +1448,121 @@ per claim. Until the whole fleet is upgraded, keep entrypoint claims in a
 **separate** claims file so a mixed file does not become unreadable to an old
 binary.
 
+<a id="rich-claims"></a>
+### Rich claims — reachability, waypoints, concurrency, obligations
+
+The four rich kinds evaluate graph *traversal* rather than graph *shape*. They
+share their evaluators with `fitness` (`internal/groundwork/facts`), so
+`must_not_reach` and a `reach` claim over the same selectors read the same
+binding, the same blind frontier, and the same shortest path.
+
+```json
+{"id": "adapter-reaches-lifecycle", "kind": "reach",
+ "from": ["example.com/svc/internal/adapter.Dynamo.Write"],
+ "to":   ["example.com/svc/internal/outbox.Lifecycle.Publish"],
+ "expect": "present"}
+
+{"id": "all-publishes-use-lifecycle", "kind": "pass_through",
+ "from":    ["example.com/svc/internal/handler.Handle"],
+ "to":      ["boundary:bus PUBLISH"],
+ "through": ["example.com/svc/internal/outbox.Lifecycle.Publish"]}
+
+{"id": "no-unsupervised-write", "kind": "no_concurrent_reach",
+ "to": ["boundary:db INSERT", "boundary:db UPDATE"]}
+
+{"id": "transaction-closes", "kind": "obligation",
+ "name": "tx-must-close", "expect": "satisfied"}
+```
+
+**Selector grammar differs between structural and rich kinds.** Structural
+selectors stay **scalar-only** and keep the normalized-suffix / `/regex/` grammar
+above; an array in a structural `from` or `to` is a per-claim `MALFORMED_CLAIM`
+ERROR, not a widening. Rich selectors accept **either a scalar or a non-empty
+list of strings**, and match with boundary-aware **exact-or-prefix** semantics
+(`policy.MatchPrefix` — the same matcher a policy rule uses), never suffix or
+regex. `null`, `""`, a whitespace-only string, `[]`, and a non-string list member
+are all rejected at decode.
+
+**`entrypoint:*`** is supported only where a from-bearing evaluator supports it:
+as a `reach` or `pass_through` **source**, where it expands to every structural
+graph source. It is not a target selector and has no meaning on
+`no_concurrent_reach` or `obligation`.
+
+**Outcomes.** Each rich kind maps its typed fact to exactly one outcome. An
+unbound selector family and a blind frontier are always ERRORs — never a
+vacuous proof:
+
+| Kind | Fact | Outcome |
+|---|---|---|
+| `reach` | path found | PASS if `expect: present`, FAIL if `absent` |
+| `reach` | absent over the visible frontier | FAIL if `expect: present`, PASS if `absent` |
+| `reach` | no path, blind frontier | ERROR `BLIND_FRONTIER` (either `expect`) |
+| `reach` | source or target unbound | ERROR `UNBOUND_SELECTOR` |
+| `pass_through` | ≥1 bypass path | FAIL |
+| `pass_through` | no bypass, visible frontier | PASS |
+| `pass_through` | no bypass, blind frontier | ERROR `BLIND_FRONTIER` |
+| `pass_through` | any selector family unbound | ERROR `UNBOUND_SELECTOR` |
+| `no_concurrent_reach` | target on the concurrent surface | FAIL |
+| `no_concurrent_reach` | no hit, no blind witness | PASS |
+| `no_concurrent_reach` | no hit, blind surface | ERROR `BLIND_FRONTIER` |
+| `no_concurrent_reach` | target unbound | ERROR `UNBOUND_SELECTOR` |
+| `obligation` | any record `VIOLATED` | FAIL |
+| `obligation` | every matched record `SATISFIED` | PASS |
+| `obligation` | no `obligations` section | ERROR `MISSING_GRAPH_DATA` |
+| `obligation` | section present, name not found | ERROR `UNRESOLVED` |
+| `obligation` | an unrecognized producer status | ERROR `UNKNOWN_STATUS` |
+| `obligation` | otherwise any `CANT-PROVE` | ERROR `CANT_PROVE` |
+| `obligation` | otherwise any `UNMATCHED` | ERROR `UNMATCHED` |
+
+A found path **dominates** blindness on `reach`: a concrete witness already
+settles the expectation, so the frontier no longer matters. Everywhere else
+blindness dominates an absence. On `obligation`, a concrete `VIOLATED`
+dominates a sibling abstention for the same reason.
+
+**What a PASS on an absence kind does and does not prove.** The absence PASSes
+above (`reach`/`absent`, `pass_through`, `no_concurrent_reach`) are proofs over
+the *visible* frontier, minus two disclosed carve-outs. Both are recorded here so
+a green run is never mistaken for a claim the evaluator does not make.
+
+- `reach` with `expect: absent` (and `pass_through`'s guarded PASS) exclude a
+  source from its own target set, so a source that reaches **itself** through a
+  cycle still reads as absent. Inherited behavior, kept for exact parity with the
+  standing `must_not_reach` gate; a separately reviewed correction is pending.
+- `no_concurrent_reach`'s PASS does not cover a concurrent edge whose target is
+  neither a boundary label nor a declared node — see the disclosed v1 limits
+  listed with the `no_concurrent_reach` invariant family under
+  [The policy](#the-policy).
+
+**`pass_through` is vacuously true when no source-to-target path exists.** That
+is the mathematical all-paths property, and it is deliberate: the claim asserts
+"every path enters the waypoint", and zero paths satisfy it. To also require that
+a path exists, pair it with a positive `reach` claim over the same endpoints.
+`obligation` accepts only `expect: "satisfied"` in v1 — the claim reads verdicts
+the graph already carries and cannot author the inverse rule.
+
+**Evidence.** A rich result carries the identities it bound and the evidence that
+decided it: `reach` returns path witnesses, `pass_through` every deterministic
+bypass pair with a shortest path, `no_concurrent_reach` its sorted hit witnesses,
+and `obligation` one witness per matched record carrying the producer's own
+`status` and `detail`. A FAIL exposes the same bindings a PASS would.
+
+**A claims PASS is not policy approval.** It proves the supplied predicate
+against this graph at this moment. `fitness` remains the standing,
+CODEOWNERS-gated authority; nothing in a claims file can grant, waive, or
+weaken a policy rule.
+
+The committed `testdata/groundwork/claims/assert-rich.claims.json` exercises all
+four rich kinds, and PASS, FAIL, and ERROR each appear across the file — not
+every kind in every outcome: `pass_through` and `no_concurrent_reach` carry no
+ERROR claim, and `obligation` carries no FAIL claim. The ERROR cases are an
+absence claim that must abstain because its frontier is blind, and an obligation
+the producer could not prove. `cmd/groundwork`'s tests grade the file
+against a purpose-built graph and require byte-identical JSON across the five
+graph collections a rich kind can read (nodes, edges, blind spots, obligations,
+caveats), each independently shuffled. Entrypoint ordering is pinned by the
+structural-claims permutation test, the one whose claims file reads
+`entrypoints[]`.
+
 **Output and exit codes.** The report prints, in claims-file order, the FAIL
 lines then the ERROR lines, then a summary; passing claims are silent. Each
 non-passing claim renders one line:
@@ -1458,9 +1604,105 @@ by `cmd/groundwork`'s acceptance tests, so these blocks mirror enforced output.
 
 Exit codes ride groundwork's existing split: **≥1 FAIL exits 1** (a computed
 verdict failed — takes precedence over errors), **zero FAILs but ≥1 errored
-claim exits 2** (a claim's gate could not run), and all-pass exits 0. The output
-is deterministic (a pure function of graph + claims), so a `--check`-style CI
-comparison against a committed expected report is byte-stable.
+claim exits 2** (a claim's gate could not run), and all-pass exits 0. In either
+text or JSON mode, the complete report is written before that computed exit is
+returned. Usage, graph/claims decode, stamp, and JSON machine-ID errors instead
+produce **no report** and exit 2. The output is deterministic (a pure function
+of graph + claims), so a `--check`-style CI comparison against a committed
+expected report is byte-stable.
+
+### Machine report — `--json`
+
+`--json` emits one canonical `groundwork.assert/v1` report. Its top-level fields
+are `schema_version`, `fixture`, `results`, and `summary`. `fixture` always
+contains the graph's `stamp`, `producer_tool`, `algo`, and `caveats`; unrecorded
+scalar provenance is `""`. `fixture.caveats` is exactly the sorted, deduplicated
+output of `graph.NewIndex(g).GateCaveats("")`: graph-provided `caveats` plus
+the derived reclaimed-edge and SQL-fold disclosures (`ReclaimCaveat` and
+`SQLFoldCaveat`). The empty policy-substrate argument deliberately adds no
+policy-vs-graph mismatch disclosure.
+
+`results` has one item per input claim in claims-file order. Each result carries
+`id`, `kind`, and `outcome` (`PASS`, `FAIL`, or `ERROR`). `reason` is optional
+but appears only on `ERROR`; consumers must use it rather than parsing the
+optional human `detail`. `bindings` is optional and omitted when no graph
+identity was established; its present fields are independently optional,
+canonical sorted/deduplicated identity sets:
+
+| Binding key | Meaning when present |
+|---|---|
+| `from` | Graph identities resolved for the claim's source side. |
+| `to` | Graph identities resolved for the claim's destination side. |
+| `through` | Graph identities established for an intermediate selector. |
+| `fqn` | Nodes resolved for a node-style `fqn` selector. |
+| `of` | Graph identities resolved for a degree-style `of` selector. |
+| `fn` | Nodes resolved for a `fn` selector or handler anchor. |
+| `entrypoint` | Canonical identities of the matched entrypoint records, one per record, in the framed encoding below. |
+| `obligation` | The matched obligation RULE NAME — exactly one entry, whatever the number of matched records. Per-record evidence is in `witnesses`. |
+
+An `entrypoint` binding value is a length-framed encoding of the complete record
+identity:
+
+```text
+entrypoint/v1\x00<len>:<kind>\x00<len>:<name>\x00<len>:<fn>
+```
+
+where:
+
+- `len` is the decimal byte length of the field that follows it;
+- the three fields appear in this fixed order: `kind`, `name`, `fn`;
+- fields are separated by a NUL byte, which the JSON report renders escaped as
+  `\u0000`.
+
+Length framing is what makes the value machine-parseable: an entrypoint `name`
+is a graph-supplied route or topic string and may contain any human-readable
+delimiter — a space, a colon, a slash, a brace — so a plain delimiter join could
+not be split back apart unambiguously. A consumer reads each field by taking the
+decimal prefix up to `:` and then exactly that many bytes; it never has to guess
+where a field ends. The `entrypoint/v1` marker names the encoding so a future
+shape can be told apart from this one.
+
+`witnesses` is optional and omitted when a result has no machine evidence. Each
+witness is an independently optional evidence tuple, sorted and deduplicated by
+all of its fields; a `path`, when present, retains its ordered graph walk:
+
+| Witness key | Meaning when present |
+|---|---|
+| `from` | Witness source graph identity. |
+| `to` | Witness destination graph identity. |
+| `path` | Ordered graph path connecting the witness endpoints. |
+| `blind_site` | Graph site at the disclosed blind frontier. |
+| `rule` | Name of the graph rule associated with the evidence. |
+| `fn` | Function associated with the evidence. |
+| `site` | Graph-record site associated with the evidence. |
+| `status` | Graph-recorded status associated with the evidence. |
+| `detail` | Human explanatory evidence; never a machine discriminator. |
+
+`summary` contains `passed`, `failed`, `errored`, `nodes`, and `unique_edges`.
+
+Every array in the report is **sorted and deduplicated** on its own intrinsic
+fields — each binding family, each witness list, and `fixture.caveats` — with one
+deliberate exception: a witness `path` keeps its ordered graph walk. `results`
+follows input claims order and is never sorted. Nothing in the report derives
+from wall-clock time, a random or pointer identity, an absolute path, or the
+order records happened to arrive in, so the same graph and claims file always
+produce the same bytes.
+
+The closed v1 `reason` vocabulary is:
+
+- `UNRESOLVED`
+- `AMBIGUOUS`
+- `UNBOUND_SELECTOR`
+- `BLIND_FRONTIER`
+- `MALFORMED_CLAIM`
+- `UNKNOWN_STATUS`
+- `MISSING_GRAPH_DATA`
+- `CANT_PROVE`
+- `UNMATCHED`
+
+JSON mode first validates every machine ID. A decode, stamp, or machine-ID
+failure emits no partial JSON; consumers can therefore treat a received report
+as complete for its claims file.
 
 Claims files outlive the pins they were written against by design. `assert`
 loads the graph through the same strict decoder as every other groundwork

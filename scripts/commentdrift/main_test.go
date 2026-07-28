@@ -66,11 +66,29 @@ func TestFindDrift(t *testing.T) {
 }
 
 func TestMakesClaim(t *testing.T) {
-	if !makesClaim("the result is always sorted") {
-		t.Error("expected an asserting comment to be a claim")
+	claims := []string{
+		"the result is always sorted",
+		// Coverage claims. Without these the nudge missed the real case that
+		// prompted adding them: BuildConcurrentSurface's doc said it "constructs the
+		// complete rule-independent concurrent surface" while a DISCLOSED GAP twelve
+		// lines into the same function named a concurrent edge it drops.
+		"constructs the complete rule-independent concurrent surface",
+		"no target is on a fully visible concurrent surface",
+		"the walk is exhaustive over the reachable set",
 	}
-	if makesClaim("a helper for the caller") {
-		t.Error("prose should not register as a claim")
+	for _, claim := range claims {
+		if !makesClaim(claim) {
+			t.Errorf("makesClaim(%q) = false, want an asserting comment", claim)
+		}
+	}
+	prose := []string{
+		"a helper for the caller",
+		"renders the witness a reviewer reads",
+	}
+	for _, p := range prose {
+		if makesClaim(p) {
+			t.Errorf("makesClaim(%q) = true, want prose", p)
+		}
 	}
 }
 

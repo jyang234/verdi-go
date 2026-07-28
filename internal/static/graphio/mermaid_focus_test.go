@@ -322,9 +322,11 @@ func TestFocusResolverParityWithAssert(t *testing.T) {
 	// resolves and PASSES — genuinely exercising claims' production endpoint universe. (The
 	// old 'Score' probe short-circuited on an ambiguous 'from' before the boundary 'to' was
 	// ever resolved, so it passed even against a nodes-only universe — a dead probe.)
-	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{
-		{Kind: "edge", From: "store.Loans).SelectLoan", To: "boundary:db SELECT loans"},
-	}})
+	var edgeClaim claims.Claim
+	if err := json.Unmarshal([]byte(`{"kind":"edge","from":"store.Loans).SelectLoan","to":"boundary:db SELECT loans"}`), &edgeClaim); err != nil {
+		t.Fatalf("decode scalar selector claim: %v", err)
+	}
+	rep := claims.Evaluate(cg, &claims.File{Claims: []claims.Claim{edgeClaim}})
 	if rep.Errored() != 0 || rep.Passed() != 1 {
 		t.Fatalf("expected the boundary edge claim to resolve and PASS over the endpoint universe (a nodes-only universe would ERROR on the boundary 'to'), got: %s", rep.String())
 	}

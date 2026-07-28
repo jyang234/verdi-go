@@ -1,6 +1,7 @@
 package fitness
 
 import (
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
 )
@@ -17,7 +18,9 @@ func Check(p *policy.Policy, ix *graph.Index) Result {
 	checkLayering(p, ix, &r)
 	checkMustNotReach(p, ix, &r)
 	checkMustPassThrough(p, ix, &r)
-	checkNoConcurrentReach(p, ix, &r)
+	if len(p.NoConcurrentReach) > 0 {
+		checkNoConcurrentReach(p, facts.BuildConcurrentSurface(ix), &r)
+	}
 	checkIOBudget(p, ix, &r)
 	checkObligations(p, ix, &r)
 	checkRatchetCoupling(p, &r)

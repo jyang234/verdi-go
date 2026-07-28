@@ -3,49 +3,54 @@ package fitness
 import (
 	"fmt"
 
+	"github.com/jyang234/golang-code-graph/internal/groundwork/facts"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/graph"
 	"github.com/jyang234/golang-code-graph/internal/groundwork/policy"
-	"github.com/jyang234/golang-code-graph/internal/static/blindspots"
 )
 
-// verdict is the three-valued outcome of a must-not-reach rule. The distinction
-// between provenAbsent and noPathFound is the whole point: a static "no path"
-// over a blind frontier (a reflect call, an unsafe package, a <dynamic> effect)
-// is NOT a proof of safety, and presenting it as a clean pass would be the
-// dangerous framing the design record warns against.
+// verdict is the compatibility form of facts.ReachState retained for proposer
+// tests and later-migrated fitness code.
 type verdict int
 
 const (
 	provenAbsent verdict = iota // no path, and the frontier is fully resolved — a real proof
-	noPathFound                 // no path found, but the frontier is blind — cannot prove
-	reachable                   // a path exists — the invariant is broken
+	// noPathFound is the abstention: no path was found AND the absence is not
+	// proven. Two inputs reach it — a blind frontier (evidence names the blind
+	// site) and a source or target family that bound nothing (evidence is empty,
+	// because there is nothing to point at). Both are "cannot prove", never a pass.
+	noPathFound
+	reachable // a path exists — the invariant is broken
 )
 
 // checkMustNotReach evaluates each negative reachability invariant: no function
 // matching rule.From may transitively reach any target (function or boundary
 // effect) matching rule.To. A reachable path is a Violation; an unprovable rule
 // (no path, but a blind frontier) is a Caution naming where the graph went blind.
+//
+// The state switch is TOTAL: exactly one arm is silent (facts.ReachAbsent, the
+// real proof), and a state this gate has not been taught reaches the default and
+// is disclosed. A bare switch would emit nothing for such a state and the rule
+// would read as a clean hold — a silent pass in a live gate (tenet 4).
 func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 	for _, rule := range p.MustNotReach {
-		froms := bindFroms(ix, r, "must_not_reach", rule.Name, rule.From, rule.RequireProof)
-		if froms == nil {
-			continue
-		}
-		if !bindsAnyTarget(ix, rule.To) {
+		fact := facts.EvaluateReach(ix, rule.From, rule.To)
+		switch fact.State {
+		case facts.ReachUnbound:
+			if len(fact.From) == 0 {
+				r.add(inertRuleFinding("must_not_reach", rule.Name, rule.RequireProof))
+				continue
+			}
 			r.add(unbindableTargetFinding("must_not_reach", rule.Name, "to", rule.RequireProof))
-			continue
-		}
-		v, ev := evalReach(ix, froms, rule.To)
-		switch v {
-		case reachable:
+		case facts.ReachFound:
+			witness := fact.Paths[0]
 			r.add(Finding{
 				Rule:     "must_not_reach",
 				Severity: Violation,
-				Summary:  fmt.Sprintf("%s: %s reaches %s", rule.Name, ShortName(ev.from), ev.target),
-				From:     ev.from,
-				To:       ev.target,
+				Summary:  fmt.Sprintf("%s: %s reaches %s", rule.Name, ShortName(witness.From), witness.To),
+				From:     witness.From,
+				To:       witness.To,
 			})
-		case noPathFound:
+		case facts.ReachBlind:
 			// Unprovable: no static path, but the frontier is blind. Advisory by
 			// default; a require_proof rule treats unprovability as a failure.
 			sev, note := Caution, "cannot prove absence"
@@ -55,11 +60,14 @@ func checkMustNotReach(p *policy.Policy, ix *graph.Index, r *Result) {
 			r.add(Finding{
 				Rule:     "must_not_reach",
 				Severity: sev,
-				Summary:  fmt.Sprintf("%s: no path found, but the frontier is blind (%s) — %s", rule.Name, ev.target, note),
-				From:     ev.from,
+				Summary:  fmt.Sprintf("%s: no path found, but the frontier is blind (%s) — %s", rule.Name, blindDescription(fact.Blind), note),
+				From:     blindFrom(fact.Blind),
 			})
-		case provenAbsent:
+		case facts.ReachAbsent:
 			// A real proof: nothing to report. Absence is the desired state.
+		default:
+			r.add(unrecognizedStateFinding("must_not_reach", rule.Name,
+				fmt.Sprintf("reach state %d", fact.State), rule.RequireProof))
 		}
 	}
 }
@@ -105,27 +113,36 @@ func unbindableTargetFinding(kind, name, field string, requireProof bool) Findin
 	}
 }
 
-// bindsAnyTarget reports whether any To/Through pattern matches at least one
-// node or one boundary effect label in the whole graph — the test that
-// separates an unbindable selector (a typo, a renamed-away or third-party
-// target) from a well-formed one that is merely unreached.
+// unrecognizedStateFinding discloses a typed fact state this groundwork's judges
+// have never been taught — a later facts release adding a state, arriving at a
+// switch written before it existed. Every other arm of those switches decides a
+// verdict, so a bare fall-through emits NOTHING and the rule reports as a clean
+// hold: a silent pass in a live gate, the worst outcome (tenet 4). It abstains
+// rather than panicking, because the prime directive prefers a disclosed
+// abstention the caller surfaces to a crash. Caution by default, escalated to
+// Violation under require_proof — the same escalation every other unprovable
+// disposition in this package uses. It is the fitness-side twin of
+// checkObligations' vocabulary-drift default, and of the "evaluator returned an
+// unknown state" ERROR the claims judge emits for the same condition.
+//
+// state is the human name of the offending value ("reach state 7"); it is not
+// part of a Severity decision, only of the disclosure.
+func unrecognizedStateFinding(kind, name, state string, requireProof bool) Finding {
+	sev, note := Caution, "upgrade or investigate"
+	if requireProof {
+		sev, note = Violation, "require_proof is set and an unrecognized state cannot be proven"
+	}
+	return Finding{
+		Rule:     kind,
+		Severity: sev,
+		Summary:  fmt.Sprintf("%s: %s is not understood by this groundwork — %s", name, state, note),
+	}
+}
+
+// bindsAnyTarget is the compatibility wrapper for later-migrated fitness
+// evaluators. facts owns target binding.
 func bindsAnyTarget(ix *graph.Index, patterns []string) bool {
-	for _, fqn := range ix.Nodes() {
-		if matchAny(fqn, patterns) {
-			return true
-		}
-	}
-	for _, e := range ix.Edges() {
-		// Use e.IsBoundary() (the To-prefix test), the SAME predicate evalReach's
-		// own walk keys on — not e.Boundary != "". A boundary target with a
-		// populated To prefix but an empty Boundary field would otherwise be judged
-		// "binds nothing" here and short-circuit the rule to a caution, masking a
-		// real reachable violation that evalReach would have found (H-5).
-		if e.IsBoundary() && matchAny(e.To, patterns) {
-			return true
-		}
-	}
-	return false
+	return len(facts.BindTargets(ix, patterns)) > 0
 }
 
 // evidence carries the witness for a verdict: for reachable, the from function
@@ -135,96 +152,82 @@ type evidence struct {
 	target string
 }
 
-// evalReach computes the rule verdict over all from-functions. The rule is
-// reachable if any from reaches a To target; otherwise noPathFound if any from's
-// reachable frontier is blind; otherwise provenAbsent. Reachable dominates
-// noPathFound dominates provenAbsent, so the most consequential outcome wins.
+// evalReach is the compatibility wrapper for proposer tests and later-migrated
+// fitness code. The supplied source identities are already bound; facts owns the
+// traversal, target binding, and blind-frontier classification.
+//
+// Every ReachState is mapped explicitly. ReachUnbound must NOT reach the proof
+// pole: a family that bound nothing produced a zero-seed or zero-target walk, and
+// calling that "no path exists" is a fabricated proof over a surface the caller
+// never actually named (tenet 4). It abstains as noPathFound with empty evidence
+// — the standing fitness path discloses the same condition through
+// inertRuleFinding/unbindableTargetFinding before it ever gets here.
 func evalReach(ix *graph.Index, froms []string, toPatterns []string) (verdict, evidence) {
-	var blindEv evidence
-	blind := false
-	for _, from := range froms {
-		cone := append([]string{from}, ix.Reachable(from)...)
-		effects := ix.Effects(cone...)
-
-		// A reachable function matching a To pattern is a direct hit.
-		for _, fn := range cone {
-			if fn != from && matchAny(fn, toPatterns) {
-				return reachable, evidence{from: from, target: fn}
-			}
-		}
-		// A reachable boundary effect matching a To pattern is also a hit.
-		for _, e := range effects {
-			if matchAny(e.To, toPatterns) {
-				return reachable, evidence{from: from, target: e.To}
-			}
-		}
-		// No path from this seed: is the frontier sound enough to call it a
-		// proof? Probe only until the first blind site is found.
-		if !blind {
-			if site, isBlind := frontierBlindSiteWith(ix, cone, effects); isBlind {
-				blind = true
-				blindEv = evidence{from: from, target: site}
-			}
-		}
+	fact := facts.EvaluateReachBoundSources(ix, froms, toPatterns)
+	switch fact.State {
+	case facts.ReachFound:
+		witness := fact.Paths[0]
+		return reachable, evidence{from: witness.From, target: witness.To}
+	case facts.ReachBlind:
+		return noPathFound, evidence{from: blindFrom(fact.Blind), target: blindDescription(fact.Blind)}
+	case facts.ReachUnbound:
+		return noPathFound, evidence{}
+	case facts.ReachAbsent:
+		return provenAbsent, evidence{}
+	default:
+		// A ReachState this wrapper has never seen cannot be folded into a pole:
+		// the unknown could be either, and guessing is how a false proof ships.
+		panic(fmt.Sprintf("fitness: unhandled facts.ReachState %d in evalReach", fact.State))
 	}
-	if blind {
-		return noPathFound, blindEv
-	}
-	return provenAbsent, evidence{}
 }
 
-// frontierBlindSiteWith reports whether any node in the reachable cone sits on a
-// blind spot — a reflect/HighFanOut site, a function in an unsafe/cgo/linkname
-// package, or a function that makes a <dynamic> boundary effect. If so, edges may
-// be hidden past it and a "no path" conclusion is not sound. It returns a
-// representative site for the caution message.
+// frontierBlindSiteWith is the compatibility presentation wrapper for fitness
+// evaluators whose complete fact families move in later tasks.
 func frontierBlindSiteWith(ix *graph.Index, cone []string, effects []graph.Edge) (string, bool) {
-	for _, fn := range cone {
-		if bs, ok := firstReachBlinding(ix.BlindSpotsAt(fn)); ok {
-			return fmt.Sprintf("%s at %s", bs.Kind, ShortName(fn)), true
-		}
-		if bs, ok := firstReachBlinding(ix.BlindSpotsAt(PkgOf(fn))); ok {
-			return fmt.Sprintf("%s in %s", bs.Kind, PkgOf(fn)), true
-		}
+	from := ""
+	if len(cone) > 0 {
+		from = cone[0]
 	}
-	for _, e := range effects {
-		if e.IsDynamic() {
-			return "unresolved boundary effect " + e.To, true
-		}
+	witness := facts.BlindFrontier(ix, from, cone, effects)
+	if witness == nil {
+		return "", false
 	}
-	return "", false
+	return blindDescription(witness), true
 }
 
-// firstReachBlinding returns the first blind spot at a site that actually blinds
-// reachability, skipping the disclosure-only kinds. A disclosure-only kind
-// (ExternalBoundaryCall) names a KNOWN out-of-module leaf the reachability index
-// already stops at (graph.Index drops external edges), so it hides no in-scope
-// first-party path: disclosing it must not turn the accepted external-leaf scope
-// into a fresh abstention, or every PROVEN over a path that touches a vendored
-// package would silently become CANT-PROVE. Every other kind (an UNKNOWN func-value
-// target that could dispatch back into first-party code, a reflect call, an
-// unsafe/cgo/linkname package) can hide an in-scope edge, so it stays blinding. The
-// disclosure-only set is defined once on blindspots.Kind and shared with the
-// frontier marker loop (the producer half of the same contract).
-func firstReachBlinding(bs []graph.BlindSpot) (graph.BlindSpot, bool) {
-	for _, b := range bs {
-		if blindspots.Kind(b.Kind).IsDisclosureOnlyFrontier() {
-			continue
-		}
-		return b, true
+// blindFrom is the nil-safe accessor for a blind witness's source, the twin of
+// blindDescription. The fact types document Blind as non-nil exactly when the
+// state is the blind one, but every fitness site that renders a blind finding
+// reads TWO fields off the same pointer, so a producer bug would panic in the
+// middle of a gate on the second one after blindDescription had already absorbed
+// it. Both accessors degrade to "" instead: the finding still carries its
+// Caution/Violation severity, so a broken witness abstains loudly rather than
+// crashing — and can never become a pass. The claims judge closes the same hole
+// by ERRORing (claims.evalReach's "blind state without evidence"); this is the
+// fitness-side symmetry.
+func blindFrom(witness *facts.BlindWitness) string {
+	if witness == nil {
+		return ""
 	}
-	return graph.BlindSpot{}, false
+	return witness.From
 }
 
-// matchNodes returns the graph nodes whose FQN matches any pattern. The order is
-// unspecified — expandFroms, its only caller, collects the result into a set and
-// sorts it — so it ranges nodes unsorted to avoid a redundant per-call sort.
-func matchNodes(ix *graph.Index, patterns []string) []string {
-	var out []string
-	ix.RangeNodes(func(fqn string) {
-		if matchAny(fqn, patterns) {
-			out = append(out, fqn)
-		}
-	})
-	return out
+func blindDescription(witness *facts.BlindWitness) string {
+	if witness == nil {
+		return ""
+	}
+	switch witness.Location {
+	case facts.BlindAtFunction:
+		return fmt.Sprintf("%s at %s", witness.Kind, ShortName(witness.Site))
+	case facts.BlindInPackage:
+		return fmt.Sprintf("%s in %s", witness.Kind, witness.Site)
+	case facts.BlindAtDynamicEffect:
+		return "unresolved boundary effect " + witness.Detail
+	case facts.BlindAtConcurrentBoundary:
+		return "unresolved concurrent boundary effect " + witness.Detail
+	case facts.BlindAtConcurrentDispatch:
+		return fmt.Sprintf("%s at %s", witness.Kind, ShortName(witness.Site))
+	default:
+		return witness.Kind
+	}
 }

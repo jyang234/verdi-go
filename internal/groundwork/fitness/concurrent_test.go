@@ -1,6 +1,7 @@
 package fitness
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -10,6 +11,270 @@ import (
 
 func concurrentPolicy(rule policy.ConcurrentRule) *policy.Policy {
 	return &policy.Policy{Service: "layeredsvc", Version: 1, NoConcurrentReach: []policy.ConcurrentRule{rule}}
+}
+
+// TestConcurrentCharacterization pins every Finding field emitted by
+// no_concurrent_reach before its rule-independent surface moves to the shared
+// facts package. Presentation changes require an explicit compatibility review.
+//
+// Three cases are the deliberate exceptions and FAIL against the pre-extraction
+// probe: the two "canonical ... over shuffled input" cases pin post-extraction
+// canonicalization corrections, and "boundary targets keep their punctuation in
+// the summary" pins a declared correction to the summary renderer. See their
+// case comments.
+func TestConcurrentCharacterization(t *testing.T) {
+	const (
+		launcher = "svc.Launcher"
+		worker   = "svc.Worker"
+		target   = "svc.Target"
+		update   = "boundary:db UPDATE users"
+		publish  = "boundary:bus PUBLISH user.updated"
+		dynamic  = "boundary:bus PUBLISH <dynamic>"
+		// The two labels whose punctuation ShortName destroys — the same pair the
+		// pass-through characterization uses, so the two rules are pinned against
+		// one shared example of what a boundary label must survive.
+		peerCharge = "boundary:peer POST /charge/{id}"
+		dbCount    = "boundary:db SELECT count(*)"
+	)
+	nodes := func(fqns ...string) []graph.Node {
+		result := make([]graph.Node, len(fqns))
+		for i, fqn := range fqns {
+			result[i] = graph.Node{FQN: fqn}
+		}
+		return result
+	}
+	rule := func(to string) policy.ConcurrentRule {
+		return policy.ConcurrentRule{Name: "no-async", To: []string{to}}
+	}
+	// summary is a LITERAL, never re-derived from the production renderer. The
+	// earlier helper built it as "no-async: "+ShortName(to)+" reachable on a
+	// concurrent path", which made the expectation a copy of the code under test:
+	// whatever ShortName did to the target, the want did too, so no case here could
+	// observe a mangled summary. That is how the boundary-label defect the last two
+	// cases pin survived in this file after cedb802 fixed the same class one file
+	// over. An expectation computed from the production helper proves nothing.
+	hit := func(from, to, summary string) Finding {
+		return Finding{
+			Rule:     "no_concurrent_reach",
+			Severity: Violation,
+			Summary:  summary,
+			From:     from,
+			To:       to,
+		}
+	}
+
+	tests := []struct {
+		name string
+		g    *graph.Graph
+		rule policy.ConcurrentRule
+		want []Finding
+	}{
+		{
+			name: "direct concurrent boundary hit",
+			g: &graph.Graph{
+				Nodes: nodes(launcher),
+				Edges: []graph.Edge{{
+					From: launcher, To: publish, Boundary: "outbound-async", Concurrent: true,
+				}},
+			},
+			rule: rule("boundary:bus PUBLISH"),
+			want: []Finding{hit(launcher, publish, "no-async: boundary:bus PUBLISH user.updated reachable on a concurrent path")},
+		},
+		{
+			name: "spawned function hit",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, worker),
+				Edges: []graph.Edge{{From: launcher, To: worker, Concurrent: true}},
+			},
+			rule: rule(worker),
+			want: []Finding{hit("", worker, "no-async: svc.Worker reachable on a concurrent path")},
+		},
+		{
+			name: "concurrent cone effect hit",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, worker),
+				Edges: []graph.Edge{
+					{From: launcher, To: worker, Concurrent: true},
+					{From: worker, To: update, Boundary: "outbound-sync"},
+				},
+			},
+			rule: rule("boundary:db UPDATE"),
+			want: []Finding{hit(worker, update, "no-async: boundary:db UPDATE users reachable on a concurrent path")},
+		},
+		{
+			name: "duplicate hit collapse",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, worker),
+				Edges: []graph.Edge{
+					{From: launcher, To: worker, Concurrent: true},
+					{From: worker, To: publish, Boundary: "outbound-async", Concurrent: true},
+					{From: worker, To: publish, Boundary: "outbound-async", Concurrent: true},
+				},
+			},
+			rule: rule("boundary:bus PUBLISH"),
+			want: []Finding{hit(worker, publish, "no-async: boundary:bus PUBLISH user.updated reachable on a concurrent path")},
+		},
+		{
+			// DECLARED CORRECTION, pinned deliberately — it FAILS against
+			// codex/approved-specs-base, which mangles these labels exactly as the
+			// pre-cedb802 pass-through evaluator did. A concurrent target is either a
+			// function FQN or a boundary label, and a label is a canonical string the
+			// reader acts on: the route template and the SQL statement ARE the
+			// evidence. ShortName is an FQN shortener — it truncates at the last "/"
+			// and deletes "*" and ")" — so it rewrote "boundary:peer POST
+			// /charge/{id}" to "{id}" and "boundary:db SELECT count(*)" to "count(",
+			// leaving a reader with a summary naming nothing they can act on.
+			// shortTarget is the single owner of the FQN-vs-label distinction; routing
+			// through it makes this rule spell an effect the way must_pass_through
+			// already does. The literals below are the bytes a human must read.
+			name: "boundary targets keep their punctuation in the summary",
+			g: &graph.Graph{
+				Nodes: nodes(launcher),
+				Edges: []graph.Edge{
+					{From: launcher, To: peerCharge, Boundary: "outbound-sync", Concurrent: true},
+					{From: launcher, To: dbCount, Boundary: "outbound-sync", Concurrent: true},
+				},
+			},
+			rule: policy.ConcurrentRule{
+				Name: "no-async", To: []string{"boundary:db", "boundary:peer"},
+			},
+			want: []Finding{
+				hit(launcher, dbCount,
+					"no-async: boundary:db SELECT count(*) reachable on a concurrent path"),
+				hit(launcher, peerCharge,
+					"no-async: boundary:peer POST /charge/{id} reachable on a concurrent path"),
+			},
+		},
+		{
+			name: "clean visible surface",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, worker, target),
+				Edges: []graph.Edge{{From: launcher, To: worker, Concurrent: true}},
+			},
+			rule: rule(target),
+		},
+		{
+			name: "concurrent cone blind",
+			g: &graph.Graph{
+				Nodes:      nodes(launcher, worker, target),
+				Edges:      []graph.Edge{{From: launcher, To: worker, Concurrent: true}},
+				BlindSpots: []graph.BlindSpot{{Kind: "reflect", Site: worker, Detail: "opaque dispatch"}},
+			},
+			rule: rule(target),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (reflect at svc.Worker) — cannot prove the concurrent cone avoids the target",
+			}},
+		},
+		{
+			name: "dynamic direct boundary blind",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, target),
+				Edges: []graph.Edge{
+					{From: launcher, To: dynamic, Boundary: "outbound-async", Concurrent: true},
+				},
+			},
+			rule: rule(target),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (unresolved concurrent boundary effect " + dynamic + ") — cannot prove the concurrent cone avoids the target",
+			}},
+		},
+		{
+			name: "graph wide concurrent dispatch blind",
+			g: &graph.Graph{
+				Nodes:      nodes(launcher, target),
+				BlindSpots: []graph.BlindSpot{{Kind: "ConcurrentDispatch", Site: launcher, Detail: "go f()"}},
+			},
+			rule: rule(target),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (ConcurrentDispatch at svc.Launcher) — cannot prove the concurrent cone avoids the target",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately. graph.Load does not
+			// sort the blind-spot manifest, so the pre-extraction probe returned
+			// whichever ConcurrentDispatch the PRODUCER happened to emit first
+			// (svc.Zed here) — the named site moved with input order, churning the
+			// base-vs-branch diff for a graph that is semantically identical. The
+			// facts surface sorts the manifest before selecting, so the
+			// representative is now a pure function of the graph's content.
+			name: "canonical concurrent dispatch site over shuffled input",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, target),
+				BlindSpots: []graph.BlindSpot{
+					{Kind: "ConcurrentDispatch", Site: "svc.Zed", Detail: "go z()"},
+					{Kind: "ConcurrentDispatch", Site: "svc.Alpha", Detail: "go a()"},
+				},
+			},
+			rule: rule(target),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (ConcurrentDispatch at svc.Alpha) — cannot prove the concurrent cone avoids the target",
+			}},
+		},
+		{
+			// Post-extraction correction, pinned deliberately — the same input-order
+			// dependence as above, on the dynamic direct concurrent boundary probe.
+			// The pre-extraction probe walked ix.Edges() and named boundary:zzz;
+			// canonicalBoundaryEdges sorts first, so the representative no longer
+			// depends on producer emission order.
+			name: "canonical dynamic direct boundary over shuffled input",
+			g: &graph.Graph{
+				Nodes: nodes(launcher, target),
+				Edges: []graph.Edge{
+					{From: launcher, To: "boundary:zzz PUBLISH <dynamic>", Boundary: "outbound-async", Concurrent: true},
+					{From: launcher, To: "boundary:aaa PUBLISH <dynamic>", Boundary: "outbound-async", Concurrent: true},
+				},
+			},
+			rule: rule(target),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (unresolved concurrent boundary effect boundary:aaa PUBLISH <dynamic>) — cannot prove the concurrent cone avoids the target",
+			}},
+		},
+		{
+			name: "dead target",
+			g:    &graph.Graph{Nodes: nodes(launcher)},
+			rule: rule("svc.Missing"),
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Caution,
+				Summary:  "no-async: to binds nothing in this graph — name a first-party sink it can bind, or this invariant is vacuous",
+			}},
+		},
+		{
+			name: "require proof escalates blind",
+			g: &graph.Graph{
+				Nodes:      nodes(launcher, worker, target),
+				Edges:      []graph.Edge{{From: launcher, To: worker, Concurrent: true}},
+				BlindSpots: []graph.BlindSpot{{Kind: "reflect", Site: worker, Detail: "opaque dispatch"}},
+			},
+			rule: policy.ConcurrentRule{
+				Name: "no-async", To: []string{target}, RequireProof: true,
+			},
+			want: []Finding{{
+				Rule:     "no_concurrent_reach",
+				Severity: Violation,
+				Summary:  "no-async: no concurrent path found, but the frontier is blind (reflect at svc.Worker) — require_proof is set and avoidance cannot be proven",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Check(concurrentPolicy(tt.rule), graph.NewIndex(tt.g)).Findings
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("concurrent findings mismatch\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
+	}
 }
 
 // A goroutine-spawned function whose cone hits a forbidden boundary fires; the

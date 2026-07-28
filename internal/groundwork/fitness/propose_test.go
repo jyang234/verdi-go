@@ -571,7 +571,8 @@ func TestProposeRecommendsBothReclaimers(t *testing.T) {
 // out-edges stop at the chi router BEFORE its own per-handler `$1` closure (the
 // forward seam), so `Reachable(wrapper)` is starved and never sees the classified
 // `db DELETE` the `$1` closure reaches. fitness, however, binds the
-// `read-routes-stay-read-only` from-entry by NAME-EXPANSION (expandFroms/matchNodes),
+// `read-routes-stay-read-only` from-entry by NAME-EXPANSION (expandFroms, which
+// delegates to facts.BindSources),
 // which pulls the `$1` closure in by prefix — so init used to propose the wrapper
 // as read-only from the starved cone, then fail its own gate over the expanded
 // family. proposeReadOnly must now judge over the same expansion the enforcer
