@@ -439,10 +439,15 @@ func TestFromXKeepsCollidingDisplayGenericInstances(t *testing.T) {
 // instances were produced from, say plainly that this is a disclosed limit rather
 // than a crash, and list what the user can change.
 //
-// It also requires two wordings to be ABSENT. Falling back to "share sort key"
+// The declaration's position is required in its DISPLAY form — "local.go, byte
+// offset N (line M)" — because the reader of this message is a human, and the
+// key's own "local.go:N" reads as a line number.
+//
+// It also requires three wordings to be ABSENT. Falling back to "share sort key"
 // would mean the guard stopped recognizing the class it documents. Asserting an
 // instantiation count — or offering "instantiate it only once" as a remedy —
-// would mean it started claiming a door it cannot establish.
+// would mean it started claiming a door it cannot establish. And the joined
+// `<file>:<number>` rendering must not return.
 func assertResidualDiagnostic(t *testing.T, message string) {
 	t.Helper()
 	for _, want := range []string{

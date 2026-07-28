@@ -374,6 +374,10 @@ func (e *typeGraphEncoder) define(t types.Type) string {
 // them. Qualifying here also separates two package-scope named types with
 // identical underlying structure (type A int, type B int) reached at aligned
 // positions, which would otherwise encode identically.
+//
+// The site reaches the key through localSite.key() and through nothing else. The
+// first local object's raw position is retained alongside it, unused by the
+// encoding, so FirstLocalDeclaration can resolve a display line afterwards.
 func (e *typeGraphEncoder) writeObject(b *strings.Builder, obj *types.TypeName) {
 	if obj == nil {
 		writeFramed(b, "")

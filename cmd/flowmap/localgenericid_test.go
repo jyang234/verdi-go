@@ -244,9 +244,15 @@ func countFQN(t *testing.T, stdout, fqn string) int {
 // counts are the second half — they prove neither instance was quietly merged
 // away, which would be the one failure mode worse than the panic.
 //
-// The n1zeroinst and n1nongencallee rows read the other way round: they are
-// shapes the design must NOT refuse, and their counts are what proves the clean
-// exit came from an absent collision rather than an absent subject.
+// The n1zeroinst, n1nongencallee and n1typeonly rows read the other way round:
+// they are shapes the design must NOT refuse, and their counts are what proves
+// the clean exit came from an absent collision rather than an absent subject.
+//
+// The n1method, n1methodnocall and n1recv rows are the rta/vta half of subjects
+// cha refuses: exactly one function is built at the local type here, and the
+// residual test asserts the second one and the refusal under cha. Together the
+// two tests are what makes the blast radius a mechanism rather than a shape
+// list — see "The uninstantiated-body sub-case" in the design.
 func TestLocalGenericIdentityWitnessesGraph(t *testing.T) {
 	tests := []struct {
 		name  string
