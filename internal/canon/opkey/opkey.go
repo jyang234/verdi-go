@@ -394,22 +394,27 @@ func route(attrs map[string]string) string {
 }
 
 // destination reads the messaging destination (topic/queue) that identifies a
-// broker interaction. The low-cardinality messaging.destination.template is
-// preferred over the physical messaging.destination.name, in the order the
-// messaging semantic conventions give for the {destination} part of a span name:
-// instrumentation records a template exactly when the physical name is NOT
-// guaranteed low-cardinality (a broker-generated per-event-type/version topic, a
-// per-consumer queue), and the template is then the stable identity — the same
-// property normalizeDestination recovers heuristically by templating ids out of
-// a physical name. A span carrying only the template (a consumer reaching the
-// broker through an API that never reveals the queue name) previously yielded ""
-// and rendered as a bare "PUBLISH " / "CONSUME " with no destination at all.
-// The legacy messaging.destination spelling is accepted last.
+// broker interaction. messaging.destination.name (and its legacy spelling
+// messaging.destination) is consulted first; the low-cardinality
+// messaging.destination.template is a FALLBACK, consulted only when neither is
+// set, so a span that records its destination only as a template (a consumer
+// reaching the broker through an API that never reveals the queue name) keys on
+// it instead of yielding "" and rendering as a bare "PUBLISH " / "CONSUME ".
+//
+// The template deliberately does NOT outrank the name, although the messaging
+// semantic conventions rank it first for a span name: the static side of the
+// behavioral-impeachment join (impeach.BusEffectKey) and of coverage keys a bus
+// effect on the event literal in the code, which is what instrumentation puts in
+// messaging.destination.name. Re-keying a span that carries both onto the template
+// would silently unmatch every such publish from its static effect — no
+// impeachment witness, a forever-unexercised coverage row — the worst outcome
+// (CLAUDE.md, a confidently wrong silent result). Pinned by
+// TestDestinationTemplateIsFallbackOnly.
 func destination(attrs map[string]string) string {
 	return first(attrs,
-		"messaging.destination.template",
 		"messaging.destination.name",
-		"messaging.destination")
+		"messaging.destination",
+		"messaging.destination.template")
 }
 
 // destUUID matches a canonical UUID, which embeds '-' and so must be collapsed

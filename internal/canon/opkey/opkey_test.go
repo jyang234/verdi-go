@@ -343,36 +343,36 @@ func TestDestinationTemplateAlone(t *testing.T) {
 	}
 }
 
-// TestDestinationTemplatePreferredOverName pins the precedence: when a span sets
-// both, the low-cardinality template labels the op, not the physical name — the
-// order the messaging semantic conventions give for the span-name {destination},
-// and the same stable identity normalizeDestination recovers heuristically from a
-// physical name that bakes in an id. The legacy messaging.destination spelling
-// ranks last.
-func TestDestinationTemplatePreferredOverName(t *testing.T) {
+// TestDestinationTemplateIsFallbackOnly pins the precedence: the template fills
+// the label only when NEITHER messaging.destination.name nor the legacy
+// messaging.destination is set. A span carrying both keeps keying on the name —
+// the event literal the static side of the impeachment join and coverage key on —
+// so consulting the template changes no existing label and unmatches no existing
+// static×behavioral pair.
+func TestDestinationTemplateIsFallbackOnly(t *testing.T) {
 	op, _ := Of(ir.KindProducer, map[string]string{
-		"messaging.destination.template": "orders.created",
-		"messaging.destination.name":     "orders-created-v3-8f2c1a9e",
+		"messaging.destination.template": "orders.{event}",
+		"messaging.destination.name":     "orders.created",
 		"messaging.destination":          "legacy",
 	}, "")
 	if op != "PUBLISH orders.created" {
-		t.Errorf("op = %q, want the template (PUBLISH orders.created)", op)
+		t.Errorf("op = %q, want the name (PUBLISH orders.created) over the template", op)
 	}
 	op, _ = Of(ir.KindProducer, map[string]string{
-		"messaging.destination.name": "orders-created",
-		"messaging.destination":      "legacy",
+		"messaging.destination.template": "orders.{event}",
+		"messaging.destination":          "legacy",
 	}, "")
-	if op != "PUBLISH orders-created" {
-		t.Errorf("op = %q, want the name over the legacy spelling", op)
+	if op != "PUBLISH legacy" {
+		t.Errorf("op = %q, want the legacy spelling over the template", op)
 	}
-	// An empty template is "absent", not a blank label: the lookup falls through
-	// to the name rather than keying the op on "".
+	// An empty name is "absent", not a blank label: the lookup falls through to
+	// the template rather than keying the op on "".
 	op, _ = Of(ir.KindProducer, map[string]string{
-		"messaging.destination.template": "",
-		"messaging.destination.name":     "orders-created",
+		"messaging.destination.name":     "",
+		"messaging.destination.template": "orders.{event}",
 	}, "")
-	if op != "PUBLISH orders-created" {
-		t.Errorf("op = %q, want fall-through past an empty template", op)
+	if op != "PUBLISH orders.{event}" {
+		t.Errorf("op = %q, want fall-through past an empty name to the template", op)
 	}
 }
 
