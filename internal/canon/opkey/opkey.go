@@ -393,8 +393,28 @@ func route(attrs map[string]string) string {
 	return url.Template(first(attrs, "url.path", "http.target", "url.full"))
 }
 
+// destination reads the messaging destination (topic/queue) that identifies a
+// broker interaction. messaging.destination.name (and its legacy spelling
+// messaging.destination) is consulted first; the low-cardinality
+// messaging.destination.template is a FALLBACK, consulted only when neither is
+// set, so a span that records its destination only as a template (a consumer
+// reaching the broker through an API that never reveals the queue name) keys on
+// it instead of yielding "" and rendering as a bare "PUBLISH " / "CONSUME ".
+//
+// The template deliberately does NOT outrank the name, although the messaging
+// semantic conventions rank it first for a span name: the static side of the
+// behavioral-impeachment join (impeach.BusEffectKey) and of coverage keys a bus
+// effect on the event literal in the code, which is what instrumentation puts in
+// messaging.destination.name. Re-keying a span that carries both onto the template
+// would silently unmatch every such publish from its static effect — no
+// impeachment witness, a forever-unexercised coverage row — the worst outcome
+// (CLAUDE.md, a confidently wrong silent result). Pinned by
+// TestDestinationTemplateIsFallbackOnly.
 func destination(attrs map[string]string) string {
-	return first(attrs, "messaging.destination.name", "messaging.destination")
+	return first(attrs,
+		"messaging.destination.name",
+		"messaging.destination",
+		"messaging.destination.template")
 }
 
 // destUUID matches a canonical UUID, which embeds '-' and so must be collapsed

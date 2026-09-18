@@ -1222,6 +1222,51 @@ func TestBehaviorIngestMerged(t *testing.T) {
 	}
 }
 
+// TestBehaviorIngestDestinationTemplate: a capture whose messaging spans record
+// the destination only in messaging.destination.template (the low-cardinality
+// spelling the OTel messaging conventions prefer) must label the exercised
+// effects with it. Before the template was consulted every such effect rendered
+// as a bare "PUBLISH " / "CONSUME " — an empty label that made every messaging
+// edge in a flow look alike. The trace is the two-span reproduction from the
+// report: a producer and a consumer in separate traces, joined by a span link.
+func TestBehaviorIngestDestinationTemplate(t *testing.T) {
+	dir := t.TempDir()
+	trace := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"publisher"}}]},"scopeSpans":[{"scope":{"name":"demo"},"spans":[
+{"traceId":"11111111111111111111111111111111","spanId":"1111111111111111","name":"publish orders","kind":4,"startTimeUnixNano":"1789740000000000000","endTimeUnixNano":"1789740000001000000","attributes":[
+{"key":"flowmap.flow","value":{"stringValue":"minimal"}},
+{"key":"messaging.system","value":{"stringValue":"demo.bus"}},
+{"key":"messaging.operation.name","value":{"stringValue":"publish"}},
+{"key":"messaging.operation.type","value":{"stringValue":"send"}},
+{"key":"messaging.destination.template","value":{"stringValue":"orders"}}]}]}]}]}
+{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"consumer"}}]},"scopeSpans":[{"scope":{"name":"demo"},"spans":[
+{"traceId":"22222222222222222222222222222222","spanId":"2222222222222222","name":"process orders","kind":5,"startTimeUnixNano":"1789740000002000000","endTimeUnixNano":"1789740000003000000","links":[{"traceId":"11111111111111111111111111111111","spanId":"1111111111111111"}],"attributes":[
+{"key":"flowmap.flow","value":{"stringValue":"minimal"}},
+{"key":"messaging.system","value":{"stringValue":"demo.bus"}},
+{"key":"messaging.operation.name","value":{"stringValue":"process"}},
+{"key":"messaging.operation.type","value":{"stringValue":"process"}},
+{"key":"messaging.destination.template","value":{"stringValue":"orders"}}]}]}]}]}
+`
+	tf := filepath.Join(dir, "minimal.otlp.json")
+	if err := os.WriteFile(tf, []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := run([]string{"behavior", "ingest", tf}); err != nil {
+			t.Errorf("ingest: %v", err)
+		}
+	})
+	for _, want := range []string{"\n  PUBLISH orders\n", "\n  CONSUME orders\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exercised effects missing %q:\n%s", strings.TrimSpace(want), out)
+		}
+	}
+	for _, bare := range []string{"\n  PUBLISH \n", "\n  CONSUME \n"} {
+		if strings.Contains(out, bare) {
+			t.Errorf("an effect rendered with an empty destination:\n%s", out)
+		}
+	}
+}
+
 // TestBehaviorIngestContractSkipsBadDir: a --contracts overlay dir that fails to
 // load is a non-gated view concern — it must warn-and-skip, not fail the ingest.
 func TestBehaviorIngestContractSkipsBadDir(t *testing.T) {

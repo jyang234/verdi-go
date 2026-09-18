@@ -33,6 +33,7 @@ attributes:
 - HTTP server/client: `http.request.method`, `http.route`, `peer.service`
 - DB: `db.system`, `db.statement`
 - messaging: span kind producer/consumer + `messaging.destination.name`
+  (`messaging.destination.template` is read only when no name is set)
 
 That is the only production-code change. flowmap's analysis and harness are
 test-time.
