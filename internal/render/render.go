@@ -110,7 +110,10 @@ type renderer struct {
 	// participants no edge touches. The per-service Mermaid renderer declares its
 	// fixed caller/self/peer set up front and draws to each, so it reads nothing from
 	// ref.
-	ref map[string]bool
+	ref         map[string]bool
+	synthCaller string
+	synthKids   map[*ir.CanonicalSpan]bool // direct children of a synthesised root
+
 }
 
 // newRenderer returns a renderer with its maps initialized.
@@ -213,13 +216,23 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	bodyFrom := childFrom(root, fallback)
 	// A synthesized root (ingest's internal stand-in when a flow has no single
 	// inbound entry — several entry points, or an event-only flow) is not a
-	// participant; it represents the external caller that drove those entries. Draw
-	// its children straight from the caller and drop its meaningless slug root-hop, so
-	// a multi-entry flow reads "Client ->> svc: …" rather than the flow slug calling
-	// into the system.
+	// participant and draws no root-hop of its own (its slug would otherwise read as
+	// a caller into the system). Each of its direct children is an independent
+	// parentless span and is issued from the lifeline synthChildFrom gives it: an
+	// inbound entry from the external caller (so a multi-entry flow still reads
+	// "Client ->> svc: …"), timer/outbox work with no inbound span from the service
+	// that emitted it. r.synthKids marks those children so the hop renderers apply
+	// the per-child origin; serviceInfra seeds ownership from the same rule.
 	synth := isSynthRoot(root)
 	if synth {
 		entry, bodyFrom = caller, caller
+		r.synthCaller = caller
+		r.synthKids = map[*ir.CanonicalSpan]bool{}
+		for _, g := range root.Children {
+			for _, m := range g.Members {
+				r.synthKids[m] = true
+			}
+		}
 	}
 
 	// Plan the participant layout family-adjacent: the synthetic caller, then each
@@ -231,7 +244,7 @@ func systemMermaidCore(caller string, root *ir.CanonicalSpan, fallback string) s
 	// the plan is built (so an id is stable); declarations are emitted only for the
 	// lifelines r.ref says an arrow or note touched, so an over-declared peer is
 	// pruned rather than drawn as a bare, dangling line.
-	services, ownedDB, brokerPeers, peers := serviceInfra(root, fallback)
+	services, ownedDB, brokerPeers, peers := serviceInfra(root, caller, fallback)
 	// Unify a messaging broker peer with the same-named service (event_bus -> event-bus)
 	// before any alias is assigned, so both resolve to one participant. In a fragment
 	// where the bus owns no spans there is no service to unify onto, so a same-named
@@ -399,14 +412,16 @@ func landingOf(s *ir.CanonicalSpan, fallback string) string {
 // it originates from one service. A database touched by more than one service, a
 // database that is itself a service, and every non-database peer (the broker,
 // external services) are shared and left unboxed.
-func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]bool, ownedDB map[string][]string, brokerPeers, peers map[string]bool) {
+func serviceInfra(root *ir.CanonicalSpan, caller, fallback string) (services map[string]bool, ownedDB map[string][]string, brokerPeers, peers map[string]bool) {
 	services = map[string]bool{}
 	brokerPeers = map[string]bool{}
 	peers = map[string]bool{}                // service-like counterparty lifelines (non-db), for separator-fold unification
 	dbOwners := map[string]map[string]bool{} // db lifeline -> owning services
 	// from is the lifeline an inbound hop into s was drawn from — the same threaded
 	// parent landing the renderer uses (writeSystemSpan), so ownership agrees with the
-	// arrow actually drawn.
+	// arrow actually drawn. A synthesized root's direct children are seeded through
+	// synthChildFrom, exactly as the body draws them (pinned by
+	// TestSystemMermaidSynthRootOwnershipMatchesArrows).
 	var walk func(s *ir.CanonicalSpan, from string)
 	walk = func(s *ir.CanonicalSpan, from string) {
 		if s == nil {
@@ -446,6 +461,10 @@ func serviceInfra(root *ir.CanonicalSpan, fallback string) (services map[string]
 		cf := childFrom(s, fallback)
 		for _, g := range s.Children {
 			for _, m := range g.Members {
+				if s == root && isSynthRoot(root) {
+					walk(m, synthChildFrom(m, caller, fallback))
+					continue
+				}
 				walk(m, cf)
 			}
 		}
@@ -576,6 +595,9 @@ func (r *renderer) writeMembers(b *strings.Builder, g ir.ChildGroup, members []*
 // draws no redundant arrow (and so no async note); for a real link-stitched consumer
 // that never coincides, since it lands on its own service.
 func (r *renderer) writeAsyncSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
+	if r.synthKids[m] {
+		from = synthChildFrom(m, r.synthCaller, fallback)
+	}
 	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		b.WriteString(indent + r.amsg(from, drawTo, label(m)))
 		b.WriteString(indent + "Note over " + r.id(drawTo) + ": async (FOLLOWS_FROM)\n")
@@ -634,6 +656,9 @@ func childFrom(m *ir.CanonicalSpan, fallback string) string {
 // entry span, or an internal self-op — no redundant arrow is drawn; the call that
 // arrived there is enough.
 func (r *renderer) writeSystemSpan(b *strings.Builder, m *ir.CanonicalSpan, from, fallback, indent string) {
+	if r.synthKids[m] {
+		from = synthChildFrom(m, r.synthCaller, fallback)
+	}
 	cf := childFrom(m, fallback)
 	if drawTo := drawTarget(m, from, fallback); drawTo != from {
 		text := label(m)
@@ -789,6 +814,25 @@ func annotateError(op string, s *ir.CanonicalSpan) string {
 		return op + " [" + et + "]"
 	}
 	return op
+}
+
+// synthChildFrom is the lifeline a synthesised root's direct child is issued from:
+// each child is an independent parentless span, so it is drawn exactly as it would
+// be as a natural root of its own. An inbound entry (server/consumer) keeps the
+// trigger callerLabel gives a root (Client, or the consumed broker); any other kind
+// — an outbound call or publish that no inbound span caused (a timer, an outbox
+// relay) — is issued by the service that emitted it, the only lifeline the capture
+// actually attests. That is the same per-span attribution the system-context
+// graph already uses, so the two views agree on who performed the hop, and it
+// puts an exclusively-touched store back in its owner's box.
+func synthChildFrom(m *ir.CanonicalSpan, caller, fallback string) string {
+	switch m.Kind {
+	case ir.KindServer:
+		return caller
+	case ir.KindConsumer:
+		return callerLabel(m)
+	}
+	return lifelineLabel(m.Service, fallback)
 }
 
 // isSynthRoot reports whether root is the internal stand-in ingest synthesizes when a

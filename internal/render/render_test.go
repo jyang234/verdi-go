@@ -500,6 +500,68 @@ func TestSystemMermaidSynthRootDrawsFromClient(t *testing.T) {
 	}
 }
 
+// TestSystemMermaidSynthRootIssuesUncalledWorkFromItsService: under a synthesized
+// root, a parentless outbound span that no inbound span caused (a timer's DB poll,
+// an outbox relay's publish) is issued from the service that emitted it — the only
+// origin the capture attests — not from a fictional external Client. The service
+// then appears in the diagram and exclusively owns its store, so the box and the
+// arrows agree. No Client lifeline is drawn: nothing called in.
+func TestSystemMermaidSynthRootIssuesUncalledWorkFromItsService(t *testing.T) {
+	poll := &ir.CanonicalSpan{Op: "DB postgresql SELECT outbox", Kind: ir.KindClient, Peer: "postgresql", Service: "scheduler"}
+	pub := &ir.CanonicalSpan{Op: "PUBLISH orders.created", Kind: ir.KindProducer, Peer: "demo.bus", Service: "scheduler"}
+	root := &ir.CanonicalSpan{Op: "outbox", Kind: ir.KindInternal, // Service "" => synthesized
+		Children: []ir.ChildGroup{{Unordered: true, Members: []*ir.CanonicalSpan{poll, pub}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "scheduler", Root: root})
+	mustContain(t, out, "scheduler->>postgresql: DB postgresql SELECT outbox")
+	mustContain(t, out, "scheduler->>demo_bus: PUBLISH orders.created")
+	mustContain(t, out, "box transparent scheduler\n    participant scheduler as scheduler\n    participant postgresql as postgresql\n    end")
+	if strings.Contains(out, "Client") {
+		t.Errorf("no span was called in, so no Client lifeline may be drawn:\n%s", out)
+	}
+}
+
+// TestSystemMermaidSynthRootEntriesKeepTheirTrigger pins the kind split of the
+// per-child origin: a synthesized root's inbound entries keep the trigger a natural
+// root gets (Client for a server span, the consumed broker for a consumer span),
+// while an uncalled sibling publish issues from its own service. A service that
+// consumes its own events and publishes on a schedule has both shapes in one flow,
+// and neither entry is invented or suppressed to make the other tidy.
+func TestSystemMermaidSynthRootEntriesKeepTheirTrigger(t *testing.T) {
+	api := &ir.CanonicalSpan{Op: "HTTP POST /orders", Kind: ir.KindServer, Service: "orders"}
+	sub := &ir.CanonicalSpan{Op: "CONSUME orders.created", Kind: ir.KindConsumer, Peer: "Bus", Service: "orders"}
+	tick := &ir.CanonicalSpan{Op: "PUBLISH orders.created", Kind: ir.KindProducer, Peer: "Bus", Service: "orders"}
+	root := &ir.CanonicalSpan{Op: "orders", Kind: ir.KindInternal,
+		Children: []ir.ChildGroup{{Concurrent: true, Members: []*ir.CanonicalSpan{api, sub, tick}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "orders", Root: root})
+	mustContain(t, out, "Client->>orders: HTTP POST /orders")
+	mustContain(t, out, "Bus->>orders: CONSUME orders.created")
+	mustContain(t, out, "orders->>Bus: PUBLISH orders.created")
+}
+
+// TestSystemMermaidSynthRootOwnershipMatchesArrows: serviceInfra seeds a synthesized
+// root's children from the same per-child origin the body draws them from, so a
+// store touched by exactly one service is boxed with it whether that service was
+// called in or ran on its own — and a store each service touches under its own name
+// stays with its owner rather than collapsing into one loose lifeline.
+func TestSystemMermaidSynthRootOwnershipMatchesArrows(t *testing.T) {
+	poll := &ir.CanonicalSpan{Op: "DB postgresql SELECT outbox", Kind: ir.KindClient, Peer: "postgresql", Service: "scheduler"}
+	ins := &ir.CanonicalSpan{Op: "DB postgresql INSERT orders", Kind: ir.KindClient, Peer: "postgresql/consumer_db", Service: "consumer"}
+	sub := &ir.CanonicalSpan{Op: "CONSUME orders.created", Kind: ir.KindConsumer, Peer: "demo.bus", Service: "consumer", Async: true,
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{ins}}}}
+	pub := &ir.CanonicalSpan{Op: "PUBLISH orders.created", Kind: ir.KindProducer, Peer: "demo.bus", Service: "scheduler",
+		Children: []ir.ChildGroup{{Members: []*ir.CanonicalSpan{sub}}}}
+	root := &ir.CanonicalSpan{Op: "chain", Kind: ir.KindInternal,
+		Children: []ir.ChildGroup{{Unordered: true, Members: []*ir.CanonicalSpan{poll, pub}}}}
+	out := SystemMermaid(&ir.CanonicalTrace{Service: "chain", Root: root})
+	mustContain(t, out, "box transparent scheduler\n    participant scheduler as scheduler\n    participant postgresql as postgresql\n    end")
+	mustContain(t, out, "box transparent consumer\n    participant consumer as consumer\n    participant postgresql_consumer_db as postgresql/consumer_db\n    end")
+	mustContain(t, out, "scheduler->>postgresql: DB postgresql SELECT outbox")
+	mustContain(t, out, "scheduler--)consumer: CONSUME orders.created")
+	if strings.Contains(out, "chain") {
+		t.Errorf("the flow slug must not render as a participant or caller:\n%s", out)
+	}
+}
+
 // TestSystemMermaidBrokerMergesAcrossSeparatorSpelling: a broker peer from
 // messaging.system (event_bus, snake_case) and the service.name of the same broker
 // (event-bus, hyphen) sanitize to one Mermaid id, so they unify into a single
