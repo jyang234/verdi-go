@@ -303,6 +303,79 @@ func TestConsumeKey(t *testing.T) {
 	}
 }
 
+// TestDestinationTemplateAlone: a span that records its destination ONLY in
+// messaging.destination.template (a consumer reaching the broker through an API
+// that never reveals the physical queue name) must key on the template, not
+// render as a bare "PUBLISH " / "CONSUME " with an empty destination.
+func TestDestinationTemplateAlone(t *testing.T) {
+	cases := []struct {
+		kind ir.Kind
+		typ  string
+		want string
+	}{
+		{ir.KindProducer, "send", "PUBLISH orders"},
+		{ir.KindConsumer, "process", "CONSUME orders"},
+		// The AWS-SDK shape: a CLIENT-kind span whose only messaging identity is
+		// the template must still be recognized as a broker interaction.
+		{ir.KindClient, "send", "PUBLISH orders"},
+		{ir.KindClient, "settle", "SETTLE orders"},
+	}
+	for _, c := range cases {
+		attrs := map[string]string{
+			"messaging.system":               "demo.bus",
+			"messaging.operation.type":       c.typ,
+			"messaging.destination.template": "orders",
+		}
+		op, peer := Of(c.kind, attrs, "raw span name")
+		if op != c.want || peer != "demo.bus" {
+			t.Errorf("%v/%s: op=%q peer=%q, want op=%q peer=demo.bus", c.kind, c.typ, op, peer, c.want)
+		}
+		if strings.TrimSpace(op) != op {
+			t.Errorf("%v/%s: op %q carries a dangling prefix (empty destination)", c.kind, c.typ, op)
+		}
+	}
+	// EffectiveKind shares isMessaging with Of, so the template-only span must
+	// normalize to the messaging role rather than pass its raw kind through.
+	if k := EffectiveKind(ir.KindClient, map[string]string{
+		"messaging.destination.template": "orders", "messaging.operation.type": "process",
+	}); k != ir.KindConsumer {
+		t.Errorf("EffectiveKind(template-only process) = %v, want consumer", k)
+	}
+}
+
+// TestDestinationTemplatePreferredOverName pins the precedence: when a span sets
+// both, the low-cardinality template labels the op, not the physical name — the
+// order the messaging semantic conventions give for the span-name {destination},
+// and the same stable identity normalizeDestination recovers heuristically from a
+// physical name that bakes in an id. The legacy messaging.destination spelling
+// ranks last.
+func TestDestinationTemplatePreferredOverName(t *testing.T) {
+	op, _ := Of(ir.KindProducer, map[string]string{
+		"messaging.destination.template": "orders.created",
+		"messaging.destination.name":     "orders-created-v3-8f2c1a9e",
+		"messaging.destination":          "legacy",
+	}, "")
+	if op != "PUBLISH orders.created" {
+		t.Errorf("op = %q, want the template (PUBLISH orders.created)", op)
+	}
+	op, _ = Of(ir.KindProducer, map[string]string{
+		"messaging.destination.name": "orders-created",
+		"messaging.destination":      "legacy",
+	}, "")
+	if op != "PUBLISH orders-created" {
+		t.Errorf("op = %q, want the name over the legacy spelling", op)
+	}
+	// An empty template is "absent", not a blank label: the lookup falls through
+	// to the name rather than keying the op on "".
+	op, _ = Of(ir.KindProducer, map[string]string{
+		"messaging.destination.template": "",
+		"messaging.destination.name":     "orders-created",
+	}, "")
+	if op != "PUBLISH orders-created" {
+		t.Errorf("op = %q, want fall-through past an empty template", op)
+	}
+}
+
 func TestRPCKey(t *testing.T) {
 	op, peer := Of(ir.KindClient, map[string]string{
 		"rpc.system":  "grpc",

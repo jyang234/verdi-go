@@ -393,8 +393,23 @@ func route(attrs map[string]string) string {
 	return url.Template(first(attrs, "url.path", "http.target", "url.full"))
 }
 
+// destination reads the messaging destination (topic/queue) that identifies a
+// broker interaction. The low-cardinality messaging.destination.template is
+// preferred over the physical messaging.destination.name, in the order the
+// messaging semantic conventions give for the {destination} part of a span name:
+// instrumentation records a template exactly when the physical name is NOT
+// guaranteed low-cardinality (a broker-generated per-event-type/version topic, a
+// per-consumer queue), and the template is then the stable identity — the same
+// property normalizeDestination recovers heuristically by templating ids out of
+// a physical name. A span carrying only the template (a consumer reaching the
+// broker through an API that never reveals the queue name) previously yielded ""
+// and rendered as a bare "PUBLISH " / "CONSUME " with no destination at all.
+// The legacy messaging.destination spelling is accepted last.
 func destination(attrs map[string]string) string {
-	return first(attrs, "messaging.destination.name", "messaging.destination")
+	return first(attrs,
+		"messaging.destination.template",
+		"messaging.destination.name",
+		"messaging.destination")
 }
 
 // destUUID matches a canonical UUID, which embeds '-' and so must be collapsed
