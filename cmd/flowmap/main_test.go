@@ -1318,6 +1318,47 @@ func TestBehaviorIngestSynthesizedLifeline(t *testing.T) {
 	}
 }
 
+// TestBehaviorIngestSynthesizedRootOwnsStore: a service whose work begins on a
+// timer (an outbox relay: a parentless DB poll and a parentless publish, no inbound
+// span) gets a synthesized root. Its spans must be drawn from the service that
+// emitted them, with its store boxed as exclusively owned — not from a generic
+// Client lifeline that leaves the store loose and the service unnamed. End to end
+// through canon, which also prunes any untagged internal wrapper span, so the
+// outbound spans really do hang directly off the synthesized root.
+func TestBehaviorIngestSynthesizedRootOwnsStore(t *testing.T) {
+	silenceStdout(t)
+	dir := t.TempDir()
+	trace := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"scheduler"}}]},"scopeSpans":[{"spans":[
+        {"traceId":"aa","spanId":"02","name":"q","kind":3,"startTimeUnixNano":"2000","endTimeUnixNano":"3000","attributes":[{"key":"flowmap.flow","value":{"stringValue":"outbox"}},{"key":"db.system","value":{"stringValue":"postgresql"}},{"key":"db.statement","value":{"stringValue":"SELECT id FROM outbox WHERE sent = false"}}]},
+        {"traceId":"bb","spanId":"03","name":"pub","kind":4,"startTimeUnixNano":"3000","endTimeUnixNano":"4000","attributes":[{"key":"flowmap.flow","value":{"stringValue":"outbox"}},{"key":"messaging.system","value":{"stringValue":"demo.bus"}},{"key":"messaging.operation.type","value":{"stringValue":"send"}},{"key":"messaging.destination.name","value":{"stringValue":"orders.created"}}]}
+      ]}]}]}`
+	tf := filepath.Join(dir, "t.json")
+	if err := os.WriteFile(tf, []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	if err := run([]string{"behavior", "ingest", "--render-dir", out, tf}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "outbox.system.flow.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"box transparent scheduler\n    participant scheduler as scheduler\n    participant postgresql as postgresql\n    end",
+		"scheduler->>postgresql: DB postgresql SELECT outbox",
+		"scheduler->>demo_bus: PUBLISH orders.created",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Client") {
+		t.Errorf("timer-driven work has no external caller; Client must not be drawn:\n%s", got)
+	}
+}
+
 // TestLoadGraphJSONStrict pins the --diff base forward-compatibility guard: a base
 // from a NEWER flowmap (an unknown field) is rejected rather than silently decoded
 // with that field dropped, which would produce a confidently-wrong delta. A clean
